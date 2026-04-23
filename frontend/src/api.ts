@@ -29,6 +29,7 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
   return data
 }
 
-export function projectHeaders(projectId: number): HeadersInit {
+/** 返回普通对象；请在组件内用 useMemo(() => projectHeaders(pid), [pid]) 包裹，避免每次 render 触发无限请求。 */
+export function projectHeaders(projectId: number): Record<string, string> {
   return { 'X-Project-Id': String(projectId) }
 }
