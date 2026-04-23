@@ -4,13 +4,34 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+
+from app.deps import ProjectDB, get_project_write
 
 from app.config import DASHSCOPE_API_KEY, QWEN_MODEL
 from app.services import qwen_client
+from app.services.agent_runner import run_agent_sse
 
 router = APIRouter()
+
+
+class ChatBody(BaseModel):
+    message: str = Field(min_length=1, max_length=8000)
+
+
+@router.post("/chat")
+def agent_chat(body: ChatBody, p: ProjectDB = Depends(get_project_write)):
+    if not DASHSCOPE_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="未配置 DASHSCOPE_API_KEY",
+        )
+    return StreamingResponse(
+        run_agent_sse(body.message, p),
+        media_type="text/event-stream",
+    )
 
 
 class DiagnosticsRunBody(BaseModel):
