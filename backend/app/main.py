@@ -1,5 +1,7 @@
 """FastAPI entrypoint. API lives under /api for alignment with Nginx reverse proxy."""
 
+import app.config  # noqa: F401 — 尽早加载 backend/.env
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 

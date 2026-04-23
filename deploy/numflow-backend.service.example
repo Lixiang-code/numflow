@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/www/wwwroot/numflow/backend
+EnvironmentFile=-/www/wwwroot/numflow/backend/.env
 Environment=PATH=/www/wwwroot/numflow/backend/venv/bin
 ExecStart=/www/wwwroot/numflow/backend/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 Restart=on-failure

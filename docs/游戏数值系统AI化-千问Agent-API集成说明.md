@@ -17,11 +17,7 @@
 - **集成代码中禁止写死**：在服务器 `.env` 或进程环境中配置 `DASHSCOPE_API_KEY`，由 FastAPI 启动时加载（与 `04-前后端框架与部署` 中 LLM Key 约定一致）。
 - **安全**：若该文件或主文档会进入共享仓库或网盘，请在百炼控制台 **轮换 API Key**，并删除一切明文副本。
 
-**附录：当前密钥明文（迁移后即删本段）**
-
-```env
-DASHSCOPE_API_KEY=sk-3288abcec8d145e6b7ebe5df774ab832
-```
+**附录（已移除明文密钥）**：请在服务器 `backend/.env` 或进程环境中配置 `DASHSCOPE_API_KEY`；若密钥曾出现在共享仓库中，请在百炼控制台轮换。
 
 ---
 
@@ -195,6 +191,17 @@ text = completion.choices[0].message.content
 
 ---
 
-## 6. 建议的后续整理
+## 6. Numflow 后端自检（已实现）
+
+| 方法 | 路径 | 作用 |
+|------|------|------|
+| `GET` | `/api/agent/diagnostics` | 是否已配置 `DASHSCOPE_API_KEY`、当前模型名（不发起外呼） |
+| `POST` | `/api/agent/diagnostics/run` | 内置中文提示词：短对话验证连通性；两轮相同长 `system`（`cache_control: ephemeral`）对比 `usage`，返回 `cache_summary` 与完整 `cache_rounds` |
+
+密钥从 `backend/.env` 或 systemd `EnvironmentFile` 加载；**勿将 `.env` 提交仓库**。
+
+---
+
+## 7. 建议的后续整理
 
 将《游戏数值系统 AI 化自动开发.md》中从「账号设置」起的整段阿里云教程删除，仅保留一行链接指向本文或官方文档，避免重复与密钥扩散。
