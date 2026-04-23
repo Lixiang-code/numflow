@@ -45,7 +45,9 @@ export default function Register() {
           <input value={invite} onChange={(e) => setInvite(e.target.value)} />
         </label>
         {err && <p className="err">{err}</p>}
-        <button type="submit">注册并登录</button>
+        <button type="submit" className="btn primary">
+          注册并登录
+        </button>
       </form>
       <p className="muted">
         已有账号？<Link to="/login">登录</Link>

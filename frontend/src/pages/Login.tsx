@@ -40,7 +40,9 @@ export default function Login() {
           />
         </label>
         {err && <p className="err">{err}</p>}
-        <button type="submit">进入</button>
+        <button type="submit" className="btn primary">
+          进入
+        </button>
       </form>
       <p className="muted">
         没有账号？<Link to="/register">注册</Link>
