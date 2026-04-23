@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { apiFetch, projectHeaders } from '../api'
 
@@ -7,7 +7,8 @@ type TableInfo = { table_name: string; validation_status: string; layer: string 
 export default function Workbench() {
   const { projectId } = useParams()
   const pid = Number(projectId)
-  const hdr = projectHeaders(pid)
+  /** 必须 memo：否则每次 render 新 headers 对象会触发 effect/useCallback 无限循环 → 浏览器 ERR_INSUFFICIENT_RESOURCES */
+  const headers = useMemo(() => projectHeaders(pid), [pid])
 
   const [tables, setTables] = useState<TableInfo[]>([])
   const [selected, setSelected] = useState<string | null>(null)
@@ -26,33 +27,40 @@ export default function Workbench() {
   const [err, setErr] = useState<string | null>(null)
 
   const loadTables = useCallback(async () => {
-    const d = (await apiFetch('/meta/tables', { headers: hdr })) as { tables: TableInfo[] }
+    const d = (await apiFetch('/meta/tables', { headers })) as { tables: TableInfo[] }
     setTables(d.tables)
     setSelected((sel) => sel ?? (d.tables[0]?.table_name ?? null))
-  }, [hdr])
+  }, [headers])
 
   const loadGlobal = useCallback(async () => {
-    const cfg = (await apiFetch('/meta/project-config', { headers: hdr })) as {
+    const cfg = (await apiFetch('/meta/project-config', { headers })) as {
       settings: Record<string, { text?: string } | unknown>
     }
     const g = cfg.settings.global_readme as { text?: string } | undefined
     setGlobalReadme(g?.text || '')
-  }, [hdr])
+  }, [headers])
 
   const loadPipeline = useCallback(async () => {
-    const s = (await apiFetch('/pipeline/status', { headers: hdr })) as {
+    const s = (await apiFetch('/pipeline/status', { headers })) as {
       next_expected_step: string | null
       completed_steps: string[]
       finished: boolean
     }
     setPipeline(s)
-  }, [hdr])
+  }, [headers])
 
   useEffect(() => {
     if (!Number.isFinite(pid)) return
-    loadTables().catch((e) => setErr(String(e)))
-    loadGlobal().catch((e) => setErr(String(e)))
-    loadPipeline().catch((e) => setErr(String(e)))
+    let cancelled = false
+    setErr(null)
+    setTables([])
+    setSelected(null)
+    void Promise.all([loadTables(), loadGlobal(), loadPipeline()]).catch((e) => {
+      if (!cancelled) setErr(String(e))
+    })
+    return () => {
+      cancelled = true
+    }
   }, [pid, loadTables, loadGlobal, loadPipeline])
 
   useEffect(() => {
@@ -65,10 +73,10 @@ export default function Workbench() {
     ;(async () => {
       try {
         const r = (await apiFetch(`/data/tables/${encodeURIComponent(selected)}/rows?limit=200`, {
-          headers: hdr,
+          headers,
         })) as { rows: Record<string, unknown>[] }
         const m = (await apiFetch(`/meta/tables/${encodeURIComponent(selected)}/readme`, {
-          headers: hdr,
+          headers,
         })) as { readme: string }
         if (!cancelled) {
           setRows(r.rows)
@@ -81,7 +89,7 @@ export default function Workbench() {
     return () => {
       cancelled = true
     }
-  }, [selected, hdr])
+  }, [selected, headers])
 
   async function advancePipeline() {
     if (!pipeline?.next_expected_step) return
@@ -89,7 +97,7 @@ export default function Workbench() {
     try {
       await apiFetch('/pipeline/advance', {
         method: 'POST',
-        headers: hdr,
+        headers,
         body: JSON.stringify({ step: pipeline.next_expected_step }),
       })
       await loadPipeline()
@@ -110,7 +118,7 @@ export default function Workbench() {
       const res = await fetch('/api/agent/chat', {
         method: 'POST',
         credentials: 'include',
-        headers: { ...hdr, 'Content-Type': 'application/json' },
+        headers: { ...headers, 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: msg }),
       })
       if (!res.ok) throw new Error(await res.text())
@@ -177,7 +185,15 @@ export default function Workbench() {
       <div className="wb-body">
         <aside className="wb-left">
           <h3>表</h3>
-          <button type="button" className="linkish" onClick={() => loadTables()}>
+          <button
+            type="button"
+            className="linkish"
+            onClick={() => {
+              void Promise.all([loadTables(), loadGlobal(), loadPipeline()]).catch((e) =>
+                setErr(String(e)),
+              )
+            }}
+          >
             刷新
           </button>
           <ul>
