@@ -1,0 +1,14 @@
+[Unit]
+Description=Numflow FastAPI (Uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/www/wwwroot/numflow/backend
+Environment=PATH=/www/wwwroot/numflow/backend/venv/bin
+ExecStart=/www/wwwroot/numflow/backend/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
