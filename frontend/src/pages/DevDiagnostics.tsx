@@ -30,7 +30,7 @@ export default function DevDiagnostics() {
   return (
     <div className="shell">
       <p>
-        <Link to="/projects">返回项目</Link>
+        <Link to="/projects">返回项目</Link> · <Link to="/agent-test">AGENT TEST 监控/导出</Link>
       </p>
       <h1>开发诊断</h1>
       <pre>{JSON.stringify(health, null, 2)}</pre>

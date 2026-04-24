@@ -4,8 +4,8 @@ import { apiFetch } from '../api'
 
 export default function Login() {
   const nav = useNavigate()
-  const [username, setUsername] = useState('lixiang')
-  const [password, setPassword] = useState('e8cTY7er')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
   const [err, setErr] = useState<string | null>(null)
 
   async function onSubmit(e: FormEvent) {

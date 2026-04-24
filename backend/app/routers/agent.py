@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -19,6 +19,10 @@ router = APIRouter()
 
 class ChatBody(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
+    mode: Literal["init", "maintain"] = Field(
+        default="maintain",
+        description="init=首次建模（文档 06）；maintain=日常增量（五步循环）",
+    )
 
 
 @router.post("/chat")
@@ -29,7 +33,7 @@ def agent_chat(body: ChatBody, p: ProjectDB = Depends(get_project_write)):
             detail="未配置 DASHSCOPE_API_KEY",
         )
     return StreamingResponse(
-        run_agent_sse(body.message, p),
+        run_agent_sse(body.message, p, mode=body.mode),
         media_type="text/event-stream",
     )
 
@@ -86,7 +90,7 @@ def diagnostics_run(
                 or "你是谁？用一句话说明模型名或身份。",
             },
         ]
-        ping_text, ping_meta = qwen_client.chat_once(ping_messages)
+        ping_text, ping_meta = qwen_client.chat_once(ping_messages, temperature=0, max_tokens=64)
         out["connectivity"] = {
             "ok": True,
             "assistant_preview": ping_text[:400],

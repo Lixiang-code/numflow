@@ -12,6 +12,7 @@ from fastapi import Header
 
 from app.config import SESSION_COOKIE_NAME
 from app.db.paths import get_project_db_path
+from app.db.project_migrations import ensure_project_migrations
 from app.db.server import connect_sqlite_file, get_server_db
 
 
@@ -83,10 +84,17 @@ def ensure_project_access(
     return row
 
 
+def compute_project_can_write(row: sqlite3.Row, user: Dict[str, Any]) -> bool:
+    if bool(row["is_template"]):
+        return bool(user.get("is_admin"))
+    return True
+
+
 @dataclass
 class ProjectDB:
     row: sqlite3.Row
     conn: sqlite3.Connection
+    can_write: bool
 
 
 def get_project_read(
@@ -100,7 +108,12 @@ def get_project_read(
         raise HTTPException(status_code=500, detail="项目数据库缺失")
     conn = connect_sqlite_file(path)
     try:
-        yield ProjectDB(row=row, conn=conn)
+        ensure_project_migrations(conn)
+        yield ProjectDB(
+            row=row,
+            conn=conn,
+            can_write=compute_project_can_write(row, user),
+        )
     finally:
         conn.close()
 
@@ -116,6 +129,7 @@ def get_project_write(
         raise HTTPException(status_code=500, detail="项目数据库缺失")
     conn = connect_sqlite_file(path)
     try:
-        yield ProjectDB(row=row, conn=conn)
+        ensure_project_migrations(conn)
+        yield ProjectDB(row=row, conn=conn, can_write=True)
     finally:
         conn.close()

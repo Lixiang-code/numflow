@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.db.project_schema import get_pipeline_state, set_pipeline_state
 from app.deps import ProjectDB, get_project_read, get_project_write
+from app.services.snapshot_ops import create_snapshot
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
@@ -63,4 +64,14 @@ def pipeline_advance(body: AdvanceBody, p: ProjectDB = Depends(get_project_write
     done.append(expected)
     nxt = PIPELINE_STEPS[n + 1] if n + 1 < len(PIPELINE_STEPS) else ""
     set_pipeline_state(p.conn, current_step=nxt, completed_steps=done)
-    return {"ok": True, "completed_steps": done, "next_expected": nxt or None}
+    snap = create_snapshot(
+        p.conn,
+        label=f"pipeline:{expected}",
+        note=f"流水线自动快照：完成步骤 {expected}",
+    )
+    return {
+        "ok": True,
+        "completed_steps": done,
+        "next_expected": nxt or None,
+        "snapshot": snap,
+    }

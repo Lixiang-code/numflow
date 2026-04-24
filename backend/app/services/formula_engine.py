@@ -9,7 +9,10 @@ from typing import Any, Dict, Set, Tuple
 
 import pandas as pd
 
-_REF = re.compile(r"@([A-Za-z][A-Za-z0-9_]*)\[([A-Za-z][A-Za-z0-9_]*)\]")
+# 表名/列名支持中文标识（与 app.util.identifiers 一致）
+_REF = re.compile(
+    r"@([\u4e00-\u9fffA-Za-z_][\u4e00-\u9fffA-Za-z0-9_]*)\[([\u4e00-\u9fffA-Za-z_][\u4e00-\u9fffA-Za-z0-9_]*)\]"
+)
 
 
 def parse_formula_refs(formula: str) -> Set[Tuple[str, str]]:
@@ -88,7 +91,7 @@ def substitute_refs(
     *,
     frames: Dict[str, pd.DataFrame],
 ) -> Tuple[str, Dict[str, pd.Series]]:
-    """将 @T[c] 替换为占位符 __s0 并返回 series 映射。"""
+    """将 @T[c] 替换为占位符 __s0 并返回 series 映射；同一引用出现多次时全部替换。"""
     names: Dict[str, pd.Series] = {}
     out = formula
     idx = 0
@@ -100,7 +103,8 @@ def substitute_refs(
             raise ValueError(f"表 {tbl} 无列 {col}")
         key = f"__s{idx}"
         names[key] = pd.to_numeric(df[col], errors="coerce")
-        out = out.replace(f"@{tbl}[{col}]", key, 1)
+        token = f"@{tbl}[{col}]"
+        out = out.replace(token, key)
         idx += 1
     return out, names
 

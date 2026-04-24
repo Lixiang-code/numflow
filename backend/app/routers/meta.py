@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Optional
+import time
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
+from app.data.default_rules_02 import get_default_rules_payload
 from app.deps import ProjectDB, get_project_read, get_project_write
+from app.services.snapshot_ops import compare_snapshot, create_snapshot, list_snapshots
 
 router = APIRouter(prefix="/meta", tags=["meta"])
 
@@ -22,7 +26,7 @@ def get_project_config(p: ProjectDB = Depends(get_project_read)):
             settings[k] = json.loads(v)
         except json.JSONDecodeError:
             settings[k] = v
-    return {"project": dict(p.row), "settings": settings}
+    return {"project": dict(p.row), "settings": settings, "can_write": p.can_write}
 
 
 @router.get("/tables")
@@ -82,9 +86,6 @@ def get_dependency_graph(
     return {"edges": [dict(r) for r in cur.fetchall()]}
 
 
-from pydantic import BaseModel
-
-
 class ReadmeBody(BaseModel):
     content: str
 
@@ -116,8 +117,6 @@ class GlobalReadmeBody(BaseModel):
 
 @router.put("/global-readme")
 def update_global_readme(body: GlobalReadmeBody, p: ProjectDB = Depends(get_project_write)):
-    import time
-
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     conn = p.conn
     conn.execute(
@@ -128,6 +127,60 @@ def update_global_readme(body: GlobalReadmeBody, p: ProjectDB = Depends(get_proj
             updated_at = excluded.updated_at
         """,
         (json.dumps({"text": body.content}, ensure_ascii=False), now),
+    )
+    conn.commit()
+    return {"ok": True}
+
+
+@router.get("/default-rules")
+def get_default_rules():
+    """文档 02 子集：可机读默认规则（全局，非项目内）。"""
+    return get_default_rules_payload()
+
+
+class SnapshotCreateBody(BaseModel):
+    label: str = Field(min_length=1, max_length=120)
+    note: str = ""
+
+
+@router.post("/snapshots")
+def post_snapshot(body: SnapshotCreateBody, p: ProjectDB = Depends(get_project_write)):
+    return create_snapshot(p.conn, label=body.label.strip(), note=body.note.strip())
+
+
+@router.get("/snapshots")
+def get_snapshots(p: ProjectDB = Depends(get_project_read)):
+    return {"snapshots": list_snapshots(p.conn)}
+
+
+@router.get("/snapshots/{snapshot_id}/compare")
+def get_snapshot_compare(snapshot_id: int, p: ProjectDB = Depends(get_project_read)):
+    try:
+        return compare_snapshot(p.conn, snapshot_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+class ValidationRulesBody(BaseModel):
+    """MVP：{ \"rules\": [ { \"id\": \"r1\", \"type\": \"not_null\", \"column\": \"atk\" } ] }"""
+
+    rules: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+@router.put("/tables/{table_name}/validation-rules")
+def put_validation_rules(
+    table_name: str,
+    body: ValidationRulesBody,
+    p: ProjectDB = Depends(get_project_write),
+):
+    conn = p.conn
+    cur = conn.execute("SELECT 1 FROM _table_registry WHERE table_name = ?", (table_name,))
+    if not cur.fetchone():
+        raise HTTPException(status_code=404, detail="未知表")
+    payload = json.dumps({"rules": body.rules}, ensure_ascii=False)
+    conn.execute(
+        "UPDATE _table_registry SET validation_rules_json = ? WHERE table_name = ?",
+        (payload, table_name),
     )
     conn.commit()
     return {"ok": True}

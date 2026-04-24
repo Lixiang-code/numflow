@@ -21,7 +21,17 @@ export default function Projects() {
       .then((d) => setUser(d as { username: string; is_admin: boolean }))
       .catch(() => nav('/login', { replace: true }))
     apiFetch('/projects')
-      .then((d) => setList((d as { projects: Project[] }).projects))
+      .then((d) => {
+        const raw = (d as { projects?: unknown }).projects
+        const arr = Array.isArray(raw) ? raw : []
+        setList(
+          arr.filter((p): p is Project => {
+            if (p == null || typeof p !== 'object') return false
+            const o = p as { id?: unknown; name?: unknown }
+            return typeof o.id === 'number' && typeof o.name === 'string'
+          }),
+        )
+      })
       .catch((e) => setErr(e instanceof Error ? e.message : String(e)))
   }, [nav])
 
