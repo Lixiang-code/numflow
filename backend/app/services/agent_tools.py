@@ -1049,6 +1049,7 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                     "error": f"create_table '{tname}' 失败: {e}",
                     "fix": f"若表已存在请先 delete_table 或换表名。当前已有表: {known}",
                 }
+    elif name == "write_cells":
         if not p.can_write:
             out = {"error": "无写权限"}
         else:
