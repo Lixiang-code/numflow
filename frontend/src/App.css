@@ -628,6 +628,8 @@ label > input, label > select, label > textarea { color: var(--text); }
   background: var(--green);
   color: #fff;
   flex-shrink: 0;
+  position: relative;
+  z-index: 50;
   box-shadow: 0 1px 3px rgba(0,0,0,.2);
 }
 .wb-top .link-btn {
@@ -1634,3 +1636,297 @@ pre {
   border-radius: var(--radius);
   padding: 1rem 1.25rem;
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   ProjectSetup — 项目初始化中心页面
+   ═══════════════════════════════════════════════════════════════ */
+
+.ps-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+/* ── 顶部 header ── */
+.ps-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  height: 52px;
+  padding: 0 1.25rem;
+  background: var(--green);
+  color: #fff;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 50;
+  box-shadow: 0 2px 6px rgba(0,0,0,.18);
+}
+.ps-header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+.ps-header-left h1 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #fff;
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ps-header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+.ps-nav-link {
+  color: rgba(255,255,255,.85);
+  text-decoration: none;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+.ps-nav-link:hover { color: #fff; text-decoration: underline; }
+.ps-tag {
+  background: rgba(255,255,255,.2);
+  color: #fff;
+  border-radius: 12px;
+  padding: 0.1rem 0.55rem;
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+.ps-err-tag {
+  background: rgba(255,80,80,.3);
+  color: #ffe0e0;
+  border-radius: 12px;
+  padding: 0.1rem 0.55rem;
+  font-size: 0.72rem;
+}
+.ps-done-badge {
+  background: rgba(255,255,255,.25);
+  color: #fff;
+  border-radius: 12px;
+  padding: 0.18rem 0.7rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+/* ── body 两列 ── */
+.ps-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ── 左侧 pipeline sidebar ── */
+.ps-sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.ps-sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.65rem 0.9rem 0.5rem;
+  font-weight: 600;
+  font-size: 0.8rem;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.ps-progress-text { color: var(--green); font-weight: 700; font-size: 0.85rem; }
+
+/* 总进度条 */
+.ps-overall-bar {
+  height: 4px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+.ps-overall-bar-fill {
+  height: 100%;
+  background: var(--green);
+  transition: width 0.5s ease;
+}
+
+/* 步骤列表 */
+.ps-step-list {
+  list-style: none;
+  margin: 0;
+  padding: 0.3rem 0;
+  overflow-y: auto;
+  flex: 1;
+}
+.ps-step-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.9rem;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+  transition: background 0.12s;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+.ps-step-item:hover { background: var(--green-light); }
+.ps-step-item.done {
+  color: var(--text-muted);
+  border-left-color: var(--green);
+}
+.ps-step-item.current {
+  color: var(--text);
+  font-weight: 600;
+  border-left-color: var(--green);
+  background: var(--green-light);
+}
+.ps-step-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--border);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.ps-step-item.done .ps-step-icon { background: var(--green); color: #fff; }
+.ps-step-item.current .ps-step-icon { background: var(--green-dark, #1b5e20); color: #fff; }
+.ps-step-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ps-step-time { font-size: 0.68rem; color: var(--text-muted); flex-shrink: 0; }
+
+/* ── 主体 ── */
+.ps-main {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* 查看历史 banner */
+.ps-viewing-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 1.25rem;
+  background: #fff3e0;
+  border-bottom: 1px solid #ffe082;
+  font-size: 0.82rem;
+  color: #e65100;
+  flex-shrink: 0;
+}
+
+/* 当前步骤 header */
+.ps-step-header {
+  padding: 0.85rem 1.25rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  background: var(--surface);
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.ps-step-header h2 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+.ps-step-num {
+  font-size: 0.75rem;
+  color: var(--green);
+  font-weight: 600;
+  background: var(--green-light);
+  padding: 0.1rem 0.4rem;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+/* agent status 区 */
+.ps-agent-status {
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-alt);
+  flex-shrink: 0;
+}
+
+/* 等待 */
+.ps-waiting {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem 2rem;
+  gap: 1rem;
+  color: var(--text-muted);
+  flex: 1;
+}
+.ps-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--border);
+  border-top-color: var(--green);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* 阶段面板区 */
+.ps-phases {
+  padding: 0.75rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+/* 全部完成 */
+.ps-all-done {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem 2rem;
+  gap: 0.85rem;
+  text-align: center;
+  flex: 1;
+}
+.ps-all-done-icon { font-size: 3rem; }
+.ps-all-done h2 { font-size: 1.5rem; color: var(--green); margin: 0; }
+.ps-all-done p { max-width: 440px; color: var(--text-muted); margin: 0; }
+
+/* 错误提示 */
+.ps-agent-err {
+  margin: 0.75rem 1.25rem;
+  padding: 0.65rem 0.9rem;
+  background: #ffebee;
+  border: 1px solid #ef9a9a;
+  border-radius: var(--radius);
+  font-size: 0.83rem;
+  color: #c62828;
+  flex-shrink: 0;
+}
+
+/* btn size variants */
+.btn.small { font-size: 0.78rem; padding: 0.22rem 0.6rem; }
+.btn.large { font-size: 1rem; padding: 0.65rem 1.75rem; }
+.btn.secondary {
+  background: rgba(255,255,255,.15);
+  color: #fff;
+  border: 1px solid rgba(255,255,255,.3);
+}
+.btn.secondary:hover { background: rgba(255,255,255,.28); }

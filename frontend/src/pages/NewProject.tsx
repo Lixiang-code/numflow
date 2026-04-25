@@ -623,7 +623,7 @@ export default function NewProject() {
         body: JSON.stringify({ name: name.trim() || '未命名项目', settings }),
       }) as { id: number }
       localStorage.removeItem(DRAFT_KEY)
-      nav(`/workbench/${res.id}`)
+      nav(`/project-setup/${res.id}`)
     } catch (x) { setErr(x instanceof Error ? x.message : String(x)) }
   }
 
@@ -639,7 +639,7 @@ export default function NewProject() {
         body: JSON.stringify({ name: name.trim() || '提示词项目', settings }),
       }) as { id: number }
       localStorage.removeItem(DRAFT_KEY)
-      nav(`/workbench/${res.id}`)
+      nav(`/project-setup/${res.id}`)
     } catch (x) { setErr(x instanceof Error ? x.message : String(x)) }
   }
 
