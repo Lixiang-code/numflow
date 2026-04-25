@@ -726,7 +726,7 @@ export default function NewProject() {
                         onChange={(e) => setCore({ ...core, game_type: e.target.value })}
                       >
                         <option value="rpg_turn">RPG（回合）</option>
-                        <option value="rpg_realtime" disabled>RPG（即时）— 第二阶段</option>
+                        <option value="rpg_realtime">RPG（即时）</option>
                         <option value="moba"         disabled>MOBA — 第二阶段</option>
                         <option value="sim"          disabled>模拟经营 — 第二阶段</option>
                       </select>
