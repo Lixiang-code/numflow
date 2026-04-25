@@ -1,0 +1,62 @@
+{
+  "hit": [
+    {
+      "phase": "route",
+      "type": "prompt_route",
+      "hit": true,
+      "prompt": "【步骤 2/11 基础属性框架】目标：定义角色基础属性骨架（HP/ATK/DEF/CRIT 等），输出标准等级 1..max_level 的基础属性增长表。必产出表：基础属性_标准等级（列：等级、HP、ATK、DEF、命中、闪避、暴击、暴伤 等核心列），并写入 README（goal/上游输入/产出/必备表与列/验收/常见踩坑）。验收：每行均有数值、增长曲线连续、与 _project_settings.max_level 对齐。",
+      "rationale": "用户需求直接对应默认模板的产出目标与验收标准，未提出新机制或特殊定制。",
+      "step_id": "base_attribute_framework"
+    },
+    {
+      "phase": "route",
+      "type": "prompt_route",
+      "hit": true,
+      "prompt": "【步骤 2/11 基础属性框架】目标：定义角色基础属性骨架（HP/ATK/DEF/CRIT 等），输出标准等级 1..max_level 的基础属性增长表。必产出表：基础属性_标准等级（列：等级、HP、ATK、DEF、命中、闪避、暴击、暴伤 等核心列），并写入 README（goal/上游输入/产出/必备表与列/验收/常见踩坑）。验收：每行均有数值、增长曲线连续、与 _project_settings.max_level 对齐。",
+      "rationale": "用户需求直接对应本步骤目标，即基于项目配置确定属性列并生成1至max_level（60）的初值与增长表，无额外定制或跨步要求。",
+      "step_id": "base_attribute_framework"
+    }
+  ],
+  "miss": [
+    {
+      "phase": "route",
+      "type": "prompt_route",
+      "hit": false,
+      "prompt": "{\n  \"prompt\": \"【步骤 2/11 基础属性框架】目标：补齐 `_global_readme` 与 `_project_settings` 核心字段，严格对齐文档03第1步规范。基于配置生成 `基础属性_标准等级` 表（必含列：等级、血、攻、防、命中、闪避、暴击、暴伤），覆盖 1..max_level（60）。必产出：1. 标准属性增长表；2. 同步更新的全局README与项目配置。验收：全表无空值；数值增长符合减法公式且曲线连续平滑；最大等级与 `_project_settings.max_level` 严格对齐；README清晰记录属性映射、公式逻辑与验收结果。\"\n}",
+      "rationale": "用户需求为补齐项目级全局配置与README，属于环境初始化/配置对齐任务，与当前步骤生成基础属性等级增长表的目标完全不符。",
+      "step_id": "base_attribute_framework"
+    },
+    {
+      "phase": "route",
+      "type": "prompt_route",
+      "hit": false,
+      "prompt": "{\n  \"prompt\": \"【步骤 2/11 基础属性框架】按文档03第3步整理玩法属性方案表，每个02默认系统占一行。必产出表：`基础属性_标准等级`（列：等级、攻、防、血、技杀、技生、命中、闪避、暴击、暴伤）。数据覆盖1至`_project_settings.max_level`(60)级，每行数值完整，增长曲线连续平滑，严格对齐项目属性配置。同步写入README（目标/上游/产出/表列/验收/踩坑）。验收：1. 表行数=60且无空值；2. 列名与`core_attrs`/`advanced`完全一致；3. 增长逻辑可复现且符合常规数值模型。\"\n}",
+      "rationale": "用户需求要求按特定文档整理“玩法属性方案表”（按系统分行），与默认模板定义的“标准等级基础属性增长表”目标及结构明显不符。",
+      "step_id": "base_attribute_framework"
+    },
+    {
+      "phase": "route",
+      "type": "prompt_route",
+      "hit": false,
+      "prompt": "{\n  \"prompt\": \"【步骤 2/11 基础属性框架】目标：构建角色基础属性增长骨架，并同步扩展宝石合成树至7级。必产出表：`基础属性_标准等级`（列：等级、HP、ATK、DEF、命中、闪避、暴击、暴伤）与 `宝石合成树`（列：合成等级、所需材料、产出宝石、保底碎片来源）。验收标准：1.属性表覆盖1至max_level(60)，每行数值非空且增长曲线平滑连续；2.宝石表严格补齐至7级，新增“保底碎片来源”列需明确标注具体产出途径；3.同步更新README，完整记录目标、上游输入、产出表列及验收项。\"\n}",
+      "rationale": "用户需求聚焦宝石合成树与碎片来源，与当前步骤定义角色基础属性增长表的默认模板完全无关，属于跨系统定制。",
+      "step_id": "base_attribute_framework"
+    },
+    {
+      "phase": "route",
+      "type": "prompt_route",
+      "hit": false,
+      "prompt": "{\"prompt\":\"【步骤 2/11 基础属性框架】目标：为运营活动「双倍掉落周末」独立生成活动权重表，完全脱离 02 默认细则。必产出表：`活动权重_双倍掉落周末`（列：掉落物ID、基础权重、活动倍率、最终权重、生效时段、适用等级段）。同步写入 README（目标/设计逻辑/表结构/验收/避坑）。验收：权重值≥0且分布合理；活动倍率严格体现“双倍”核心（基准2.0，支持稀有度阶梯）；明确标注适用等级范围（对齐 max_level=60）；全表无空值/异常值，字段类型规范，可直接接入掉落引擎。\"}",
+      "rationale": "用户需求为生成运营活动权重表，与默认模板定义的角色基础属性与等级成长表完全无关，属于新机制定制。",
+      "step_id": "base_attribute_framework"
+    },
+    {
+      "phase": "route",
+      "type": "prompt_route",
+      "hit": false,
+      "prompt": "{\"prompt\":\"【步骤 2/11 基础属性框架】目标：生成角色基础属性骨架。必产出表：num_base_framework（列：等级、HP、ATK、DEF、命中、闪避、暴击、暴伤、MP）。执行要求：生成 1..60 级数据，MP 列按同级 HP×0.6 填充，其余属性保持连续增长曲线。验收标准：① 严格输出 60 行，全列无空值；② MP 数值量级与 HP×0.6 一致（误差≤5%）；③ 等级上限对齐 _project_settings.max_level；④ 产出表数据并同步写入 README 说明新增列规则。\"}",
+      "rationale": "用户要求新增默认模板未包含的mp列并指定特定计算规则，属于对标准属性骨架的显式定制。",
+      "step_id": "base_attribute_framework"
+    }
+  ]
+}

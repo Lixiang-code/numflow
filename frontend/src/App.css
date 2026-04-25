@@ -678,13 +678,61 @@ h4 {
 .wb-center {
   background: linear-gradient(180deg, #0f1729 0%, #0c1220 100%);
   padding: 0.85rem;
-  overflow: auto;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .wb-center > h3 {
   font-size: 0.95rem;
   color: var(--text);
   margin-bottom: 0.5rem;
+  flex: 0 0 auto;
+}
+
+.wb-formula-bar {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0.35rem 0.5rem;
+  background: rgba(34, 211, 238, 0.08);
+  border: 1px solid rgba(34, 211, 238, 0.25);
+  border-radius: var(--radius-sm);
+  margin-bottom: 0.4rem;
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  max-height: 96px;
+  overflow: auto;
+}
+
+.wb-formula-bar-label {
+  color: var(--accent-hover);
+}
+
+.wb-formula-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.4rem;
+  background: rgba(34, 211, 238, 0.12);
+  color: var(--text);
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.wb-formula-chip .wb-formula-eq {
+  color: var(--muted);
+  margin: 0 0.1rem;
+}
+
+.wb-univer-host {
+  flex: 1 1 auto;
+  min-height: 360px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
 }
 
 .table-wrap {

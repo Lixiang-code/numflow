@@ -620,7 +620,20 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
     args: Dict[str, Any] = {}
     if arguments:
         if isinstance(arguments, str):
-            args = json.loads(arguments or "{}")
+            try:
+                args = json.loads(arguments or "{}")
+            except json.JSONDecodeError as exc:
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "data": None,
+                        "warnings": [
+                            f"tool_call arguments JSON decode failed: {exc!r}; raw={arguments[:200]!r}"
+                        ],
+                        "blocked_cells": [],
+                    },
+                    ensure_ascii=False,
+                )
         else:
             args = dict(arguments)
 

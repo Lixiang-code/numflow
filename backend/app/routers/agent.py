@@ -23,6 +23,10 @@ class ChatBody(BaseModel):
         default="maintain",
         description="init=首次建模（文档 06）；maintain=日常增量（五步循环）",
     )
+    strict_review: bool = Field(
+        default=False,
+        description="为 True 时，execute 阶段每次写工具调用前都过一遍轻量 reviewer（可拒绝该 tool_call）",
+    )
 
 
 @router.post("/chat")
@@ -33,7 +37,12 @@ def agent_chat(body: ChatBody, p: ProjectDB = Depends(get_project_write)):
             detail="未配置 DASHSCOPE_API_KEY",
         )
     return StreamingResponse(
-        run_agent_sse(body.message, p, mode=body.mode),
+        run_agent_sse(
+            body.message,
+            p,
+            mode=body.mode,
+            strict_review=body.strict_review,
+        ),
         media_type="text/event-stream",
     )
 

@@ -48,7 +48,12 @@ def usage_to_dict(usage: Any) -> Optional[Dict[str, Any]]:
 
 
 def long_cacheable_system_block() -> str:
-    """显式缓存要求 >1024 tokens；用长固定前缀满足下限。"""
+    """显式缓存要求 >1024 tokens；用长固定前缀满足下限。
+
+    ⚠️ 仅供 /api/agent/diagnostics/run 自检 ephemeral 缓存命中率使用。
+    生产 Agent 调用链（agent_runner.run_agent_sse）不会拼接此内容，
+    避免无业务含义的填充字符进入实际 prompt。
+    """
     unit = (
         "【Numflow 数值工具固定上下文】"
         "本段为项目级只读说明，用于表格校验、Agent 工具约束与 README 摘要缓存测试。"

@@ -1,0 +1,174 @@
+{
+  "env_info": {
+    "base": "http://127.0.0.1:8000/api",
+    "model": "qwen3.6-plus",
+    "user": "nf_reg_1777108976",
+    "pid": 10,
+    "slug": "regression-1777108976",
+    "round": "second",
+    "ts": 1777108976
+  },
+  "overall_pass": false,
+  "diagnostics": {
+    "status": 200,
+    "body": {
+      "dashscope_api_key_configured": true,
+      "model": "qwen3.6-plus",
+      "hint": "POST /api/agent/diagnostics/run 执行真实调用与缓存对比"
+    }
+  },
+  "spec_result": {
+    "checks": [
+      {
+        "name": "GET /pipeline/specs 返回 11 步",
+        "ok": true,
+        "detail": {
+          "status": 200,
+          "count": 11
+        }
+      },
+      {
+        "name": "step/<id>/spec 含必要字段",
+        "ok": true,
+        "detail": {
+          "status": 200,
+          "missing": []
+        }
+      },
+      {
+        "name": "未推进时 readme 回落 spec_template",
+        "ok": true,
+        "detail": {
+          "status": 200,
+          "source": "spec_template",
+          "len": 1207
+        }
+      },
+      {
+        "name": "PUT readme 后 GET 取回",
+        "ok": true,
+        "detail": {
+          "put": 200,
+          "get": 200,
+          "source": "user",
+          "match": true
+        }
+      }
+    ],
+    "pass": true
+  },
+  "advance_dict_result": {
+    "ok": true,
+    "status": 400,
+    "detail": {
+      "message": "顺序错误：下一步应为 environment_global_readme，收到 gameplay_attribute_scheme",
+      "expected_step": "environment_global_readme",
+      "expected_title": "整体环境确认与全局 README",
+      "expected_goal": "把项目核心定义（最大等级、生命周期、玩法系统、属性勾选）和 02 默认细则对齐成一份可被后续所有步骤引用的全局 README；明确哪些细则被忽略、需要用户补充什么。"
+    }
+  },
+  "advance_seed_result": {
+    "ok": true,
+    "advance_status": 200,
+    "readme_source": "spec_template",
+    "readme_len": 1207
+  },
+  "cases": [
+    {
+      "case_id": "R1",
+      "mode": "maintain",
+      "message": "用一句话说明你能做什么",
+      "strict_review": false,
+      "elapsed_s": 616.5,
+      "pass": false,
+      "event_count": 452,
+      "char_design": 1068,
+      "char_review": 1288,
+      "char_execute": 0,
+      "design_three_phase_ok": true,
+      "design_three_phase_hits": [
+        "## 1. 我对用户需求的理解",
+        "## 2. 我对游戏性的设计理解",
+        "## 3. 我的最终设计"
+      ],
+      "review_has_final_plan": true,
+      "tool_call_count": 10,
+      "tool_names": [
+        "get_project_config",
+        "get_default_system_rules",
+        "get_table_list",
+        "create_table",
+        "write_cells"
+      ],
+      "tool_result_count": 10,
+      "blocked_cells_total": 0,
+      "reviewer_verdict_count": 0,
+      "reviewer_approve": 0,
+      "reviewer_reject": 0,
+      "has_error": true,
+      "error": "超过最大工具轮次",
+      "error_msgs": [
+        "超过最大工具轮次"
+      ],
+      "prompt_route": {
+        "hit": false,
+        "step_id": "base_attribute_framework",
+        "rationale": "用户需求为询问模型通用能力的元问题，与当前步骤生成基础属性增长表及更新README的默认任务完全无关。",
+        "prompt": "基于当前配置（max_level=30，核心属性：攻击力/防御力/生命值/暴击率），构建角色基础属性增长框架。必产出表：基础属性_标准等级，列：等级(1..30)、攻击力、防御力、生命值、暴击率。同步写入README（含goal/上游/产出/表列/验收/踩坑）。验收标准：①全表无空值，数值合法；②各属性随等级增长曲线连续平滑；③等级上限严格对齐 _project_settings.level_max；④README结构完整。本步核心能力一句话：定义并输出角色1至满级的基础属性标准增长骨架。",
+        "prompt_len": 247
+      },
+      "design_preview": "## 1. 我对用户需求的理解\n用户要求基于 `max_level=30` 与四大核心属性（攻击力/防御力/生命值/暴击率），构建并输出《基础属性_标准等级》数据表，确保全表无空值、数值增长连续平滑、等级上限严格对齐项目配置，并同步撰写包含 `goal/上游输入/产出/必备表与列/验收标准/常见踩坑` 的 README，以完成“定义并输出角色1至满级的基础属性标准增长骨架”的核心能力交付。\n\n## 2. 我对游戏性的设计理解（结合 02 系统与子系统默认细则与项目核心定义）\n依据 02 机读默认细则，基础属性投放需遵循“前期线性铺垫、中期平滑过渡、后期边际可控”的心流曲线，严禁指数级陡增导致战斗阈值断裂；概率类属性（暴击率）必须设置软上限或采用缓增模型，防止后期战斗方差失控。项目核心定义明确等级轴为全系统基准参照，四大属性需形成“生存阈值（生命/防御）与输出节奏（攻击/暴击）”的动态平衡，",
+      "review_preview": "## 自审问题与风险\n- **增长模型偏离 02 心流规范**：Design 采用纯线性公式（`base + k*(Lv-1)`），虽满足“连续平滑”，但违背 02 机读默认中“前期线性铺垫、中期平滑过渡、后期边际可控”的阈值设计原则。纯线性易导致后期属性膨胀不足或战斗节奏断裂，需引入温和复利或分段衰减模型。\n- **缺失 02 默认规则前置校验**：Design 仅口头引用 02 规范，未规划 `get_default_system_rules` 的实际调用。若 02 机读默认对暴击率设定了硬性软上限（如 30%）或对生命/攻击指定了基础成长系数，当前硬编码公式将直接冲突。\n- **写入安全未闭环**：未明确在 execute 阶段前置 `get_protected_cells` 与 `read_cell` 探测，存在覆盖用户手动维护格子或破坏受保护区域的风险。\n- **暴击率精度隐患*",
+      "execute_preview": ""
+    },
+    {
+      "case_id": "R2",
+      "mode": "init",
+      "message": "我要做一个数值平衡（攻防+暴击）的卡牌养成 demo，请按当前步骤推进",
+      "strict_review": false,
+      "elapsed_s": 507.8,
+      "pass": false,
+      "event_count": 646,
+      "char_design": 1899,
+      "char_review": 1519,
+      "char_execute": 0,
+      "design_three_phase_ok": true,
+      "design_three_phase_hits": [
+        "## 1. 我对用户需求的理解",
+        "## 2. 我对游戏性的设计理解",
+        "## 3. 我的最终设计"
+      ],
+      "review_has_final_plan": true,
+      "tool_call_count": 9,
+      "tool_names": [
+        "get_project_config",
+        "get_default_system_rules",
+        "create_table",
+        "read_table",
+        "get_table_list",
+        "get_algorithm_api_list",
+        "write_cells"
+      ],
+      "tool_result_count": 9,
+      "blocked_cells_total": 0,
+      "reviewer_verdict_count": 0,
+      "reviewer_approve": 0,
+      "reviewer_reject": 0,
+      "has_error": true,
+      "error": "超过最大工具轮次",
+      "error_msgs": [
+        "超过最大工具轮次"
+      ],
+      "prompt_route": {
+        "hit": true,
+        "step_id": "base_attribute_framework",
+        "rationale": "用户指令直接对应当前步骤目标，且项目配置已明确核心属性与等级上限，无需额外定制或跨步处理。",
+        "prompt": "【步骤 2/11 基础属性框架】目标：定义角色基础属性骨架（HP/ATK/DEF/CRIT 等），输出标准等级 1..max_level 的基础属性增长表。必产出表：基础属性_标准等级（列：等级、HP、ATK、DEF、命中、闪避、暴击、暴伤 等核心列），并写入 README（goal/上游输入/产出/必备表与列/验收/常见踩坑）。验收：每行均有数值、增长曲线连续、与 _project_settings.max_level 对齐。",
+        "prompt_len": 216
+      },
+      "design_preview": "## 1. 我对用户需求的理解\n当前处于步骤 2/11「基础属性框架」。核心诉求是构建卡牌养成 Demo 的底层数值骨架，聚焦「攻防+暴击」的平衡性验证。需产出标准等级 1 至 `max_level` 的 `基础属性_标准等级` 表，包含 HP、ATK、DEF、命中、闪避、暴击、暴伤等核心列，并配套符合规范的 README。该表将作为后续装备、宝石、技能、副本等所有子系统的白值基线，要求数值连续、无断层、与项目配置的最大等级严格对齐，且具备明确的数学增长规律以便后续调优。\n\n## 2. 我对游戏性的设计理解（结合 02-系统与子系统默认细则与项目核心定义）\n依据 **02 机读默认细则**，基础属性表属于「全局标准轴」，必须遵循以下原则：\n- **增长连续性**：等级间属性变化需平滑，禁止跳跃或负增长。默认采用多项式/带衰减的复合曲线，避免前期膨胀过快或后期边际收益归零。\n- **攻防乘区",
+      "review_preview": "## 自审问题与风险\n1. **公式参数与 max_level 脱节**：设计中的多项式/幂函数系数为静态经验值，未绑定 `_project_settings.max_level` 的实际目标终值。若 max_level 为 60 或 100，直接套用可能导致终局数值指数膨胀或前期成长过缓，违背 02 中“标准轴需具备可配置目标锚点”的要求。\n2. **命中/闪避基础值挤压子系统空间**：衰减函数 `0.8L/(1+0.01L)` 的渐近线高达 80，叠加初始值后基础命中/闪避可能突破 85。这严重违背 02 默认细则中“基础白值仅占属性总盘 30%~40%，需为装备/宝石/羁绊预留投放空间”的隐性约定。\n3. **暴伤线性增长缺乏软上限控制**：`150 + 1.5L` 在 max_level≥80 时将突破 270%，极易使暴击乘区收益溢出，破坏“攻防+暴击”的平衡验证目标。需引入衰减",
+      "execute_preview": ""
+    }
+  ]
+}

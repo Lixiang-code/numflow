@@ -1,7 +1,11 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { apiFetch, projectHeaders } from '../api'
 import { getInitAgentPrompt, pipelineStepLabel } from '../data/pipelineSteps'
+import { createUniver, LocaleType, defaultTheme, type Univer } from '@univerjs/presets'
+import type { FUniver } from '@univerjs/core/lib/facade'
+import { UniverSheetsCorePreset, type FWorkbook } from '@univerjs/preset-sheets-core'
+import '@univerjs/preset-sheets-core/lib/index.css'
 
 type TableInfo = { table_name: string; validation_status: string; layer: string; purpose?: string }
 
@@ -32,7 +36,8 @@ export default function Workbench() {
 
   const [tables, setTables] = useState<TableInfo[]>([])
   const [selected, setSelected] = useState<string | null>(null)
-  const [rows, setRows] = useState<Record<string, unknown>[]>([])
+  // 当前活动表的行数据（仅用于缓存反向写入；展示由 Univer 接管）
+  const [, setRows] = useState<Record<string, unknown>[]>([])
   const [tableReadmeDraft, setTableReadmeDraft] = useState('')
   const [globalReadmeDraft, setGlobalReadmeDraft] = useState('')
   const [readmeTab, setReadmeTab] = useState<'table' | 'global'>('table')
@@ -56,6 +61,30 @@ export default function Workbench() {
   const [err, setErr] = useState<string | null>(null)
   /** 列名 -> 公式（用于表头悬停） */
   const [columnFormulas, setColumnFormulas] = useState<Record<string, string>>({})
+  /** 当前活动表的列顺序（用于将 Univer 行/列索引映射回 row_id/列名） */
+  const [activeCols, setActiveCols] = useState<string[]>([])
+
+  // -------- Univer 相关 --------
+  const univerHostRef = useRef<HTMLDivElement | null>(null)
+  const univerRef = useRef<Univer | null>(null)
+  const univerAPIRef = useRef<FUniver | null>(null)
+  const workbookRef = useRef<FWorkbook | null>(null)
+  /** 已加载到 Univer 的 sheet（按 table_name 记录） */
+  const loadedSheetsRef = useRef<Set<string>>(new Set())
+  /** 每张已加载表的行数据缓存（用于 row 索引→row_id 映射） */
+  const tableRowsCacheRef = useRef<Map<string, Record<string, unknown>[]>>(new Map())
+  /** 每张已加载表的列顺序缓存 */
+  const tableColsCacheRef = useRef<Map<string, string[]>>(new Map())
+  /** 每张已加载表的列公式缓存 */
+  const tableFormulasCacheRef = useRef<Map<string, Record<string, string>>>(new Map())
+  /** 当前活动 table_name（事件回调内引用最新值） */
+  const activeTableRef = useRef<string | null>(null)
+  /** 标记内部 setValues 写入，避免触发回写 API */
+  const suppressEditRef = useRef(false)
+  /** 持久指向最新的写回函数（避免 SheetEditEnded 闭包过期） */
+  const writeCellManualRef = useRef<
+    (tableName: string, rowId: string, colName: string, value: unknown) => Promise<void>
+  >(async () => {})
 
   const loadTables = useCallback(async () => {
     const d = (await apiFetch('/meta/tables', { headers })) as { tables?: unknown }
@@ -118,12 +147,85 @@ export default function Workbench() {
     })
   }, [headers])
 
+  // -------- Univer 初始化（每个 pid 独立工作簿） --------
+  useEffect(() => {
+    if (!Number.isFinite(pid)) return
+    const host = univerHostRef.current
+    if (!host) return
+    const { univer, univerAPI } = createUniver({
+      locale: LocaleType.ZH_CN,
+      theme: defaultTheme,
+      presets: [UniverSheetsCorePreset({ container: host })],
+    })
+    const wb = univerAPI.createWorkbook({
+      id: `wb_${pid}`,
+      name: `项目 ${pid}`,
+      sheets: { __placeholder__: { id: '__placeholder__', name: '加载中…', cellData: {} } },
+      sheetOrder: ['__placeholder__'],
+    })
+    univerRef.current = univer
+    univerAPIRef.current = univerAPI
+    workbookRef.current = wb
+    loadedSheetsRef.current = new Set()
+    tableRowsCacheRef.current = new Map()
+    tableColsCacheRef.current = new Map()
+    activeTableRef.current = null
+
+    const disposable = univerAPI.addEvent(univerAPI.Event.SheetEditEnded, (params) => {
+      if (suppressEditRef.current) return
+      if (!params.isConfirm) return
+      const tname = activeTableRef.current
+      if (!tname) return
+      const cols = tableColsCacheRef.current.get(tname) || []
+      const rowsArr = tableRowsCacheRef.current.get(tname) || []
+      // 行 0 = 列名表头, 行 1 = 公式备注（如有）；数据行从 dataRowOffset 开始
+      const formulas = tableFormulasCacheRef.current.get(tname) || {}
+      const hasFormulaRow = Object.keys(formulas).length > 0
+      const dataRowOffset = hasFormulaRow ? 2 : 1
+      const dataRowIdx = params.row - dataRowOffset
+      const colName = cols[params.column]
+      if (!colName || dataRowIdx < 0 || dataRowIdx >= rowsArr.length) return
+      const rowObj = rowsArr[dataRowIdx]
+      const rid = rowObj?.row_id
+      if (rid == null) return
+      const newCell = params.worksheet.getRange(params.row, params.column).getValue()
+      const newVal = typeof newCell === 'object' && newCell != null ? (newCell as { v?: unknown }).v ?? null : newCell
+      void writeCellManualRef.current(tname, String(rid), colName, newVal)
+    })
+
+    return () => {
+      disposable.dispose()
+      univer.dispose()
+      univerRef.current = null
+      univerAPIRef.current = null
+      workbookRef.current = null
+      loadedSheetsRef.current.clear()
+      tableRowsCacheRef.current.clear()
+      tableColsCacheRef.current.clear()
+      tableFormulasCacheRef.current.clear()
+      activeTableRef.current = null
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pid])
+
+  // 每个 pid 切换时重置本地编辑态（E3）
   useEffect(() => {
     if (!Number.isFinite(pid)) return
     let cancelled = false
     setErr(null)
     setTables([])
     setSelected(null)
+    setRows([])
+    setActiveCols([])
+    setTableReadmeDraft('')
+    setGlobalReadmeDraft('')
+    setValidationRulesDraft('')
+    setColumnFormulas({})
+    setValidateReport(null)
+    setSnapshots([])
+    setCompareSnapshotId(null)
+    setCompareText('')
+    setPipeline(null)
     void Promise.all([
       loadTables(),
       loadProjectConfig(),
@@ -138,12 +240,53 @@ export default function Workbench() {
     }
   }, [pid, loadTables, loadProjectConfig, loadPipeline, loadValidation, loadSnapshots])
 
+  /** 把一张表的数据写入对应 Univer sheet（首次或刷新调用） */
+  const populateSheet = useCallback(
+    (tableName: string, rowsArr: Record<string, unknown>[], cols: string[], formulas: Record<string, string>) => {
+      const wb = workbookRef.current
+      if (!wb) return
+      let sheet = wb.getSheetByName(tableName)
+      if (!sheet) {
+        sheet = wb.insertSheet(tableName) ?? wb.getSheetByName(tableName)
+      }
+      if (!sheet) return
+      tableRowsCacheRef.current.set(tableName, rowsArr)
+      tableColsCacheRef.current.set(tableName, cols)
+      tableFormulasCacheRef.current.set(tableName, formulas)
+      const formulaList = cols.map((c) => formulas[c] || '')
+      const hasFormulaRow = formulaList.some((s) => s !== '')
+      const headerRow: (string | number)[] = cols.length === 0 ? ['(空表)'] : cols
+      const matrix: (string | number)[][] = [headerRow]
+      if (hasFormulaRow) matrix.push(formulaList)
+      for (const r of rowsArr) {
+        matrix.push(cols.map((c) => {
+          const v = r[c]
+          if (v == null) return ''
+          if (typeof v === 'object') return JSON.stringify(v)
+          if (typeof v === 'number' || typeof v === 'string') return v
+          return String(v)
+        }))
+      }
+      const numCols = Math.max(1, cols.length)
+      suppressEditRef.current = true
+      try {
+        sheet.getRange(0, 0, matrix.length, numCols).setValues(matrix)
+      } finally {
+        suppressEditRef.current = false
+      }
+      loadedSheetsRef.current.add(tableName)
+    },
+    [],
+  )
+
   useEffect(() => {
     if (!selected) {
       setRows([])
+      setActiveCols([])
       setTableReadmeDraft('')
       setValidationRulesDraft('')
       setColumnFormulas({})
+      activeTableRef.current = null
       return
     }
     let cancelled = false
@@ -160,20 +303,39 @@ export default function Workbench() {
         })) as {
           validation_rules?: { rules?: unknown[] } | null
           column_formulas?: Record<string, string> | null
+          schema?: { columns?: { name?: string }[] }
         }
-        if (!cancelled) {
-          const rawRows = Array.isArray(r.rows) ? r.rows : []
-          const normalized = rawRows.filter(
-            (row): row is Record<string, unknown> =>
-              row != null && typeof row === 'object' && !Array.isArray(row),
-          )
-          setRows(normalized)
-          const tr = m.readme || ''
-          setTableReadmeDraft(tr)
-          const vr = desc.validation_rules && typeof desc.validation_rules === 'object' ? desc.validation_rules : { rules: [] }
-          setValidationRulesDraft(JSON.stringify(vr, null, 2))
-          const cf = desc.column_formulas
-          setColumnFormulas(cf != null && typeof cf === 'object' && !Array.isArray(cf) ? cf : {})
+        if (cancelled) return
+        const rawRows = Array.isArray(r.rows) ? r.rows : []
+        const normalized = rawRows.filter(
+          (row): row is Record<string, unknown> =>
+            row != null && typeof row === 'object' && !Array.isArray(row),
+        )
+        const cf = desc.column_formulas && typeof desc.column_formulas === 'object' && !Array.isArray(desc.column_formulas)
+          ? (desc.column_formulas as Record<string, string>)
+          : {}
+        let cols: string[] = []
+        if (normalized.length > 0) cols = Object.keys(normalized[0])
+        else if (Array.isArray(desc.schema?.columns)) {
+          cols = (desc.schema!.columns!).map((c) => String(c?.name ?? '')).filter(Boolean)
+        }
+        setRows(normalized)
+        setActiveCols(cols)
+        setTableReadmeDraft(m.readme || '')
+        const vr = desc.validation_rules && typeof desc.validation_rules === 'object' ? desc.validation_rules : { rules: [] }
+        setValidationRulesDraft(JSON.stringify(vr, null, 2))
+        setColumnFormulas(cf)
+
+        // 写入 Univer 并切换到该 sheet
+        populateSheet(selected, normalized, cols, cf)
+        activeTableRef.current = selected
+        const wb = workbookRef.current
+        if (wb) {
+          try {
+            wb.setActiveSheet(selected)
+          } catch {
+            /* ignore */
+          }
         }
       } catch (e) {
         if (!cancelled) setErr(String(e))
@@ -182,7 +344,80 @@ export default function Workbench() {
     return () => {
       cancelled = true
     }
-  }, [selected, headers])
+  }, [selected, headers, populateSheet])
+
+  /** 重新拉取并刷新当前活动 sheet 的数据（写失败时回退用） */
+  const reloadActiveTable = useCallback(async () => {
+    if (!selected) return
+    try {
+      const r = (await apiFetch(`/data/tables/${encodeURIComponent(selected)}/rows?limit=200`, {
+        headers,
+      })) as { rows?: unknown }
+      const rawRows = Array.isArray(r.rows) ? r.rows : []
+      const normalized = rawRows.filter(
+        (row): row is Record<string, unknown> =>
+          row != null && typeof row === 'object' && !Array.isArray(row),
+      )
+      const cols = normalized.length > 0 ? Object.keys(normalized[0]) : tableColsCacheRef.current.get(selected) || []
+      const formulas = tableFormulasCacheRef.current.get(selected) || {}
+      setRows(normalized)
+      setActiveCols(cols)
+      populateSheet(selected, normalized, cols, formulas)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }, [selected, headers, populateSheet])
+
+  /** B2: 用户在 Univer 中编辑后回写后端（user_manual 标记） */
+  const writeCellManual = useCallback(
+    async (
+      tableName: string,
+      rowId: string,
+      colName: string,
+      value: unknown,
+    ) => {
+      try {
+        // 后端 /data/cells/write 仅接受 ai_generated/algorithm_derived/formula_computed
+        // 因此先写值，再调用 /data/cells/mark-manual 把 provenance 翻为 user_manual。
+        await apiFetch('/data/cells/write', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            table_name: tableName,
+            updates: [{ row_id: rowId, column: colName, value }],
+            source_tag: 'algorithm_derived',
+          }),
+        })
+        await apiFetch('/data/cells/mark-manual', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ table_name: tableName, row_id: rowId, column: colName }),
+        })
+        // 同步本地缓存
+        const cache = tableRowsCacheRef.current.get(tableName)
+        if (cache) {
+          for (const r of cache) {
+            if (String(r.row_id) === rowId) {
+              r[colName] = value as never
+              break
+            }
+          }
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        setErr(`单元格保存失败：${msg}`)
+        if (typeof window !== 'undefined') {
+          window.alert(`单元格保存失败：${msg}`)
+        }
+        await reloadActiveTable()
+      }
+    },
+    [headers, reloadActiveTable],
+  )
+
+  useEffect(() => {
+    writeCellManualRef.current = writeCellManual
+  }, [writeCellManual])
 
   async function advancePipeline() {
     if (!pipeline?.next_expected_step) return
@@ -321,16 +556,10 @@ export default function Workbench() {
     }
   }
 
-  const { tableCols, tableRows } = useMemo(() => {
-    const safe = rows.filter(
-      (row): row is Record<string, unknown> =>
-        row != null && typeof row === 'object' && !Array.isArray(row),
-    )
-    if (safe.length === 0) {
-      return { tableCols: selected ? ['(空表)'] : ([] as string[]), tableRows: [] as Record<string, unknown>[] }
-    }
-    return { tableCols: Object.keys(safe[0]), tableRows: safe }
-  }, [rows, selected])
+  const formulaCols = useMemo(
+    () => activeCols.filter((c) => columnFormulas[c]),
+    [activeCols, columnFormulas],
+  )
 
   const agentPlaceholder = useMemo(() => {
     if (agentMode === 'init' && pipeline?.next_expected_step) {
@@ -427,36 +656,19 @@ export default function Workbench() {
 
         <section className="wb-center">
           <h3>{selected || '未选择表'}</h3>
-          <div className="table-wrap">
-            <table className="grid">
-              <thead>
-                <tr>
-                  {tableCols.map((c) => {
-                    const f = columnFormulas[c]
-                    return (
-                      <th
-                        key={c}
-                        className={f ? 'col-has-formula' : undefined}
-                        title={f ? `公式：${f}` : c}
-                      >
-                        {c}
-                        {f ? <span className="formula-mark" aria-hidden="true" /> : null}
-                      </th>
-                    )
-                  })}
-                </tr>
-              </thead>
-              <tbody>
-                {tableRows.map((r, i) => (
-                  <tr key={i}>
-                    {tableCols.map((c) => (
-                      <td key={c}>{String(r[c] ?? '')}</td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          {formulaCols.length > 0 && (
+            <div className="wb-formula-bar" title="列公式（只读）">
+              <strong className="wb-formula-bar-label">列公式：</strong>
+              {formulaCols.map((c) => (
+                <span key={c} className="wb-formula-chip">
+                  <code>{c}</code>
+                  <span className="wb-formula-eq"> = </span>
+                  <code>{columnFormulas[c]}</code>
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="wb-univer-host" ref={univerHostRef} />
         </section>
 
         <aside className="wb-right">
