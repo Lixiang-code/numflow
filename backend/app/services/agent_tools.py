@@ -997,8 +997,12 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                     column_meta=col_meta,
                 )
             except ValueError as e:
-                out = {"error": str(e)}
-    elif name == "write_cells":
+                tname = str(args.get("table_name", ""))
+                known = _list_known_tables(conn)
+                out = {
+                    "error": f"create_table '{tname}' 失败: {e}",
+                    "fix": f"若表已存在请先 delete_table 或换表名。当前已有表: {known}",
+                }
         if not p.can_write:
             out = {"error": "无写权限"}
         else:
@@ -1081,14 +1085,22 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
         if not p.can_write:
             out = {"error": "无写权限"}
         else:
+            tname = str(args.get("table_name", ""))
             try:
-                out = delete_dynamic_table(
-                    conn,
-                    table_name=str(args.get("table_name", "")),
-                    confirm=args.get("confirm"),
-                )
+                out = delete_dynamic_table(conn, table_name=tname, confirm=args.get("confirm"))
             except ValueError as e:
-                out = {"error": str(e)}
+                msg = str(e)
+                known = _list_known_tables(conn)
+                if "依赖" in msg or "depend" in msg.lower():
+                    out = {
+                        "error": f"delete_table '{tname}' 被阻塞: {msg}",
+                        "fix": "先用 get_dependency_graph 查看哪些表依赖它，或先删除/修改下游表的公式",
+                    }
+                else:
+                    out = {
+                        "error": f"delete_table '{tname}' 失败: {msg}",
+                        "fix": f"确认表名正确。当前已有表: {known}",
+                    }
     elif name == "create_snapshot":
         if not p.can_write:
             out = {"error": "无写权限"}

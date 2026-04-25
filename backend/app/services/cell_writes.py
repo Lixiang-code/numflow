@@ -20,7 +20,9 @@ def apply_write_cells(
     t = assert_col_or_table(table_name)
     cur = conn.execute("SELECT 1 FROM _table_registry WHERE table_name = ?", (t,))
     if not cur.fetchone():
-        raise ValueError(f"未知表 {t}")
+        from app.services.agent_tools import _list_known_tables
+        known = _list_known_tables(conn)
+        raise ValueError(f"未知表 '{t}'，当前已注册表: {known}")
 
     # 缓存当前列名集合，避免每行都 PRAGMA
     existing_cols: set = {row[1] for row in conn.execute(f'PRAGMA table_info("{t}")')}
