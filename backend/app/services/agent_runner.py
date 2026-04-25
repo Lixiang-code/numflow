@@ -104,7 +104,12 @@ def _common_system(mode_norm: str) -> str:
             "【游戏类型适配】game_type 字段在 fixed_layer_config.core 中，必须读取后适配设计：\n"
             "  · rpg_turn（回合制）：战斗以回合为单位，速度影响行动顺序，无攻击间隔概念；\n"
             "  · rpg_realtime（即时制 Action RPG）：战斗实时进行，核心差异属性为 atk_spd/move_spd/base_atk_interval；\n"
-            "  两种类型在 HP/ATK/DEF/暴击/暴伤等属性上无本质差异，但即时制需额外处理速度类属性公式与上下限。",
+            "  两种类型在 HP/ATK/DEF/暴击/暴伤等属性上无本质差异，但即时制需额外处理速度类属性公式与上下限。\n"
+            "【智能子系统设计】当 fixed_layer_config.game_systems.ai_design_subsystems === true 时：\n"
+            "  · 子系统维度由 AI 自主设计，不受 subsystemsByPath 里的预设选项约束；\n"
+            "  · 应根据系统类型、游戏风格和项目定位，合理设计该系统的子维度（如宝石→套色/强化/解锁门槛；坐骑→天赋树/激活/外观；装备→强化/精炼/套装）；\n"
+            "  · 在 README 中说明各系统子系统维度的设计理由与玩法意图；\n"
+            "  · ai_design_subsystems=false 时，以用户在 subsystemsByPath 中的勾选为准。",
             "【3/4 工具规范】读工具可自由组合；写表/写 README/公式/算法调用仅在 execute 阶段且需写权限；"
             "每次写入必须带合法 source_tag；大批量用 read_table 的 limit/columns 切片。\n"
             "公式引用语法：@表名[列名]=逐行取同行值（数学计算用）；@@表名[列名]=整列数组（VLOOKUP/INDEX/MATCH/SUM/AVERAGE 等查找聚合用）。\n"

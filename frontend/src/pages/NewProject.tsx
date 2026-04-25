@@ -118,13 +118,12 @@ function TopLevelCustomAdder({ onAdd }: { onAdd: (label: string) => void }) {
     )
   }
   return (
-    <div style={{ paddingLeft: '6px', paddingBottom: '4px', paddingTop: '4px' }}>
-      <button type="button"
-        style={{ border: '1px dashed #c6e0b4', background: 'transparent', color: '#217346',
-          fontSize: '0.8rem', padding: '0.25rem 0.7rem', borderRadius: '4px', cursor: 'pointer' }}
-        onClick={() => setAdding(true)}>
-        + 自定义顶级系统
-      </button>
+    <div
+      className="custom-add-row"
+      style={{ paddingLeft: '6px', cursor: 'pointer', color: '#217346', fontSize: '0.8rem', paddingTop: '5px', paddingBottom: '5px' }}
+      onClick={() => setAdding(true)}
+    >
+      + 自定义顶级系统
     </div>
   )
 }
@@ -162,24 +161,25 @@ function TreeNodeRow({
 
   return (
     <div>
-      <div className="tree-row" style={{ paddingLeft: `${depth * 14 + 6}px` }}>
+      <div
+        className="tree-row"
+        style={{ paddingLeft: `${depth * 14 + 6}px` }}
+        onClick={() => onToggle(node.id, !checked.has(node.id))}
+      >
         <input
           type="checkbox"
           checked={checked.has(node.id)}
           onChange={(e) => onToggle(node.id, e.target.checked)}
+          onClick={(e) => e.stopPropagation()}
         />
-        <span
-          className="node-label"
-          style={{ cursor: hasChildren ? 'pointer' : 'default' }}
-          onClick={() => hasChildren && setExpanded((v) => !v)}
-        >
+        <span className="node-label">
           {node.label}
         </span>
         {node.badge && <span className="node-badge">{node.badge}</span>}
         {hasChildren && (
           <span
-            style={{ fontSize: '0.7rem', color: '#999', cursor: 'pointer', marginLeft: 2 }}
-            onClick={() => setExpanded((v) => !v)}
+            style={{ fontSize: '0.7rem', color: '#999', cursor: 'pointer', marginLeft: 2, padding: '0 4px' }}
+            onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v) }}
           >
             {expanded ? '▾' : '▸'}
           </span>
@@ -198,18 +198,24 @@ function TreeNodeRow({
             />
           ))}
           {myCustomChildren.map((cn) => (
-            <div key={cn.id} className="tree-row" style={{ paddingLeft: `${(depth + 1) * 14 + 6}px` }}>
+            <div
+              key={cn.id}
+              className="tree-row"
+              style={{ paddingLeft: `${(depth + 1) * 14 + 6}px` }}
+              onClick={() => onToggle(cn.id, !checked.has(cn.id))}
+            >
               <input
                 type="checkbox"
                 checked={checked.has(cn.id)}
                 onChange={(e) => onToggle(cn.id, e.target.checked)}
+                onClick={(e) => e.stopPropagation()}
               />
               <span className="node-label" style={{ fontStyle: 'italic' }}>{cn.label}</span>
               <span className="node-badge" style={{ color: '#217346' }}>自定义</span>
               <button
                 type="button"
                 style={{ marginLeft: 4, border: 'none', background: 'none', cursor: 'pointer', color: '#c00', fontSize: '0.7rem' }}
-                onClick={() => onRemoveCustom(cn.id)}
+                onClick={(e) => { e.stopPropagation(); onRemoveCustom(cn.id) }}
                 title="删除"
               >x</button>
             </div>
@@ -232,15 +238,12 @@ function TreeNodeRow({
                 onClick={() => setAddingCustom(false)}>取消</button>
             </div>
           ) : (
-            <div style={{ paddingLeft: `${(depth + 1) * 14 + 6}px` }}>
-              <button
-                type="button"
-                style={{ border: '1px dashed #c6e0b4', background: 'transparent', color: '#217346',
-                  fontSize: '0.75rem', marginTop: 2, padding: '0.2rem 0.5rem',
-                  borderRadius: '4px', cursor: 'pointer' }}
-                onClick={() => setAddingCustom(true)}>
-                + 自定义子系统
-              </button>
+            <div
+              className="custom-add-row"
+              style={{ paddingLeft: `${(depth + 1) * 14 + 6}px`, cursor: 'pointer', color: '#217346', fontSize: '0.75rem' }}
+              onClick={() => setAddingCustom(true)}
+            >
+              + 自定义子系统
             </div>
           )}
         </>
@@ -255,7 +258,7 @@ function TreeNodeRow({
 type CustomSub = { id: string; label: string }
 
 function SubsystemBlock({
-  pathId, pathLabel, subs, customSubs, onToggle, onAddCustomSub, onRemoveCustomSub,
+  pathId, pathLabel, subs, customSubs, onToggle, onAddCustomSub, onRemoveCustomSub, aiDesign,
 }: {
   pathId: string
   pathLabel: string
@@ -264,6 +267,7 @@ function SubsystemBlock({
   onToggle: (subId: string, on: boolean) => void
   onAddCustomSub: (label: string) => void
   onRemoveCustomSub: (id: string) => void
+  aiDesign?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [adding, setAdding] = useState(false)
@@ -282,12 +286,12 @@ function SubsystemBlock({
       <div className={`subsystem-expand-head${open ? ' open' : ''}`} onClick={() => setOpen((v) => !v)}>
         <span className="chevron">▶</span>
         <span>{pathLabel}</span>
-        <span style={{ marginLeft: 'auto', fontWeight: 400, fontSize: '0.75rem', color: '#999' }}>
-          已选 {subs.length}/{totalOptions}
+        <span style={{ marginLeft: 'auto', fontWeight: 400, fontSize: '0.75rem', color: aiDesign ? 'var(--green)' : '#999' }}>
+          {aiDesign ? '🤖 AI 自动设计' : `已选 ${subs.length}/${totalOptions}`}
         </span>
       </div>
       {open && (
-        <div className="subsystem-grid">
+        <div className="subsystem-grid" style={aiDesign ? { opacity: 0.45, pointerEvents: 'none' } : undefined}>
           {subsystemOpts.map((opt) => (
             <label key={opt.id}>
               <input
@@ -314,7 +318,7 @@ function SubsystemBlock({
               >×</button>
             </label>
           ))}
-          {adding ? (
+          {!aiDesign && (adding ? (
             <div className="custom-add-row" style={{ gridColumn: '1 / -1', marginTop: 4 }}>
               <input
                 autoFocus
@@ -332,17 +336,16 @@ function SubsystemBlock({
                 onClick={() => setAdding(false)}>取消</button>
             </div>
           ) : (
-            <button
-              type="button"
+            <div
               style={{
                 gridColumn: '1 / -1', border: '1px dashed #c6e0b4', background: 'transparent',
-                color: '#217346', fontSize: '0.75rem', padding: '0.2rem 0.5rem',
-                borderRadius: '4px', cursor: 'pointer', marginTop: 4,
+                color: '#217346', fontSize: '0.75rem', padding: '0.3rem 0.5rem',
+                borderRadius: '4px', cursor: 'pointer', marginTop: 4, textAlign: 'center',
               }}
               onClick={() => setAdding(true)}>
               + 自定义维度
-            </button>
-          )}
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -373,11 +376,12 @@ function AttrCustomAdder({ label, indent, onAdd }: { label: string; indent: numb
     )
   }
   return (
-    <div style={{ paddingLeft: indent, paddingBottom: 3, paddingTop: 3 }}>
-      <button type="button"
-        style={{ border: '1px dashed #c6e0b4', background: 'transparent', color: '#217346',
-          fontSize: '0.75rem', padding: '0.2rem 0.5rem', borderRadius: '4px', cursor: 'pointer' }}
-        onClick={() => setAdding(true)}>{label}</button>
+    <div
+      className="custom-add-row"
+      style={{ paddingLeft: indent, cursor: 'pointer', color: '#217346', fontSize: '0.75rem', paddingTop: 4, paddingBottom: 4 }}
+      onClick={() => setAdding(true)}
+    >
+      {label}
     </div>
   )
 }
@@ -461,6 +465,7 @@ export default function NewProject() {
   const [core,        setCore]        = useState<CoreDraft>(initialDraft.core)
   const [gameSystems, setGameSystems] = useState<GameSystemsDraft>(initialDraft.gameSystems)
   const [attributes,  setAttributes]  = useState<AttributesDraft>(initialDraft.attributes)
+  const [aiDesignSubsystems, setAiDesignSubsystems] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
   const persist = useCallback(() => {
@@ -618,7 +623,8 @@ export default function NewProject() {
     try {
       const settings = {
         mode: 'options', core, prompt_text: '',
-        game_systems: gameSystems, attribute_systems: attributes,
+        game_systems: { ...gameSystems, ai_design_subsystems: aiDesignSubsystems },
+        attribute_systems: attributes,
       }
       const res = await apiFetch('/projects', {
         method: 'POST',
@@ -936,9 +942,22 @@ export default function NewProject() {
 
                 {gameSystems.checkedPaths.length > 0 && (
                   <div className="form-section">
-                    <div className="form-section-title">子系统维度配置</div>
+                    <div style={{ display: 'flex', alignItems: 'center', marginBottom: '0.4rem' }}>
+                      <div className="form-section-title" style={{ margin: 0, flex: 1 }}>子系统维度配置</div>
+                      <label style={{ flexDirection: 'row', alignItems: 'center', gap: 5, fontSize: '0.8rem', fontWeight: 500, color: 'var(--green-dark)', cursor: 'pointer', margin: 0 }}>
+                        <input
+                          type="checkbox"
+                          checked={aiDesignSubsystems}
+                          onChange={(e) => setAiDesignSubsystems(e.target.checked)}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                        智能设计子系统
+                      </label>
+                    </div>
                     <p className="muted small" style={{ marginBottom: '0.5rem' }}>
-                      点击展开每个系统独立配置；经济/世界/怪物系统已配置专属维度选项。
+                      {aiDesignSubsystems
+                        ? '已启用智能设计：AI 将根据选中系统和游戏定位自主设计子系统维度，无需手动勾选。'
+                        : '点击展开每个系统独立配置；经济/世界/怪物系统已配置专属维度选项。'}
                     </p>
                     {gameSystems.checkedPaths.map((pathId) => {
                         const customNode = gameSystems.customNodes.find((c) => c.id === pathId)
@@ -953,6 +972,7 @@ export default function NewProject() {
                             onToggle={(subId, on) => toggleSubsystem(pathId, subId, on)}
                             onAddCustomSub={(label) => addCustomSubsystem(pathId, label)}
                             onRemoveCustomSub={(subId) => removeCustomSubsystem(pathId, subId)}
+                            aiDesign={aiDesignSubsystems}
                           />
                         )
                       })}
