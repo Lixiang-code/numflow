@@ -148,7 +148,8 @@ _EXECUTE_SYSTEM_TAIL = (
     "     （例如：同时 get_default_system_rules + get_table_list + get_dependency_graph）；不要一次只发一个再等结果。"
     "     只有真正存在依赖关系（B 需读 A 的结果）时才允许下一回合再发。\n"
     "  4. **每张新等级表只调用一次 setup_level_table**：把所有列的公式同时塞进 columns 数组，一次建表 + 全量回填，不要分多次。\n"
-    "  5. 简短自然语言总结放在最后一回合，引用工具结果中的 `executed_count / rows_updated` 等关键字段。"
+    "  5. **单次 write_cells 不超过 30 行**：若必须手写数据，每次 updates 最多 30 条，超出须分多次调用（否则 JSON 会被截断）。\n"
+    "  6. 简短自然语言总结放在最后一回合，引用工具结果中的 `executed_count / rows_updated` 等关键字段。"
 )
 
 
@@ -392,25 +393,44 @@ def run_agent_sse(
                 tool_choice="auto",
                 parallel_tool_calls=True,
                 temperature=0.2,
-                max_tokens=4096,
+                max_tokens=8192,
             )
         except Exception as e:  # noqa: BLE001
             yield _emit("execute", {"type": "error", "message": f"execute 调用失败: {e!r}"})
             return
         choice = resp.choices[0]
+        finish_reason = getattr(choice, "finish_reason", None) or ""
         msg = choice.message
         tool_calls = getattr(msg, "tool_calls", None) or []
 
+        # ---- 输出被 token 限制截断：注入修复提示让模型重新分批 ----
+        if finish_reason == "length":
+            yield _emit("execute", {"type": "log", "message": "⚠ 模型输出被 max_tokens 截断，注入重试提示"})
+            execute_messages.append({"role": "assistant", "content": msg.content or ""})
+            execute_messages.append({
+                "role": "user",
+                "content": (
+                    "你的上一次输出因超过 token 限制而被截断，部分工具调用参数不完整。"
+                    "请重新规划并分批执行：\n"
+                    "1. 优先使用 register_formula/bulk_register_and_compute 替代逐行 write_cells\n"
+                    "2. 若必须 write_cells，每次不超过 30 行（分多轮调用）\n"
+                    "3. 重新生成完整的工具调用参数"
+                ),
+            })
+            continue
+
         if tool_calls:
             def _safe_args(raw: Optional[str]) -> str:
-                """确保 function.arguments 是合法 JSON，防止下一轮请求被 DashScope 400 拒绝。"""
+                """确保 function.arguments 是合法 JSON，防止下一轮请求被 DashScope 400 拒绝。
+                截断的 JSON 用 {"_truncated": true} 标记，让模型感知并重试。"""
                 if not raw:
                     return "{}"
                 try:
                     json.loads(raw)
                     return raw
                 except json.JSONDecodeError:
-                    return "{}"
+                    # 保留截断信息，而非静默丢弃
+                    return json.dumps({"_truncated": True, "_raw_prefix": raw[:120]}, ensure_ascii=False)
 
             execute_messages.append(
                 {
@@ -653,7 +673,7 @@ def _run_recovery_sse(
                 tool_choice="auto",
                 parallel_tool_calls=True,
                 temperature=0.1,
-                max_tokens=4096,
+                max_tokens=8192,
             )
         except Exception as e:  # noqa: BLE001
             yield _emit("execute", {"type": "error", "message": f"修复执行调用失败: {e!r}"})

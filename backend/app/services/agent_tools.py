@@ -884,9 +884,11 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                         "status": "error",
                         "data": None,
                         "warnings": [
-                            f"tool_call arguments JSON decode failed: {exc!r}; raw={arguments[:200]!r}"
+                            f"参数 JSON 解析失败（很可能是输出被 max_tokens 截断）：{exc!r}；"
+                            f"请将此次调用拆分为更小的批次重试。raw前缀={arguments[:120]!r}"
                         ],
                         "blocked_cells": [],
+                        "hint": "请减少单次 write_cells 的 updates 数量（建议≤30行），或优先用公式代替逐行写入",
                     },
                     ensure_ascii=False,
                 )
