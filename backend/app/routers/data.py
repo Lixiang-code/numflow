@@ -103,10 +103,13 @@ def describe_table(table_name: str, p: ProjectDB = Depends(get_project_read)):
         except json.JSONDecodeError:
             rules_parsed = None
     curf = conn.execute(
-        "SELECT column_name, formula FROM _formula_registry WHERE table_name = ?",
+        "SELECT column_name, formula, COALESCE(formula_type, 'sql') AS formula_type FROM _formula_registry WHERE table_name = ?",
         (t,),
     )
-    column_formulas = {str(r["column_name"]): str(r["formula"]) for r in curf.fetchall()}
+    column_formulas = {
+        str(r["column_name"]): {"formula": str(r["formula"]), "type": str(r["formula_type"])}
+        for r in curf.fetchall()
+    }
 
     return {
         "table_name": t,

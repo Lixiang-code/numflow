@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
-from app.services.formula_engine import eval_series, parse_formula_refs
+from app.services.formula_engine import eval_row_formula, eval_series, parse_formula_refs, parse_row_refs
 
 Node = Tuple[str, str]
 
@@ -212,3 +212,169 @@ def recalculate_downstream(conn: sqlite3.Connection, table_name: str, column_nam
         except ValueError as e:
             errors.append(f"{ft}.{fc}: {e}")
     return {"executed": done, "errors": errors}
+
+
+# ────────────────────────── 同行列公式（row / row_template） ──────────────────────────
+
+
+def register_row_formula(
+    conn: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    raw_formula: str,
+) -> Dict[str, Any]:
+    """注册同行列公式（@col_name 语法）。
+    所有引用列均在表内 → formula_type='row'，立即计算所有行。
+    存在外部参数 → formula_type='row_template'，仅记录不计算。
+    """
+    cur = conn.execute("SELECT 1 FROM _table_registry WHERE table_name = ?", (table_name,))
+    if not cur.fetchone():
+        raise ValueError(f"表 {table_name} 不存在")
+
+    df = load_table_df(conn, table_name)
+    available_cols: Set[str] = set(df.columns) - {"row_id"}
+
+    refs = parse_row_refs(raw_formula)
+    external_refs = refs - available_cols
+    is_computable = len(external_refs) == 0
+    formula_type = "row" if is_computable else "row_template"
+
+    conn.execute(
+        """
+        INSERT INTO _formula_registry (table_name, column_name, formula, formula_type)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(table_name, column_name) DO UPDATE SET
+            formula = excluded.formula,
+            formula_type = excluded.formula_type
+        """,
+        (table_name, column_name, raw_formula, formula_type),
+    )
+
+    computed_count = 0
+    warnings: List[str] = []
+
+    if is_computable and len(df) > 0:
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        for _, row_data in df.iterrows():
+            row_dict: Dict[str, Any] = {c: row_data[c] for c in df.columns}
+            val, missing = eval_row_formula(raw_formula, row_dict, available_cols)
+            if missing:
+                warnings.append(f"行 {row_dict.get('row_id')}: 缺少 {missing}")
+                continue
+            try:
+                val = round(float(val), 6) if val is not None else None
+            except (TypeError, ValueError):
+                pass
+            conn.execute(
+                f'UPDATE "{table_name}" SET "{column_name}" = ? WHERE row_id = ?',
+                (val, str(row_dict["row_id"])),
+            )
+            _upsert_formula_provenance(
+                conn,
+                table_name=table_name,
+                row_id=str(row_dict["row_id"]),
+                column_name=column_name,
+                now=now,
+            )
+            computed_count += 1
+        conn.commit()
+    else:
+        warnings = [f"外部参数 {r} 不在表内（运行时模板，需外部系统计算）" for r in sorted(external_refs)]
+        conn.commit()
+
+    return {
+        "ok": True,
+        "formula_type": formula_type,
+        "is_computable": is_computable,
+        "external_refs": sorted(external_refs),
+        "computed_rows": computed_count,
+        "warnings": warnings,
+    }
+
+
+def execute_row_formula(
+    conn: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+) -> Dict[str, Any]:
+    """重新执行已注册的同行公式，计算所有行。"""
+    cur = conn.execute(
+        "SELECT formula, formula_type FROM _formula_registry WHERE table_name = ? AND column_name = ?",
+        (table_name, column_name),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise ValueError("未注册公式")
+
+    formula = row[0]
+    formula_type = row[1] if row[1] else "sql"
+
+    if formula_type == "sql":
+        return execute_formula_on_column(conn, table_name, column_name)
+
+    df = load_table_df(conn, table_name)
+    available_cols: Set[str] = set(df.columns) - {"row_id"}
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    updated = 0
+    errors: List[str] = []
+
+    for _, row_data in df.iterrows():
+        row_dict: Dict[str, Any] = {c: row_data[c] for c in df.columns}
+        val, missing = eval_row_formula(formula, row_dict, available_cols)
+        if missing:
+            errors.append(f"行 {row_dict.get('row_id')}: 缺少参数 {missing}")
+            continue
+        try:
+            val = round(float(val), 6) if val is not None else None
+        except (TypeError, ValueError):
+            pass
+        conn.execute(
+            f'UPDATE "{table_name}" SET "{column_name}" = ? WHERE row_id = ?',
+            (val, str(row_dict["row_id"])),
+        )
+        _upsert_formula_provenance(
+            conn,
+            table_name=table_name,
+            row_id=str(row_dict["row_id"]),
+            column_name=column_name,
+            now=now,
+        )
+        updated += 1
+    conn.commit()
+    return {"ok": True, "rows_updated": updated, "rows_total": len(df), "errors": errors}
+
+
+def delete_column_formula(
+    conn: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+) -> Dict[str, Any]:
+    """从注册表删除列公式（SQL 或 row 类型均可删）。"""
+    conn.execute(
+        "DELETE FROM _formula_registry WHERE table_name = ? AND column_name = ?",
+        (table_name, column_name),
+    )
+    conn.commit()
+    return {"ok": True}
+
+
+def recalculate_row_formulas_for_table(
+    conn: sqlite3.Connection,
+    table_name: str,
+) -> Dict[str, Any]:
+    """重新计算表内所有 row 类型公式（不含 row_template）。"""
+    cur = conn.execute(
+        "SELECT column_name FROM _formula_registry WHERE table_name = ? AND formula_type = 'row'",
+        (table_name,),
+    )
+    cols = [r[0] for r in cur.fetchall()]
+    done: List[str] = []
+    errors: List[str] = []
+    for c in cols:
+        try:
+            execute_row_formula(conn, table_name, c)
+            done.append(c)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{c}: {e}")
+    return {"recalculated": done, "errors": errors}
+

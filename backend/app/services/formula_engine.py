@@ -491,6 +491,62 @@ def eval_series(formula: str, frames: Dict[str, pd.DataFrame]) -> pd.Series:
     return pd.Series([float(v)] * n)
 
 
+# 同行列引用：@col_name（无表前缀，无括号），不匹配 @T[col] 与 @@T[col]
+_SAME_ROW_REF = re.compile(
+    r"(?<!@)@(?!@)([\u4e00-\u9fffA-Za-z_][\u4e00-\u9fffA-Za-z0-9_]*)(?!\[)"
+)
+
+
+def preprocess_formula(formula: str) -> str:
+    """将 Excel 风格运算符（大写 AND/OR/NOT/TRUE/FALSE）转为 Python 兼容写法。"""
+    formula = re.sub(r"\bAND\b", "and", formula)
+    formula = re.sub(r"\bOR\b", "or", formula)
+    formula = re.sub(r"\bNOT\b", "not", formula)
+    formula = re.sub(r"\bTRUE\b", "True", formula)
+    formula = re.sub(r"\bFALSE\b", "False", formula)
+    return formula
+
+
+def parse_row_refs(formula: str) -> Set[str]:
+    """返回公式中所有同行列引用 @col（无表前缀、无括号）的列名集合。"""
+    return set(_SAME_ROW_REF.findall(formula))
+
+
+def eval_row_formula(
+    formula: str,
+    row_dict: Dict[str, Any],
+    available_cols: Set[str],
+) -> Tuple[Any, Set[str]]:
+    """对单行求值同行列公式（@col_name 语法）。
+    返回 (值, 外部参数集合)。若外部参数集合非空，表示公式无法自动计算（运行时模板）。
+    """
+    refs = set(_SAME_ROW_REF.findall(formula))
+    external_refs = {r for r in refs if r not in available_cols}
+    if external_refs:
+        return None, external_refs
+
+    expr = preprocess_formula(formula)
+    name_map: Dict[str, Any] = {}
+    ref_to_key: Dict[str, str] = {}
+    for i, ref in enumerate(sorted(refs)):
+        key = f"__r{i}__"
+        ref_to_key[ref] = key
+        val = row_dict.get(ref)
+        try:
+            name_map[key] = float(val) if val is not None else 0.0
+        except (TypeError, ValueError):
+            name_map[key] = 0.0
+
+    for ref, key in ref_to_key.items():
+        expr = re.sub(r"@" + re.escape(ref) + r"(?!\[)", key, expr)
+
+    try:
+        result = safe_eval_scalar(expr, name_map)
+        return result, set()
+    except Exception as e:  # noqa: BLE001
+        return None, {f"__eval_error__: {e}"}
+
+
 def safe_eval_vector(
     expr: str,
     scalar_map: Dict[str, pd.Series],

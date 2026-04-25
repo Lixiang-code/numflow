@@ -11,6 +11,9 @@ import '@univerjs/preset-sheets-core/lib/index.css'
 
 type TableInfo = { table_name: string; validation_status: string; layer: string; purpose?: string; display_name?: string }
 type ColumnMeta = { name: string; sql_type?: string; display_name?: string; dtype?: string }
+/** 列公式信息（含类型：sql / row / row_template） */
+type FormulaInfo = { formula: string; type: string }
+type FormulaMap = Record<string, FormulaInfo>
 
 type RuleSummary = {
   table?: string
@@ -66,8 +69,16 @@ export default function Workbench() {
   const [agentBusy, setAgentBusy] = useState(false)
   const [agentMode, setAgentMode] = useState<'init' | 'maintain'>('maintain')
   const [err, setErr] = useState<string | null>(null)
-  /** 列名 -> 公式（用于表头悬停） */
-  const [columnFormulas, setColumnFormulas] = useState<Record<string, string>>({})
+  /** 列名 -> 公式信息（用于公式栏显示与编辑） */
+  const [columnFormulas, setColumnFormulas] = useState<FormulaMap>({})
+  /** 公式栏：当前选中列名 */
+  const [formulaBarCol, setFormulaBarCol] = useState<string | null>(null)
+  /** 公式栏：正在编辑的公式文本 */
+  const [formulaBarText, setFormulaBarText] = useState('')
+  /** 公式栏：是否有未保存的改动 */
+  const [formulaBarDirty, setFormulaBarDirty] = useState(false)
+  /** 公式栏：是否正在保存 */
+  const [formulaBarSaving, setFormulaBarSaving] = useState(false)
   /** 当前活动表的列顺序（用于将 Univer 行/列索引映射回 row_id/列名） */
   const [activeCols, setActiveCols] = useState<string[]>([])
   /** 当前活动表的列元信息（中文名/数据类型，用于 3 行表头） */
@@ -92,7 +103,7 @@ export default function Workbench() {
   /** 每张已加载表的列顺序缓存 */
   const tableColsCacheRef = useRef<Map<string, string[]>>(new Map())
   /** 每张已加载表的列公式缓存 */
-  const tableFormulasCacheRef = useRef<Map<string, Record<string, string>>>(new Map())
+  const tableFormulasCacheRef = useRef<Map<string, FormulaMap>>(new Map())
   /** 每张已加载表的列元信息缓存（display_name/dtype） */
   const tableColMetaCacheRef = useRef<Map<string, ColumnMeta[]>>(new Map())
   /** 当前活动 table_name（事件回调内引用最新值） */
@@ -238,7 +249,32 @@ export default function Workbench() {
       void writeCellManualRef.current(tname, String(rid), colName, newVal)
     })
 
+    // 列点击检测：mouseup 时读取 Univer 当前选区的列索引并更新公式栏
+    const onUniverMouseUp = () => {
+      try {
+        const sh = workbookRef.current?.getActiveSheet()
+        if (!sh) return
+        const range = (sh as unknown as { getActiveRange?: () => { getColumn?: () => number } | null }).getActiveRange?.()
+        if (!range) return
+        const col = range.getColumn?.()
+        if (col == null || col < 0) return
+        const tname = activeTableRef.current
+        if (!tname) return
+        const cols = tableColsCacheRef.current.get(tname) || []
+        if (col >= cols.length) return
+        const colName = cols[col]
+        if (!colName) return
+        setFormulaBarCol(colName)
+        const formulas = tableFormulasCacheRef.current.get(tname) || {}
+        const fi = formulas[colName]
+        setFormulaBarText(fi?.formula || '')
+        setFormulaBarDirty(false)
+      } catch { /* ignore */ }
+    }
+    host.addEventListener('mouseup', onUniverMouseUp)
+
     return () => {
+      host.removeEventListener('mouseup', onUniverMouseUp)
       disposable.dispose()
       univer.dispose()
       univerRef.current = null
@@ -289,7 +325,7 @@ export default function Workbench() {
 
   /** 把一张表的数据写入对应 Univer sheet（首次或刷新调用） */
   const populateSheet = useCallback(
-    (tableName: string, rowsArr: Record<string, unknown>[], cols: string[], formulas: Record<string, string>, colMeta: ColumnMeta[] = [], displayName = '') => {
+    (tableName: string, rowsArr: Record<string, unknown>[], cols: string[], formulas: FormulaMap, colMeta: ColumnMeta[] = [], displayName = '') => {
       const wb = workbookRef.current
       if (!wb) return
       const sheetTitle = displayName ? `${displayName}（${tableName}）` : tableName
@@ -348,6 +384,37 @@ export default function Workbench() {
           freezer.setFrozenRows?.(3)
           freezer.setFrozen?.({ ySplit: 3, xSplit: 0 })
         } catch { /* ignore freeze errors */ }
+        // 公式模板列（row_template）高亮 + 自动检测含 @col 的单元格
+        try {
+          const rowPatn = /(?<!@)@(?!@)[\u4e00-\u9fffA-Za-z_]/
+          // 已注册的 row_template 公式列 → 列背景色
+          for (const [colName, fi] of Object.entries(formulas)) {
+            if (fi.type !== 'row_template') continue
+            const ci = cols.indexOf(colName)
+            if (ci < 0 || rowsArr.length === 0) continue
+            const colRange = sheet.getRange(3, ci, rowsArr.length, 1)
+            const s = colRange as unknown as { setBackgroundColor?: (c: string) => void; setBackground?: (c: string) => void }
+            s.setBackgroundColor?.('#fff9e6')
+            s.setBackground?.('#fff9e6')
+          }
+          // 未注册但含公式文本的列（如 calc_expr）→ 按列整体标黄
+          const colsWithFormulaCells = new Set<number>()
+          for (const row of rowsArr) {
+            for (let ci = 0; ci < cols.length; ci++) {
+              if (colsWithFormulaCells.has(ci)) continue
+              const v = row[cols[ci]]
+              if (typeof v === 'string' && rowPatn.test(v)) colsWithFormulaCells.add(ci)
+            }
+          }
+          for (const ci of colsWithFormulaCells) {
+            if (formulas[cols[ci]]) continue // 已注册的已处理
+            if (rowsArr.length === 0) continue
+            const colRange = sheet.getRange(3, ci, rowsArr.length, 1)
+            const s = colRange as unknown as { setBackgroundColor?: (c: string) => void; setBackground?: (c: string) => void }
+            s.setBackgroundColor?.('#fff9e6')
+            s.setBackground?.('#fff9e6')
+          }
+        } catch { /* ignore formula styling errors */ }
       } finally {
         suppressEditRef.current = false
       }
@@ -365,6 +432,9 @@ export default function Workbench() {
       setTableReadmeDraft('')
       setValidationRulesDraft('')
       setColumnFormulas({})
+      setFormulaBarCol(null)
+      setFormulaBarText('')
+      setFormulaBarDirty(false)
       activeTableRef.current = null
       return
     }
@@ -381,7 +451,7 @@ export default function Workbench() {
           headers,
         })) as {
           validation_rules?: { rules?: unknown[] } | null
-          column_formulas?: Record<string, string> | null
+          column_formulas?: Record<string, FormulaInfo | string> | null
           schema?: { columns?: { name?: string; sql_type?: string; display_name?: string; dtype?: string }[] }
           display_name?: string
         }
@@ -391,9 +461,16 @@ export default function Workbench() {
           (row): row is Record<string, unknown> =>
             row != null && typeof row === 'object' && !Array.isArray(row),
         )
-        const cf = desc.column_formulas && typeof desc.column_formulas === 'object' && !Array.isArray(desc.column_formulas)
-          ? (desc.column_formulas as Record<string, string>)
-          : {}
+        const cf: FormulaMap = {}
+        if (desc.column_formulas && typeof desc.column_formulas === 'object' && !Array.isArray(desc.column_formulas)) {
+          for (const [k, v] of Object.entries(desc.column_formulas)) {
+            if (v && typeof v === 'object' && 'formula' in v) {
+              cf[k] = v as FormulaInfo
+            } else if (typeof v === 'string') {
+              cf[k] = { formula: v, type: 'sql' }
+            }
+          }
+        }
         const schemaCols = Array.isArray(desc.schema?.columns) ? desc.schema!.columns! : []
         const colMeta: ColumnMeta[] = schemaCols.map((c) => ({
           name: String(c?.name ?? ''),
@@ -494,6 +571,27 @@ export default function Workbench() {
             }
           }
         }
+        // 如果当前表有 row 类型公式列，重算后刷新
+        const tableFormulas = tableFormulasCacheRef.current.get(tableName) || {}
+        const hasRowFormulas = Object.values(tableFormulas).some((fi) => fi.type === 'row')
+        if (hasRowFormulas) {
+          try {
+            await apiFetch(
+              `/compute/column-formula/recalculate-table?table_name=${encodeURIComponent(tableName)}`,
+              { method: 'POST', headers },
+            )
+            // 重算成功后刷新表格显示
+            const r2 = (await apiFetch(`/data/tables/${encodeURIComponent(tableName)}/rows?limit=200`, { headers })) as { rows?: unknown }
+            const rawRows2 = Array.isArray(r2.rows) ? r2.rows : []
+            const normalized2 = rawRows2.filter((row): row is Record<string, unknown> => row != null && typeof row === 'object' && !Array.isArray(row))
+            const cols2 = normalized2.length > 0 ? Object.keys(normalized2[0]) : tableColsCacheRef.current.get(tableName) || []
+            const colMeta2 = tableColMetaCacheRef.current.get(tableName) || []
+            const dn2 = activeDisplayName
+            tableRowsCacheRef.current.set(tableName, normalized2)
+            setRows(normalized2)
+            populateSheet(tableName, normalized2, cols2, tableFormulas, colMeta2, dn2)
+          } catch { /* 重算失败不影响写入 */ }
+        }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         setErr(`单元格保存失败：${msg}`)
@@ -503,7 +601,7 @@ export default function Workbench() {
         await reloadActiveTable()
       }
     },
-    [headers, reloadActiveTable],
+    [headers, reloadActiveTable, populateSheet, activeDisplayName],
   )
 
   useEffect(() => {
@@ -652,6 +750,76 @@ export default function Workbench() {
     [activeCols, columnFormulas],
   )
 
+  const formulaTypeLabel = (type: string) => {
+    if (type === 'row') return '行公式'
+    if (type === 'row_template') return '运行时模板'
+    return 'SQL公式'
+  }
+
+  async function saveColumnFormula() {
+    if (!selected || !formulaBarCol || !formulaBarText.trim()) return
+    setFormulaBarSaving(true)
+    setErr(null)
+    try {
+      await apiFetch('/compute/column-formula', {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ table_name: selected, column_name: formulaBarCol, formula: formulaBarText.trim() }),
+      })
+      setFormulaBarDirty(false)
+      // 刷新公式与表格数据
+      const desc = (await apiFetch(`/data/tables/${encodeURIComponent(selected)}`, { headers })) as {
+        column_formulas?: Record<string, FormulaInfo | string>
+      }
+      const cf: FormulaMap = {}
+      if (desc.column_formulas) {
+        for (const [k, v] of Object.entries(desc.column_formulas)) {
+          if (v && typeof v === 'object' && 'formula' in v) cf[k] = v as FormulaInfo
+          else if (typeof v === 'string') cf[k] = { formula: v, type: 'sql' }
+        }
+      }
+      setColumnFormulas(cf)
+      tableFormulasCacheRef.current.set(selected, cf)
+      await reloadActiveTable()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+    setFormulaBarSaving(false)
+  }
+
+  async function deleteColumnFormula() {
+    if (!selected || !formulaBarCol) return
+    setErr(null)
+    try {
+      await apiFetch(
+        `/compute/column-formula?table_name=${encodeURIComponent(selected)}&column_name=${encodeURIComponent(formulaBarCol)}`,
+        { method: 'DELETE', headers },
+      )
+      setFormulaBarText('')
+      setFormulaBarDirty(false)
+      const newCf = { ...columnFormulas }
+      delete newCf[formulaBarCol]
+      setColumnFormulas(newCf)
+      tableFormulasCacheRef.current.set(selected, newCf)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  async function recalculateColumnFormula() {
+    if (!selected || !formulaBarCol) return
+    setErr(null)
+    try {
+      await apiFetch(
+        `/compute/column-formula/recalculate?table_name=${encodeURIComponent(selected)}&column_name=${encodeURIComponent(formulaBarCol)}`,
+        { method: 'POST', headers },
+      )
+      await reloadActiveTable()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   const agentPlaceholder = useMemo(() => {
     if (agentMode === 'init' && pipeline?.next_expected_step) {
       return `例如：完成「${pipelineStepLabel(pipeline.next_expected_step)}」…`
@@ -784,18 +952,73 @@ export default function Workbench() {
 
         <section className="wb-center">
           <h3>{selected || '未选择表'}</h3>
-          {formulaCols.length > 0 && (
-            <div className="wb-formula-bar" title="列公式（只读）">
-              <strong className="wb-formula-bar-label">列公式：</strong>
-              {formulaCols.map((c) => (
-                <span key={c} className="wb-formula-chip">
-                  <code>{c}</code>
-                  <span className="wb-formula-eq"> = </span>
-                  <code>{columnFormulas[c]}</code>
-                </span>
-              ))}
-            </div>
-          )}
+          <div className="wb-formula-bar">
+            <span className="wb-formula-bar-label">
+              {formulaBarCol ? (
+                <>
+                  <strong>fx</strong>: {formulaBarCol}
+                  {columnFormulas[formulaBarCol] && (
+                    <span className={`wb-formula-type-badge wb-ftype-${columnFormulas[formulaBarCol].type}`}>
+                      {formulaTypeLabel(columnFormulas[formulaBarCol].type)}
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span className="muted">点击单元格列以选择</span>
+              )}
+            </span>
+            {formulaBarCol && (
+              <>
+                <input
+                  className="wb-formula-bar-input"
+                  value={formulaBarText}
+                  onChange={(e) => { setFormulaBarText(e.target.value); setFormulaBarDirty(true) }}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void saveColumnFormula() } }}
+                  placeholder="输入公式，例如: @delta_val * (1 - @blend_weight)"
+                  disabled={!canWrite || readOnly}
+                  spellCheck={false}
+                />
+                {canWrite && !readOnly && (
+                  <>
+                    <button
+                      type="button"
+                      className="btn tiny primary"
+                      onClick={() => void saveColumnFormula()}
+                      disabled={!formulaBarDirty || formulaBarSaving || !formulaBarText.trim()}
+                      title="保存公式（Enter）"
+                    >
+                      {formulaBarSaving ? '…' : '保存'}
+                    </button>
+                    {columnFormulas[formulaBarCol]?.type === 'row' && (
+                      <button
+                        type="button"
+                        className="btn tiny"
+                        onClick={() => void recalculateColumnFormula()}
+                        title="重新计算此列所有行"
+                      >
+                        重算
+                      </button>
+                    )}
+                    {columnFormulas[formulaBarCol] && (
+                      <button
+                        type="button"
+                        className="btn tiny danger"
+                        onClick={() => void deleteColumnFormula()}
+                        title="删除列公式"
+                      >
+                        删除
+                      </button>
+                    )}
+                  </>
+                )}
+              </>
+            )}
+            {formulaCols.length > 0 && !formulaBarCol && (
+              <span className="muted small" style={{ marginLeft: '0.5rem' }}>
+                {formulaCols.length} 个公式列
+              </span>
+            )}
+          </div>
           <div className="wb-univer-host" ref={univerHostRef} />
           {readOnly && (
             <div className="wb-readonly-overlay" title="只读模式">

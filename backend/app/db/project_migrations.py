@@ -17,6 +17,7 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, col: str, col_d
 def ensure_project_migrations(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "_table_registry", "validation_rules_json", "TEXT")
     _add_column_if_missing(conn, "_snapshots", "payload_json", "TEXT")
+    _add_column_if_missing(conn, "_formula_registry", "formula_type", "TEXT NOT NULL DEFAULT 'sql'")
 
     conn.execute(
         """

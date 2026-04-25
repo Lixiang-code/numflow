@@ -10,9 +10,13 @@ from pydantic import BaseModel, Field
 from app.deps import ProjectDB, get_project_read, get_project_write
 from app.services import algorithms
 from app.services.formula_exec import (
+    delete_column_formula as delete_column_formula_svc,
     execute_formula_on_column,
+    execute_row_formula as execute_row_formula_svc,
     recalculate_downstream as recalc_downstream_svc,
+    recalculate_row_formulas_for_table as recalc_row_svc,
     register_formula as register_formula_svc,
+    register_row_formula as register_row_formula_svc,
 )
 
 router = APIRouter(prefix="/compute", tags=["compute"])
@@ -92,3 +96,53 @@ def recalculate_downstream(
     p: ProjectDB = Depends(get_project_write),
 ):
     return recalc_downstream_svc(p.conn, table_name, column_name)
+
+
+class ColumnFormulaBody(BaseModel):
+    table_name: str = Field(min_length=1)
+    column_name: str = Field(min_length=1)
+    formula: str = Field(min_length=1)
+
+
+@router.put("/column-formula")
+def put_column_formula(body: ColumnFormulaBody, p: ProjectDB = Depends(get_project_write)):
+    """注册或更新列公式（@col_name 同行引用语法）。"""
+    try:
+        return register_row_formula_svc(p.conn, body.table_name, body.column_name, body.formula)
+    except ValueError as e:
+        raise _http_from_formula_error(e) from e
+
+
+@router.delete("/column-formula")
+def delete_column_formula(
+    table_name: str = Query(...),
+    column_name: str = Query(...),
+    p: ProjectDB = Depends(get_project_write),
+):
+    """删除列公式注册（不清空已写入的单元格值）。"""
+    try:
+        return delete_column_formula_svc(p.conn, table_name, column_name)
+    except ValueError as e:
+        raise _http_from_formula_error(e) from e
+
+
+@router.post("/column-formula/recalculate")
+def recalculate_column_formula(
+    table_name: str = Query(...),
+    column_name: str = Query(...),
+    p: ProjectDB = Depends(get_project_write),
+):
+    """重新执行指定列的行公式。"""
+    try:
+        return execute_row_formula_svc(p.conn, table_name, column_name)
+    except ValueError as e:
+        raise _http_from_formula_error(e) from e
+
+
+@router.post("/column-formula/recalculate-table")
+def recalculate_table_row_formulas(
+    table_name: str = Query(...),
+    p: ProjectDB = Depends(get_project_write),
+):
+    """重新计算指定表所有 row 类型公式列。"""
+    return recalc_row_svc(p.conn, table_name)
