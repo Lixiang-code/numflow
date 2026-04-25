@@ -7,9 +7,10 @@ import { apiFetch } from '../api'
 import {
   ATTR_GROUPS,
   RPG_GAME_TREE,
-  SUBSYSTEM_OPTIONS,
   defaultAttributes,
   defaultGameSystems,
+  defaultSubsystemsForPath,
+  getSubsystemOptionsForPath,
   getTreeNodeLabel,
   migrateAttributesDraft,
   pruneUnknownPaths,
@@ -254,9 +255,9 @@ function TreeNodeRow({
 type CustomSub = { id: string; label: string }
 
 function SubsystemBlock({
-  pathLabel, subs, customSubs, onToggle, onAddCustomSub, onRemoveCustomSub,
+  pathId, pathLabel, subs, customSubs, onToggle, onAddCustomSub, onRemoveCustomSub,
 }: {
-  pathId?: string
+  pathId: string
   pathLabel: string
   subs: string[]
   customSubs: CustomSub[]
@@ -266,6 +267,7 @@ function SubsystemBlock({
 }) {
   const [open, setOpen] = useState(false)
   const [adding, setAdding] = useState(false)
+  const subsystemOpts = getSubsystemOptionsForPath(pathId)
   const [customInput, setCustomInput] = useState('')
 
   function commitCustomSub() {
@@ -273,7 +275,7 @@ function SubsystemBlock({
     if (t) { onAddCustomSub(t); setCustomInput(''); setAdding(false) }
   }
 
-  const totalOptions = SUBSYSTEM_OPTIONS.length + customSubs.length
+  const totalOptions = subsystemOpts.length + customSubs.length
 
   return (
     <div className="subsystem-expand">
@@ -286,7 +288,7 @@ function SubsystemBlock({
       </div>
       {open && (
         <div className="subsystem-grid">
-          {SUBSYSTEM_OPTIONS.map((opt) => (
+          {subsystemOpts.map((opt) => (
             <label key={opt.id}>
               <input
                 type="checkbox"
@@ -483,7 +485,7 @@ export default function NewProject() {
       const sub = { ...gs.subsystemsByPath }
       if (on) {
         s.add(id)
-        if (!sub[id]) sub[id] = SUBSYSTEM_OPTIONS.filter((o) => o.defaultOn).map((o) => o.id)
+        if (!sub[id]) sub[id] = defaultSubsystemsForPath(id)
       } else {
         s.delete(id)
         delete sub[id]
@@ -936,7 +938,7 @@ export default function NewProject() {
                   <div className="form-section">
                     <div className="form-section-title">子系统维度配置</div>
                     <p className="muted small" style={{ marginBottom: '0.5rem' }}>
-                      点击展开每个系统独立配置；未展开保持默认（基础属性 + 升级）。
+                      点击展开每个系统独立配置；经济/世界/怪物系统已配置专属维度选项。
                     </p>
                     {gameSystems.checkedPaths.map((pathId) => {
                         const customNode = gameSystems.customNodes.find((c) => c.id === pathId)

@@ -126,6 +126,47 @@ export const SUBSYSTEM_OPTIONS = [
   { id: 'atlas',      label: '图鉴',     defaultOn: false },
 ] as const
 
+/** 世界/PVE系统（关卡/怪物/Boss）可用的子系统维度 */
+export const WORLD_SUBSYSTEM_OPTIONS = [
+  { id: 'base_attrs', label: '基础属性（HP/ATK/DEF等）',  defaultOn: true  },
+  { id: 'skill',      label: '技能',                       defaultOn: false },
+  { id: 'tier',       label: '难度阶层',                   defaultOn: false },
+  { id: 'drop',       label: '掉落设计',                   defaultOn: false },
+  { id: 'behavior',   label: '行为模式',                   defaultOn: false },
+] as const
+
+/** 经济系统（货币/商店/抽卡）可用的子系统维度 */
+export const ECONOMY_SUBSYSTEM_OPTIONS = [
+  { id: 'currency',    label: '货币体系',    defaultOn: true  },
+  { id: 'pricing',     label: '定价策略',    defaultOn: false },
+  { id: 'daily_limit', label: '日产/日限',   defaultOn: false },
+  { id: 'exchange',    label: '兑换率',      defaultOn: false },
+  { id: 'pool',        label: '奖池设计',    defaultOn: false },
+  { id: 'pity',        label: '保底机制',    defaultOn: false },
+  { id: 'sink',        label: '消耗回收',    defaultOn: false },
+] as const
+
+/** 根据系统路径返回对应的子系统选项列表 */
+export function getSubsystemOptionsForPath(pathId: string): ReadonlyArray<{ id: string; label: string; defaultOn: boolean }> {
+  if (
+    pathId === 'world' ||
+    pathId.startsWith('world.')
+  ) return WORLD_SUBSYSTEM_OPTIONS
+  if (
+    pathId === 'economy' ||
+    pathId.startsWith('economy.')
+  ) return ECONOMY_SUBSYSTEM_OPTIONS
+  // 默认（玩家/装备/宠物/坐骑/英雄等养成系统）
+  return SUBSYSTEM_OPTIONS
+}
+
+/** 返回指定路径的默认已选子系统 id 列表 */
+export function defaultSubsystemsForPath(pathId: string): string[] {
+  return getSubsystemOptionsForPath(pathId)
+    .filter((o) => o.defaultOn)
+    .map((o) => o.id)
+}
+
 export type SubsystemId = (typeof SUBSYSTEM_OPTIONS)[number]['id']
 
 /* ─────────────────────────────────────────────────────────────
@@ -335,10 +376,6 @@ function collectAllIds(nodes: RpgTreeNode[]): Set<string> {
 }
 const ALL_TREE_IDS = collectAllIds(RPG_GAME_TREE)
 
-function defaultSubsystems(): string[] {
-  return SUBSYSTEM_OPTIONS.filter((s) => s.defaultOn).map((s) => s.id)
-}
-
 function walkDefaultChecked(nodes: RpgTreeNode[], out: Set<string>) {
   for (const n of nodes) {
     if (n.defaultOn) out.add(n.id)
@@ -350,9 +387,8 @@ export function defaultGameSystems(): GameSystemsDraft {
   const checked = new Set<string>()
   walkDefaultChecked(RPG_GAME_TREE, checked)
   const checkedPaths = [...checked]
-  const sub = defaultSubsystems()
   const subsystemsByPath: Record<string, string[]> = {}
-  for (const id of checkedPaths) subsystemsByPath[id] = [...sub]
+  for (const id of checkedPaths) subsystemsByPath[id] = defaultSubsystemsForPath(id)
   return { checkedPaths, subsystemsByPath, customNodes: [], customSubsByPath: {} }
 }
 
@@ -375,7 +411,7 @@ export function pruneUnknownPaths(draft: GameSystemsDraft): GameSystemsDraft {
   const validPaths = draft.checkedPaths.filter((id) => ALL_TREE_IDS.has(id))
   const subsystemsByPath: Record<string, string[]> = {}
   for (const id of validPaths) {
-    subsystemsByPath[id] = draft.subsystemsByPath[id] ?? defaultSubsystems()
+    subsystemsByPath[id] = draft.subsystemsByPath[id] ?? defaultSubsystemsForPath(id)
   }
   return {
     checkedPaths: validPaths,
