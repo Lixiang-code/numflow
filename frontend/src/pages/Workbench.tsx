@@ -10,7 +10,7 @@ import UniverZhCN from '@univerjs/preset-sheets-core/locales/zh-CN'
 import '@univerjs/preset-sheets-core/lib/index.css'
 
 type TableInfo = { table_name: string; validation_status: string; layer: string; purpose?: string; display_name?: string }
-type ColumnMeta = { name: string; sql_type?: string; display_name?: string; dtype?: string }
+type ColumnMeta = { name: string; sql_type?: string; display_name?: string; dtype?: string; number_format?: string }
 /** 列公式信息（含类型：sql / row / row_template） */
 type FormulaInfo = { formula: string; type: string }
 type FormulaMap = Record<string, FormulaInfo>
@@ -33,6 +33,39 @@ type ValidateReport = {
 }
 
 type SnapshotRow = { id: number; label: string; created_at: string; note?: string }
+
+/**
+ * 按 Excel 风格的 number_format 格式化数值（仅用于表格阅读展示）。
+ * 存储值和公式计算始终使用原始数值，格式不影响任何计算。
+ */
+function applyNumberFormat(value: unknown, fmt: string): string | number {
+  if (!fmt || value == null || value === '') return value as string | number
+  if (typeof value === 'string' && isNaN(Number(value))) return value // 非数字字符串原样
+  const num = Number(value)
+  if (isNaN(num)) return value as string
+
+  if (fmt === '@') return String(value) // 强制文本
+
+  // 百分比
+  if (fmt.endsWith('%')) {
+    const decimals = (fmt.match(/\.(\d+)%/) || ['', ''])[1].length
+    return (num * 100).toFixed(decimals) + '%'
+  }
+
+  // 千分位
+  const useComma = fmt.includes(',')
+  // 小数位数
+  const decimalMatch = fmt.match(/\.(\d+)/)
+  const decimals = decimalMatch ? decimalMatch[1].length : 0
+
+  let result = decimals > 0 ? num.toFixed(decimals) : Math.round(num).toString()
+  if (useComma) {
+    const parts = result.split('.')
+    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+    result = parts.join('.')
+  }
+  return result
+}
 
 export default function Workbench() {
   const { projectId } = useParams()
@@ -346,15 +379,23 @@ export default function Workbench() {
       const metaByName = new Map(colMeta.map((m) => [m.name, m]))
       const dispRow: (string | number)[] = cols.map((c) => metaByName.get(c)?.display_name || c)
       const nameRow: (string | number)[] = cols.length === 0 ? ['(空表)'] : cols
-      const dtypeRow: (string | number)[] = cols.map((c) => metaByName.get(c)?.dtype || metaByName.get(c)?.sql_type || '')
+      // 第3行：数值格式（有格式显示格式字符串，无格式降级到 dtype 或 sql_type）
+      const fmtRow: (string | number)[] = cols.map((c) => {
+        const m = metaByName.get(c)
+        return m?.number_format || m?.dtype || m?.sql_type || ''
+      })
 
-      // 3 行表头：中文名 / 英文名 / 数据类型。公式不再占用一行，统一在顶部公式栏展示。
-      const matrix: (string | number)[][] = [dispRow, nameRow, dtypeRow]
+      // 3 行表头：中文名 / 英文名 / 数值格式。数据行按 number_format 格式化显示（原始值存储不变）。
+      const matrix: (string | number)[][] = [dispRow, nameRow, fmtRow]
       for (const r of rowsArr) {
         matrix.push(cols.map((c) => {
           const v = r[c]
           if (v == null) return ''
           if (typeof v === 'object') return JSON.stringify(v)
+          const fmt = metaByName.get(c)?.number_format || ''
+          if (fmt && (typeof v === 'number' || (typeof v === 'string' && !isNaN(Number(v)) && v !== ''))) {
+            return applyNumberFormat(v, fmt)
+          }
           if (typeof v === 'number' || typeof v === 'string') return v
           return String(v)
         }))
@@ -452,7 +493,7 @@ export default function Workbench() {
         })) as {
           validation_rules?: { rules?: unknown[] } | null
           column_formulas?: Record<string, FormulaInfo | string> | null
-          schema?: { columns?: { name?: string; sql_type?: string; display_name?: string; dtype?: string }[] }
+          schema?: { columns?: { name?: string; sql_type?: string; display_name?: string; dtype?: string; number_format?: string }[] }
           display_name?: string
         }
         if (cancelled) return
@@ -477,6 +518,7 @@ export default function Workbench() {
           sql_type: c?.sql_type,
           display_name: c?.display_name || '',
           dtype: c?.dtype || '',
+          number_format: c?.number_format || '',
         })).filter((m) => m.name)
         let cols: string[] = []
         if (normalized.length > 0) cols = Object.keys(normalized[0])

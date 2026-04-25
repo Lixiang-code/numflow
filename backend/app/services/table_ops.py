@@ -54,11 +54,12 @@ def create_dynamic_table(
                 meta_map[nm] = {
                     "display_name": str(it.get("display_name") or ""),
                     "dtype": str(it.get("dtype") or ""),
+                    "number_format": str(it.get("number_format") or ""),
                 }
     cols_sql = ["row_id TEXT PRIMARY KEY"]
     schema_cols: List[Dict[str, str]] = [{
         "name": "row_id", "sql_type": "TEXT",
-        "display_name": "ID", "dtype": "id",
+        "display_name": "ID", "dtype": "id", "number_format": "",
     }]
     for name, sql_type in columns:
         st = str(sql_type).upper()
@@ -71,6 +72,7 @@ def create_dynamic_table(
             "name": cn, "sql_type": st,
             "display_name": m.get("display_name", ""),
             "dtype": m.get("dtype", ""),
+            "number_format": m.get("number_format", ""),
         })
     ddl = f'CREATE TABLE "{t}" ({", ".join(cols_sql)})'
     conn.execute(ddl)

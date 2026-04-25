@@ -176,21 +176,45 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "create_table",
-            "description": "创建动态业务表并写入 _table_registry；columns 每项含 name(英文标识)、sql_type(TEXT|REAL|INTEGER)、display_name(中文名)、dtype(语义类型如int/float/percent/str/bool/id/ref)。display_name(表中文名)必填",
+            "description": (
+                "创建动态业务表并写入 _table_registry。\n"
+                "命名规则（严格）：\n"
+                "  table_name：英文 snake_case，如 base_attr_table\n"
+                "  display_name（表级）：中文，如「基础属性表」，必填\n"
+                "  columns[].name：英文 snake_case 标识符，用于公式引用/存储，**只能含英文+数字+下划线**\n"
+                "  columns[].display_name：中文列名，用于表头展示，必填，如「攻击力」\n"
+                "columns 每项含：name / sql_type(TEXT|REAL|INTEGER) / display_name / dtype / number_format\n"
+                "number_format 格式说明见下方参数描述。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "table_name": {"type": "string", "description": "英文表名（snake_case）"},
+                    "table_name": {"type": "string", "description": "英文表名（snake_case，只含英文/数字/下划线）"},
                     "display_name": {"type": "string", "description": "表的中文显示名，必填，如「基础属性表」"},
                     "columns": {
                         "type": "array",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "name": {"type": "string", "description": "英文列名（snake_case）"},
+                                "name": {"type": "string", "description": "英文列名（snake_case），用于公式 @引用 和数据库存储，必须是纯英文"},
                                 "sql_type": {"type": "string", "enum": ["TEXT", "REAL", "INTEGER"]},
-                                "display_name": {"type": "string", "description": "中文列名，必填"},
+                                "display_name": {"type": "string", "description": "中文列名，仅用于表头展示，必填，如「攻击力」"},
                                 "dtype": {"type": "string", "description": "语义类型: int/float/percent/str/bool/id/ref/enum/json"},
+                                "number_format": {
+                                    "type": "string",
+                                    "description": (
+                                        "数值显示格式（仅影响表格阅读，不影响存储值）。"
+                                        "常用格式：\n"
+                                        "  整数:    '0'\n"
+                                        "  1位小数: '0.0'\n"
+                                        "  2位小数: '0.00'\n"
+                                        "  百分比:  '0.00%'\n"
+                                        "  千分位:  '#,##0'\n"
+                                        "  千分位+小数: '#,##0.00'\n"
+                                        "  字符串:   '@'\n"
+                                        "  不设置则留空"
+                                    ),
+                                },
                             },
                             "required": ["name", "sql_type", "display_name", "dtype"],
                         },
@@ -456,7 +480,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "table_name": {"type": "string"},
+                    "table_name": {"type": "string", "description": "英文表名（snake_case）"},
                     "max_level": {"type": "integer"},
                     "level_column": {"type": "string", "default": "等级"},
                     "columns": {
@@ -464,9 +488,11 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                         "items": {
                             "type": "object",
                             "properties": {
-                                "name": {"type": "string"},
+                                "name": {"type": "string", "description": "英文列名（snake_case），用于公式 @引用"},
                                 "sql_type": {"type": "string", "default": "REAL"},
+                                "display_name": {"type": "string", "description": "中文列名，用于表头展示，如「攻击力」"},
                                 "formula_string": {"type": "string"},
+                                "number_format": {"type": "string", "description": "数值格式: '0'整数 / '0.00'2位小数 / '0.00%'百分比 / '#,##0'千分位 / '@'字符串"},
                             },
                             "required": ["name"],
                         },
@@ -844,6 +870,7 @@ def _setup_level_table(
         return {"error": "columns 不能为空"}
 
     pairs: List[tuple[str, str]] = []
+    col_meta_list: List[Dict[str, str]] = []
     has_level = False
     for i, c in enumerate(columns):
         cname = str(c.get("name", ""))
@@ -851,10 +878,20 @@ def _setup_level_table(
             return {"error": f"columns[{i}] 缺少 name 字段", "fix": "每个列定义必须包含 name(英文标识)、sql_type(TEXT|REAL|INTEGER)、display_name(中文名)"}
         ctype = str(c.get("sql_type") or "REAL")
         pairs.append((cname, ctype))
+        col_meta_list.append({
+            "name": cname,
+            "display_name": str(c.get("display_name") or ""),
+            "dtype": str(c.get("dtype") or ("int" if ctype == "INTEGER" else "float")),
+            "number_format": str(c.get("number_format") or ""),
+        })
         if cname == level_column:
             has_level = True
     if not has_level:
         pairs.insert(0, (level_column, "INTEGER"))
+        col_meta_list.insert(0, {
+            "name": level_column, "display_name": "等级",
+            "dtype": "int", "number_format": "0",
+        })
 
     try:
         create_dynamic_table(
@@ -863,6 +900,7 @@ def _setup_level_table(
             columns=pairs,
             readme=readme,
             purpose=purpose,
+            column_meta=col_meta_list,
         )
     except ValueError as e:
         msg = str(e)
@@ -993,6 +1031,7 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                         "name": cn,
                         "display_name": str(item.get("display_name", "")),
                         "dtype": str(item.get("dtype", "")),
+                        "number_format": str(item.get("number_format", "")),
                     })
                 out = create_dynamic_table(
                     conn,
