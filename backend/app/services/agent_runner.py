@@ -71,6 +71,7 @@ def _common_system(mode_norm: str) -> str:
             "坐骑/副本须体现开放等级与 02 约定（如坐骑 30 级、副本默认门槛等），列里要有玩法含义而非只有金币+掉率。",
             "【3/4 工具规范】读工具可自由组合；写表/写 README/公式/算法调用仅在 execute 阶段且需写权限；"
             "每次写入必须带合法 source_tag；大批量用 read_table 的 limit/columns 切片。\n"
+            "公式引用语法：@表名[列名]=逐行取同行值（数学计算用）；@@表名[列名]=整列数组（VLOOKUP/INDEX/MATCH/SUM/AVERAGE 等查找聚合用）。\n"
             "工具 JSON 固定含字段：status（success|error|partial）、data、warnings、blocked_cells；"
             "遇 partial/error 须阅读 warnings/blocked_cells 再决定是否继续。",
             "【4/4 输出与流程】本次会话严格按三阶段执行：design → review → execute。\n"

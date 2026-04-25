@@ -1,4 +1,4 @@
-"""受限公式：仅数字运算与 @表名[列名] 同表或跨表引用（简化实现）。"""
+"""受限公式：数字运算、逻辑、@表名[列名] 逐行引用、@@表名[列名] 整列引用与查找函数。"""
 
 from __future__ import annotations
 
@@ -6,18 +6,25 @@ import ast
 import math
 import operator
 import re
-from typing import Any, Callable, Dict, List, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import pandas as pd
 
-# 表名/列名支持中文标识（与 app.util.identifiers 一致）
+# 逐行引用：@T[col]（注意先匹配 @@ 再匹配 @，避免混淆）
 _REF = re.compile(
-    r"@([\u4e00-\u9fffA-Za-z_][\u4e00-\u9fffA-Za-z0-9_]*)\[([\u4e00-\u9fffA-Za-z_][\u4e00-\u9fffA-Za-z0-9_]*)\]"
+    r"(?<!@)@(?!@)([\u4e00-\u9fffA-Za-z_][\u4e00-\u9fffA-Za-z0-9_]*)\[([\u4e00-\u9fffA-Za-z_][\u4e00-\u9fffA-Za-z0-9_]*)\]"
+)
+# 整列数组引用：@@T[col]
+_AREF = re.compile(
+    r"@@([\u4e00-\u9fffA-Za-z_][\u4e00-\u9fffA-Za-z0-9_]*)\[([\u4e00-\u9fffA-Za-z_][\u4e00-\u9fffA-Za-z0-9_]*)\]"
 )
 
 
 def parse_formula_refs(formula: str) -> Set[Tuple[str, str]]:
-    return set(_REF.findall(formula))
+    """返回公式中所有 @T[c] 与 @@T[c] 引用的 (table, col) 集合。"""
+    s = set(_REF.findall(formula))
+    s |= set(_AREF.findall(formula))
+    return s
 
 
 _ALLOWED_NODES = (
@@ -106,6 +113,182 @@ def _mod(a: float, b: float) -> float:
     return a % b
 
 
+# ---------- 查找与引用函数 ----------
+
+_NAN = float("nan")
+
+
+def _coerce(v: Any) -> Any:
+    """尝试转 float，失败保持原值用于字符串比较。"""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return v
+
+
+def _values_equal(a: Any, b: Any) -> bool:
+    try:
+        return float(a) == float(b)
+    except (TypeError, ValueError):
+        return str(a) == str(b)
+
+
+def _vlookup(
+    lookup_val: Any,
+    lookup_arr: List[Any],
+    return_arr: List[Any],
+    exact: Any = True,
+) -> Any:
+    """VLOOKUP(查找值, @@查找列, @@返回列, [exact=TRUE])
+    exact=True(默认)：精确匹配；exact=False：近似（≤ 最大值，需升序排列）。
+    未找到返回 NaN。"""
+    if not isinstance(lookup_arr, (list, pd.Series)):
+        raise ValueError("VLOOKUP 第 2 参须为 @@列 整列引用")
+    if not isinstance(return_arr, (list, pd.Series)):
+        raise ValueError("VLOOKUP 第 3 参须为 @@列 整列引用")
+    exact_bool = _to_bool(exact) if not isinstance(exact, bool) else exact
+    if exact_bool:
+        for lv, rv in zip(lookup_arr, return_arr):
+            if _values_equal(lv, lookup_val):
+                return _coerce(rv)
+        return _NAN
+    else:
+        # 近似：最后一个 <= lookup_val 的行
+        result = _NAN
+        for lv, rv in zip(lookup_arr, return_arr):
+            try:
+                if float(lv) <= float(lookup_val):
+                    result = _coerce(rv)
+                else:
+                    break
+            except (TypeError, ValueError):
+                continue
+        return result
+
+
+def _xlookup(
+    lookup_val: Any,
+    lookup_arr: List[Any],
+    return_arr: List[Any],
+    if_not_found: Any = _NAN,
+) -> Any:
+    """XLOOKUP(查找值, @@查找列, @@返回列, [未找到时返回])  精确匹配。"""
+    if not isinstance(lookup_arr, (list, pd.Series)):
+        raise ValueError("XLOOKUP 第 2 参须为 @@列 整列引用")
+    if not isinstance(return_arr, (list, pd.Series)):
+        raise ValueError("XLOOKUP 第 3 参须为 @@列 整列引用")
+    for lv, rv in zip(lookup_arr, return_arr):
+        if _values_equal(lv, lookup_val):
+            return _coerce(rv)
+    return if_not_found
+
+
+def _match(
+    lookup_val: Any,
+    lookup_arr: List[Any],
+    match_type: Any = 0,
+) -> Any:
+    """MATCH(查找值, @@查找列, [match_type=0])
+    match_type 0=精确；1=≤最大（升序）；-1=≥最小（降序）。
+    返回 1 起的行号，未找到返回 NaN。"""
+    if not isinstance(lookup_arr, (list, pd.Series)):
+        raise ValueError("MATCH 第 2 参须为 @@列 整列引用")
+    mt = int(float(match_type))
+    if mt == 0:
+        for i, lv in enumerate(lookup_arr):
+            if _values_equal(lv, lookup_val):
+                return float(i + 1)
+        return _NAN
+    elif mt == 1:
+        result_i = _NAN
+        for i, lv in enumerate(lookup_arr):
+            try:
+                if float(lv) <= float(lookup_val):
+                    result_i = float(i + 1)
+                else:
+                    break
+            except (TypeError, ValueError):
+                continue
+        return result_i
+    else:  # -1
+        result_i = _NAN
+        for i, lv in enumerate(lookup_arr):
+            try:
+                if float(lv) >= float(lookup_val):
+                    result_i = float(i + 1)
+                else:
+                    break
+            except (TypeError, ValueError):
+                continue
+        return result_i
+
+
+def _index_fn(arr: List[Any], row_num: Any, col_num: Any = None) -> Any:
+    """INDEX(@@列, 行号)  行号 1 起。"""
+    if not isinstance(arr, (list, pd.Series)):
+        raise ValueError("INDEX 第 1 参须为 @@列 整列引用")
+    idx = int(float(row_num)) - 1
+    if 0 <= idx < len(arr):
+        return _coerce(arr[idx] if isinstance(arr, list) else arr.iloc[idx])
+    return _NAN
+
+
+def _lookup(
+    lookup_val: Any,
+    lookup_arr: List[Any],
+    return_arr: Optional[List[Any]] = None,
+) -> Any:
+    """LOOKUP(查找值, @@查找列, [@@返回列])  升序近似匹配，未提供返回列则返回查找列对应值。"""
+    if not isinstance(lookup_arr, (list, pd.Series)):
+        raise ValueError("LOOKUP 第 2 参须为 @@列 整列引用")
+    ret = lookup_arr if return_arr is None else return_arr
+    result = _NAN
+    for lv, rv in zip(lookup_arr, ret):
+        try:
+            if float(lv) <= float(lookup_val):
+                result = _coerce(rv)
+            else:
+                break
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _sum_arr(arr: Any) -> float:
+    if isinstance(arr, pd.Series):
+        return float(arr.sum())
+    if isinstance(arr, (list, tuple)):
+        return float(sum(float(x) for x in arr if x is not None))
+    return float(arr)
+
+
+def _average_arr(arr: Any) -> float:
+    if isinstance(arr, pd.Series):
+        return float(arr.mean())
+    if isinstance(arr, (list, tuple)):
+        vals = [float(x) for x in arr if x is not None]
+        if not vals:
+            raise ValueError("AVERAGE 空列")
+        return sum(vals) / len(vals)
+    return float(arr)
+
+
+def _count_arr(arr: Any) -> float:
+    if isinstance(arr, pd.Series):
+        return float(arr.count())
+    if isinstance(arr, (list, tuple)):
+        return float(len([x for x in arr if x is not None]))
+    return 1.0
+
+
+def _counta_arr(arr: Any) -> float:
+    if isinstance(arr, pd.Series):
+        return float(arr.notna().sum())
+    if isinstance(arr, (list, tuple)):
+        return float(len([x for x in arr if x is not None]))
+    return 1.0
+
+
 # 函数表（key 全部小写）
 _FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "round": _round,
@@ -138,6 +321,18 @@ _FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "false": lambda: False,
     "pi": lambda: math.pi,
     "e": lambda: math.e,
+    # 查找与引用
+    "vlookup": _vlookup,
+    "xlookup": _xlookup,
+    "match": _match,
+    "index": _index_fn,
+    "lookup": _lookup,
+    # 聚合（作用于 @@列 整列）
+    "sum": _sum_arr,
+    "average": _average_arr,
+    "avg": _average_arr,
+    "count": _count_arr,
+    "counta": _counta_arr,
 }
 
 
@@ -218,59 +413,98 @@ def _eval_ast(node: ast.AST, names: Dict[str, Any]) -> Any:
     raise ValueError(f"不支持的表达式结构: {type(node).__name__}")
 
 
-def safe_eval_scalar(expr: str, names: Dict[str, Any]) -> float:
+def safe_eval_scalar(expr: str, names: Dict[str, Any]) -> Any:
+    """对表达式求值，允许返回 float / bool / list（整列聚合时）。"""
     tree = ast.parse(expr, mode="eval")
     for n in ast.walk(tree):
         if not isinstance(n, _ALLOWED_NODES):
             raise ValueError(f"禁止的语法: {type(n).__name__}")
-    return float(_eval_ast(tree, names))
+    return _eval_ast(tree, names)
 
 
 def substitute_refs(
     formula: str,
     *,
     frames: Dict[str, pd.DataFrame],
-) -> Tuple[str, Dict[str, pd.Series]]:
-    """将 @T[c] 替换为占位符 __s0 并返回 series 映射；同一引用出现多次时全部替换。"""
-    names: Dict[str, pd.Series] = {}
+) -> Tuple[str, Dict[str, pd.Series], Dict[str, list]]:
+    """将 @T[c] 替换为 __s<n>（逐行标量），@@T[c] 替换为 __a<n>（整列 list）。
+    返回 (表达式, scalar_map, array_map)。"""
+    scalar_map: Dict[str, pd.Series] = {}
+    array_map: Dict[str, list] = {}
     out = formula
-    idx = 0
-    for tbl, col in parse_formula_refs(formula):
+    s_idx = 0
+    a_idx = 0
+
+    # 先处理 @@（双@，整列引用），避免被单@ regex 误匹配
+    for tbl, col in _AREF.findall(formula):
+        token = f"@@{tbl}[{col}]"
+        if token in out:  # 可能同一引用多次
+            if tbl not in frames:
+                raise ValueError(f"未加载表 {tbl}")
+            df = frames[tbl]
+            if col not in df.columns:
+                raise ValueError(f"表 {tbl} 无列 {col}")
+            # 查是否已分配
+            existing = next(
+                (k for k, v in array_map.items() if v is not None and
+                 id(v) == id(getattr(df[col], "tolist", lambda: None)())), None
+            )
+            key = f"__a{a_idx}"
+            a_idx += 1
+            array_map[key] = pd.to_numeric(df[col], errors="coerce").tolist()
+            out = out.replace(token, key)
+
+    # 再处理 @（逐行引用）
+    for tbl, col in _REF.findall(formula):
+        token = f"@{tbl}[{col}]"
+        if token not in out:
+            continue
         if tbl not in frames:
             raise ValueError(f"未加载表 {tbl}")
         df = frames[tbl]
         if col not in df.columns:
             raise ValueError(f"表 {tbl} 无列 {col}")
-        key = f"__s{idx}"
-        names[key] = pd.to_numeric(df[col], errors="coerce")
-        token = f"@{tbl}[{col}]"
+        key = f"__s{s_idx}"
+        s_idx += 1
+        scalar_map[key] = pd.to_numeric(df[col], errors="coerce")
         out = out.replace(token, key)
-        idx += 1
-    return out, names
+
+    return out, scalar_map, array_map
 
 
 def eval_series(formula: str, frames: Dict[str, pd.DataFrame]) -> pd.Series:
-    expr, series_map = substitute_refs(formula, frames=frames)
-    if not series_map:
+    expr, scalar_map, array_map = substitute_refs(formula, frames=frames)
+    if not scalar_map and not array_map:
         v = safe_eval_scalar(expr, {})
         return pd.Series([v] * max(len(df) for df in frames.values()))
-    first = next(iter(series_map.values()))
-    n = len(first)
-    names: Dict[str, Any] = {}
-    for k, s in series_map.items():
-        if len(s) != n:
-            raise ValueError("引用列长度不一致")
-        names[k] = s
-    return pd.Series(safe_eval_vector(expr, names))
+    if scalar_map:
+        first = next(iter(scalar_map.values()))
+        n = len(first)
+        for k, s in scalar_map.items():
+            if len(s) != n:
+                raise ValueError("引用列长度不一致")
+        return pd.Series(safe_eval_vector(expr, scalar_map, array_map))
+    # 只有 array_map（纯聚合公式），返回全表相同值
+    n = max(len(df) for df in frames.values())
+    static_env: Dict[str, Any] = {k: v for k, v in array_map.items()}
+    v = safe_eval_scalar(expr, static_env)
+    return pd.Series([float(v)] * n)
 
 
-def safe_eval_vector(expr: str, names: Dict[str, pd.Series]) -> list:
-    """对逐元素应用 safe_eval_scalar（小表可接受）。"""
-    if not names:
-        return [safe_eval_scalar(expr, {})] * 1
-    n = len(next(iter(names.values())))
+def safe_eval_vector(
+    expr: str,
+    scalar_map: Dict[str, pd.Series],
+    array_map: Optional[Dict[str, list]] = None,
+) -> list:
+    """逐行应用 safe_eval_scalar；array_map 中的整列引用每行保持不变。"""
+    if not scalar_map:
+        static_env: Dict[str, Any] = dict(array_map or {})
+        return [safe_eval_scalar(expr, static_env)] * 1
+    n = len(next(iter(scalar_map.values())))
+    static: Dict[str, Any] = dict(array_map or {})
     out = []
     for i in range(n):
-        env = {k: float(v.iloc[i]) for k, v in names.items()}
+        env: Dict[str, Any] = {k: float(v.iloc[i]) for k, v in scalar_map.items()}
+        env.update(static)
         out.append(safe_eval_scalar(expr, env))
     return out
