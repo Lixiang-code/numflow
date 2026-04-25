@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import { apiFetch, projectHeaders } from '../api'
 import { getInitAgentPrompt, pipelineStepLabel } from '../data/pipelineSteps'
@@ -34,6 +34,9 @@ type SnapshotRow = { id: number; label: string; created_at: string; note?: strin
 export default function Workbench() {
   const { projectId } = useParams()
   const pid = Number(projectId)
+  const [searchParams] = useSearchParams()
+  /** ?ro=1 → 只读模式（被 ProjectSetup 等场景嵌入时锁定单元格编辑） */
+  const readOnly = searchParams.get('ro') === '1'
   /** 必须 memo：否则每次 render 新 headers 对象会触发 effect/useCallback 无限循环 → 浏览器 ERR_INSUFFICIENT_RESOURCES */
   const headers = useMemo(() => projectHeaders(pid), [pid])
 
@@ -46,7 +49,6 @@ export default function Workbench() {
   const [readmeTab, setReadmeTab] = useState<'table' | 'global'>('table')
   /** README 编辑/预览模式（每个 tab 独立） */
   const [readmeViewMode, setReadmeViewMode] = useState<'preview' | 'edit'>('preview')
-  const [sideTab, setSideTab] = useState<'readme' | 'advanced'>('readme')
   const [canWrite, setCanWrite] = useState(false)
   const [validateReport, setValidateReport] = useState<ValidateReport | null>(null)
   const [validationRulesDraft, setValidationRulesDraft] = useState('')
@@ -189,15 +191,14 @@ export default function Workbench() {
 
     const disposable = univerAPI.addEvent(univerAPI.Event.SheetEditEnded, (params) => {
       if (suppressEditRef.current) return
+      if (readOnly) return
       if (!params.isConfirm) return
       const tname = activeTableRef.current
       if (!tname) return
       const cols = tableColsCacheRef.current.get(tname) || []
       const rowsArr = tableRowsCacheRef.current.get(tname) || []
-      // 行 0/1/2 = 中文名/英文名/数据类型 表头；公式行（如有）在第 3 行；数据从 dataRowOffset 开始
-      const formulas = tableFormulasCacheRef.current.get(tname) || {}
-      const hasFormulaRow = Object.keys(formulas).length > 0
-      const dataRowOffset = hasFormulaRow ? 4 : 3
+      // 行 0/1/2 = 中文名 / 英文名 / 数据类型；数据从第 3 行开始
+      const dataRowOffset = 3
       const dataRowIdx = params.row - dataRowOffset
       const colName = cols[params.column]
       if (!colName || dataRowIdx < 0 || dataRowIdx >= rowsArr.length) return
@@ -280,11 +281,9 @@ export default function Workbench() {
       const dispRow: (string | number)[] = cols.map((c) => metaByName.get(c)?.display_name || c)
       const nameRow: (string | number)[] = cols.length === 0 ? ['(空表)'] : cols
       const dtypeRow: (string | number)[] = cols.map((c) => metaByName.get(c)?.dtype || metaByName.get(c)?.sql_type || '')
-      const formulaList = cols.map((c) => formulas[c] || '')
-      const hasFormulaRow = formulaList.some((s) => s !== '')
 
+      // 3 行表头：中文名 / 英文名 / 数据类型。公式不再占用一行，统一在顶部公式栏展示。
       const matrix: (string | number)[][] = [dispRow, nameRow, dtypeRow]
-      if (hasFormulaRow) matrix.push(formulaList)
       for (const r of rowsArr) {
         matrix.push(cols.map((c) => {
           const v = r[c]
@@ -302,6 +301,23 @@ export default function Workbench() {
           if (usedRange) usedRange.clearContent()
         } catch { /* ignore */ }
         sheet.getRange(0, 0, matrix.length, numCols).setValues(matrix)
+        // 表头样式（尽力而为，不同 Univer 版本 API 略有差异）
+        try {
+          const headRange = sheet.getRange(0, 0, 3, numCols)
+          const styleSetters = headRange as unknown as {
+            setBackgroundColor?: (c: string) => unknown
+            setBackground?: (c: string) => unknown
+            setFontWeight?: (w: string) => unknown
+          }
+          styleSetters.setBackgroundColor?.('#e8f5e9')
+          styleSetters.setBackground?.('#e8f5e9')
+          styleSetters.setFontWeight?.('bold')
+        } catch { /* ignore styling errors */ }
+        try {
+          const freezer = sheet as unknown as { setFrozenRows?: (n: number) => unknown; setFrozen?: (o: { ySplit?: number; xSplit?: number }) => unknown }
+          freezer.setFrozenRows?.(3)
+          freezer.setFrozen?.({ ySplit: 3, xSplit: 0 })
+        } catch { /* ignore freeze errors */ }
       } finally {
         suppressEditRef.current = false
       }
@@ -621,11 +637,14 @@ export default function Workbench() {
         <Link to="/projects" className="link-btn">
           项目列表
         </Link>
-        {pipeline && !pipeline.finished && (
-          <Link to={`/project-setup/${pid}`} className="link-btn" style={{ background: 'rgba(255,180,0,.25)' }}>
-            ⚙ 初始化进度（未完成）
-          </Link>
-        )}
+        <Link
+          to={`/project-setup/${pid}`}
+          className="link-btn"
+          style={pipeline && !pipeline.finished ? { background: 'rgba(255,180,0,.25)' } : undefined}
+          title="查看 / 继续 Agent 初始化进程"
+        >
+          ⚙ Agent 进程{pipeline && !pipeline.finished ? '（未完成）' : ''}
+        </Link>
         <button
           type="button"
           className="link-btn"
@@ -637,7 +656,7 @@ export default function Workbench() {
         >
           AGENT TEST ↗
         </button>
-        <span className="muted">项目 #{pid}</span>
+        <span className="muted">项目 #{pid}{readOnly ? '（只读）' : ''}</span>
       </header>
       {err && <p className="err banner">{err}</p>}
       {validateReport && !validateReport.passed && (
@@ -730,172 +749,158 @@ export default function Workbench() {
             </div>
           )}
           <div className="wb-univer-host" ref={univerHostRef} />
+          {readOnly && (
+            <div className="wb-readonly-overlay" title="只读模式">
+              🔒 只读模式（在 Agent 进程页中查看，请回到完整工作台编辑）
+            </div>
+          )}
         </section>
 
         <aside className="wb-right">
-          <div className="readme-tabs readme-tab-btns">
-            <button type="button" className={sideTab === 'readme' ? 'active' : ''} onClick={() => setSideTab('readme')}>
-              README
-            </button>
-            <button
-              type="button"
-              className={sideTab === 'advanced' ? 'active' : ''}
-              onClick={() => setSideTab('advanced')}
-            >
-              高级（校验/快照）
-            </button>
-          </div>
-
-          {sideTab === 'readme' && (
-            <div className="wb-right-pane">
-              <div className="readme-tabs readme-tab-btns" style={{ marginTop: '0.25rem' }}>
-                <button type="button" className={readmeTab === 'table' ? 'active' : ''} onClick={() => setReadmeTab('table')}>
-                  当前表
-                </button>
-                <button
-                  type="button"
-                  className={readmeTab === 'global' ? 'active' : ''}
-                  onClick={() => setReadmeTab('global')}
-                >
-                  全局
-                </button>
-              </div>
-              <div className="readme-mode-row">
-                <button type="button"
-                  className={`btn tiny${readmeViewMode === 'preview' ? ' primary' : ''}`}
-                  onClick={() => setReadmeViewMode('preview')}>预览</button>
-                <button type="button"
-                  className={`btn tiny${readmeViewMode === 'edit' ? ' primary' : ''}`}
-                  onClick={() => setReadmeViewMode('edit')} disabled={!canWrite}>编辑</button>
-                {!canWrite && <span className="muted small">（只读项目）</span>}
-              </div>
-              {readmeTab === 'table' && (
-                <>
-                  {!selected && <p className="muted small">请在左侧选择一张表。</p>}
-                  {selected && readmeViewMode === 'preview' && (
-                    <div className="markdown-preview">
-                      {tableReadmeDraft.trim()
-                        ? <ReactMarkdown>{tableReadmeDraft}</ReactMarkdown>
-                        : <p className="muted small">（此表暂无 README）</p>}
-                    </div>
-                  )}
-                  {selected && readmeViewMode === 'edit' && (
-                    <>
-                      <textarea
-                        className="readme-textarea"
-                        value={tableReadmeDraft}
-                        onChange={(e) => setTableReadmeDraft(e.target.value)}
-                        disabled={!canWrite}
-                        spellCheck={false}
-                      />
-                      {canWrite && (
-                        <div className="readme-save-row">
-                          <button type="button" className="btn tiny primary" onClick={() => void saveTableReadme()}>
-                            保存
-                          </button>
-                        </div>
-                      )}
-                    </>
-                  )}
-                </>
-              )}
-              {readmeTab === 'global' && (
-                <>
-                  {readmeViewMode === 'preview' && (
-                    <div className="markdown-preview">
-                      {globalReadmeDraft.trim()
-                        ? <ReactMarkdown>{globalReadmeDraft}</ReactMarkdown>
-                        : <p className="muted small">（暂无全局 README）</p>}
-                    </div>
-                  )}
-                  {readmeViewMode === 'edit' && (
-                    <>
-                      <textarea
-                        className="readme-textarea"
-                        value={globalReadmeDraft}
-                        onChange={(e) => setGlobalReadmeDraft(e.target.value)}
-                        disabled={!canWrite}
-                        spellCheck={false}
-                      />
-                      {canWrite && (
-                        <div className="readme-save-row">
-                          <button type="button" className="btn tiny primary" onClick={() => void saveGlobalReadme()}>
-                            保存
-                          </button>
-                        </div>
-                      )}
-                    </>
-                  )}
-                </>
-              )}
+          <div className="wb-right-pane">
+            <div className="readme-tabs readme-tab-btns">
+              <button type="button" className={readmeTab === 'table' ? 'active' : ''} onClick={() => setReadmeTab('table')}>
+                当前表 README
+              </button>
+              <button
+                type="button"
+                className={readmeTab === 'global' ? 'active' : ''}
+                onClick={() => setReadmeTab('global')}
+              >
+                全局 README
+              </button>
             </div>
-          )}
-
-          {sideTab === 'advanced' && (
-            <div className="wb-right-pane">
-              <details open={false} className="wb-adv-section">
-                <summary>校验规则 JSON</summary>
-                {!selected && <p className="muted small">请选择表后编辑 rules。</p>}
-                {selected && (
+            <div className="readme-mode-row">
+              <button type="button"
+                className={`btn tiny${readmeViewMode === 'preview' ? ' primary' : ''}`}
+                onClick={() => setReadmeViewMode('preview')}>预览</button>
+              <button type="button"
+                className={`btn tiny${readmeViewMode === 'edit' ? ' primary' : ''}`}
+                onClick={() => setReadmeViewMode('edit')} disabled={!canWrite || readOnly}>编辑</button>
+              {(!canWrite || readOnly) && <span className="muted small">（只读）</span>}
+            </div>
+            {readmeTab === 'table' && (
+              <>
+                {!selected && <p className="muted small">请在左侧选择一张表。</p>}
+                {selected && readmeViewMode === 'preview' && (
+                  <div className="markdown-preview">
+                    {tableReadmeDraft.trim()
+                      ? <ReactMarkdown>{tableReadmeDraft}</ReactMarkdown>
+                      : <p className="muted small">（此表暂无 README）</p>}
+                  </div>
+                )}
+                {selected && readmeViewMode === 'edit' && (
                   <>
-                    <p className="muted small">
-                      支持 type: <code>not_null</code>、<code>min_max</code>、<code>regex</code>。
-                    </p>
                     <textarea
                       className="readme-textarea"
-                      value={validationRulesDraft}
-                      onChange={(e) => setValidationRulesDraft(e.target.value)}
-                      disabled={!canWrite}
+                      value={tableReadmeDraft}
+                      onChange={(e) => setTableReadmeDraft(e.target.value)}
+                      disabled={!canWrite || readOnly}
                       spellCheck={false}
                     />
-                    {canWrite && (
+                    {canWrite && !readOnly && (
                       <div className="readme-save-row">
-                        <button type="button" className="btn tiny primary" onClick={() => void saveValidationRules()}>
+                        <button type="button" className="btn tiny primary" onClick={() => void saveTableReadme()}>
                           保存
                         </button>
                       </div>
                     )}
                   </>
                 )}
-              </details>
-              <details open={false} className="wb-adv-section">
-                <summary>快照</summary>
-                <button type="button" className="btn tiny" onClick={() => void loadSnapshots()}>
-                  刷新列表
+              </>
+            )}
+            {readmeTab === 'global' && (
+              <>
+                {readmeViewMode === 'preview' && (
+                  <div className="markdown-preview">
+                    {globalReadmeDraft.trim()
+                      ? <ReactMarkdown>{globalReadmeDraft}</ReactMarkdown>
+                      : <p className="muted small">（暂无全局 README）</p>}
+                  </div>
+                )}
+                {readmeViewMode === 'edit' && (
+                  <>
+                    <textarea
+                      className="readme-textarea"
+                      value={globalReadmeDraft}
+                      onChange={(e) => setGlobalReadmeDraft(e.target.value)}
+                      disabled={!canWrite || readOnly}
+                      spellCheck={false}
+                    />
+                    {canWrite && !readOnly && (
+                      <div className="readme-save-row">
+                        <button type="button" className="btn tiny primary" onClick={() => void saveGlobalReadme()}>
+                          保存
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )}
+              </>
+            )}
+
+            <details className="wb-adv-section">
+              <summary>校验规则 JSON</summary>
+              {!selected && <p className="muted small">请选择表后编辑 rules。</p>}
+              {selected && (
+                <>
+                  <p className="muted small">
+                    支持 type: <code>not_null</code>、<code>min_max</code>、<code>regex</code>。
+                  </p>
+                  <textarea
+                    className="readme-textarea"
+                    value={validationRulesDraft}
+                    onChange={(e) => setValidationRulesDraft(e.target.value)}
+                    disabled={!canWrite || readOnly}
+                    spellCheck={false}
+                  />
+                  {canWrite && !readOnly && (
+                    <div className="readme-save-row">
+                      <button type="button" className="btn tiny primary" onClick={() => void saveValidationRules()}>
+                        保存
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+            </details>
+            <details className="wb-adv-section">
+              <summary>快照（{snapshots.length}）</summary>
+              <button type="button" className="btn tiny" onClick={() => void loadSnapshots()}>
+                刷新列表
+              </button>
+              {snapshots.length === 0 ? (
+                <p className="muted small">暂无快照。</p>
+              ) : (
+                <ul className="wb-snap-list">
+                  {snapshots.map((s) => (
+                    <li key={s.id}>
+                      <label className="wb-snap-row">
+                        <input
+                          type="radio"
+                          name="snapPick"
+                          checked={compareSnapshotId === s.id}
+                          onChange={() => setCompareSnapshotId(s.id)}
+                        />
+                        <span>
+                          #{s.id} {s.label}
+                          <small className="muted"> {s.created_at}</small>
+                        </span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="readme-save-row">
+                <button type="button" className="btn tiny" disabled={compareSnapshotId == null} onClick={() => void runSnapshotCompare()}>
+                  与当前库对比
                 </button>
-                {snapshots.length === 0 ? (
-                  <p className="muted small">暂无快照。</p>
-                ) : (
-                  <ul className="wb-snap-list">
-                    {snapshots.map((s) => (
-                      <li key={s.id}>
-                        <label className="wb-snap-row">
-                          <input
-                            type="radio"
-                            name="snapPick"
-                            checked={compareSnapshotId === s.id}
-                            onChange={() => setCompareSnapshotId(s.id)}
-                          />
-                          <span>
-                            #{s.id} {s.label}
-                            <small className="muted"> {s.created_at}</small>
-                          </span>
-                        </label>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                <div className="readme-save-row">
-                  <button type="button" className="btn tiny" disabled={compareSnapshotId == null} onClick={() => void runSnapshotCompare()}>
-                    与当前库对比
-                  </button>
-                </div>
-                {compareText && (
-                  <pre className="wb-compare-pre">{compareText}</pre>
-                )}
-              </details>
-            </div>
-          )}
+              </div>
+              {compareText && (
+                <pre className="wb-compare-pre">{compareText}</pre>
+              )}
+            </details>
+          </div>
         </aside>
       </div>
 

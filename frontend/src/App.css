@@ -690,7 +690,7 @@ label > input, label > select, label > textarea { color: var(--text); }
 
 /* 左栏：表列表 + 流水线 */
 .wb-left {
-  width: 210px;
+  width: 230px;
   flex-shrink: 0;
   background: var(--surface);
   border-right: 1px solid var(--border);
@@ -699,6 +699,7 @@ label > input, label > select, label > textarea { color: var(--text); }
   overflow: hidden;
   position: relative;
   z-index: 100;
+  isolation: isolate;
 }
 .wb-left h3 {
   padding: 0.55rem 0.75rem 0.35rem;
@@ -750,7 +751,8 @@ label > input, label > select, label > textarea { color: var(--text); }
   border-left: 3px solid var(--green);
 }
 .wb-left ul li button.row-warn { color: var(--warn); }
-.tbl-name { font-size: 0.8rem; font-weight: 500; }
+.tbl-name { font-size: 0.82rem; font-weight: 600; word-break: break-word; }
+.tbl-en { font-size: 0.7rem; color: var(--text-muted); font-family: var(--font-mono); }
 .tbl-purpose { font-size: 0.72rem; color: var(--text-muted); }
 
 /* 流水线块 */
@@ -772,6 +774,7 @@ label > input, label > select, label > textarea { color: var(--text); }
   flex-direction: column;
   overflow: hidden;
   background: var(--surface);
+  position: relative;
 }
 .wb-formula-bar {
   display: flex;
@@ -804,8 +807,25 @@ label > input, label > select, label > textarea { color: var(--text); }
   flex: 1;
   overflow: hidden;
   position: relative;
+  /* 隔离堆叠上下文 — Univer 内部的浮层不会越过外层 wb-top / wb-left / wb-right */
+  isolation: isolate;
+  z-index: 0;
 }
 .wb-univer-host > div { width: 100% !important; height: 100% !important; }
+.wb-readonly-overlay {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1500;
+  background: rgba(80, 80, 80, .92);
+  color: #fff;
+  padding: 0.35rem 0.9rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  pointer-events: none;
+  box-shadow: 0 2px 6px rgba(0,0,0,.25);
+}
 
 /* 右栏 */
 .wb-right {

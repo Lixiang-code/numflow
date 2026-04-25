@@ -209,6 +209,49 @@ def update_agent_session(
     conn.commit()
 
 
+def list_agent_sessions(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 50,
+    step_id: Optional[str] = None,
+) -> list:
+    """Return all agent sessions (newest first), optionally filtered by step_id."""
+    if step_id:
+        cur = conn.execute(
+            """SELECT id, step_id, status, started_at, finished_at,
+                      design_text, review_text, execute_text, tools_json, error_text
+               FROM _agent_sessions WHERE step_id = ?
+               ORDER BY id DESC LIMIT ?""",
+            (step_id, int(limit)),
+        )
+    else:
+        cur = conn.execute(
+            """SELECT id, step_id, status, started_at, finished_at,
+                      design_text, review_text, execute_text, tools_json, error_text
+               FROM _agent_sessions ORDER BY id DESC LIMIT ?""",
+            (int(limit),),
+        )
+    out: list = []
+    for row in cur.fetchall():
+        try:
+            tools = json.loads(row[8] or "[]")
+        except json.JSONDecodeError:
+            tools = []
+        out.append({
+            "id": row[0],
+            "step_id": row[1],
+            "status": row[2],
+            "started_at": row[3],
+            "finished_at": row[4],
+            "design_text": row[5] or "",
+            "review_text": row[6] or "",
+            "execute_text": row[7] or "",
+            "tools": tools,
+            "error_text": row[9],
+        })
+    return out
+
+
 def get_latest_agent_session(conn: sqlite3.Connection, step_id: str) -> Optional[Dict[str, Any]]:
     """Return the most recent session for a step_id, or None if none exists."""
     cur = conn.execute(

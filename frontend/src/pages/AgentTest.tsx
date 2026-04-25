@@ -3,12 +3,12 @@
  * 支持：三阶段面板(design/review/execute)、工具调用时间线、实时流、会话历史、指标面板
  * 可从 Workbench 以 window.open popup 方式打开
  */
-import { useCallback, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { projectHeaders } from '../api'
+import { apiFetch, projectHeaders } from '../api'
 
 const LS_KEY = 'numflow_agent_monitor_v2'
-const MAX_HISTORY = 12
+const MAX_HISTORY = 50
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
 type SseEvent = { ts: string; raw: Record<string, unknown> }
@@ -193,16 +193,22 @@ function PhaseProgress({ current, status }: { current: string; status: Metrics['
 
 // ─── 会话历史侧边栏 ────────────────────────────────────────────────────────
 function HistorySidebar({
-  history, currentId, onSelect, onClear,
+  history, currentId, onSelect, onClear, onRefresh,
 }: {
   history: Session[]; currentId: string | null
   onSelect: (s: Session) => void; onClear: () => void
+  onRefresh?: () => void
 }) {
   return (
     <aside className="am-sidebar">
       <div className="am-sidebar-head">
         <span>会话历史</span>
-        <a href="#" onClick={(e) => { e.preventDefault(); onClear() }} title="清空历史">清空</a>
+        <span style={{ display: 'inline-flex', gap: '0.4rem' }}>
+          {onRefresh && (
+            <a href="#" onClick={(e) => { e.preventDefault(); onRefresh() }} title="拉取项目历史">刷新</a>
+          )}
+          <a href="#" onClick={(e) => { e.preventDefault(); onClear() }} title="清空本地历史">清空</a>
+        </span>
       </div>
       {history.length === 0 && <p className="muted small" style={{ padding: '0.75rem' }}>暂无记录</p>}
       <ul className="am-history-list">
@@ -266,6 +272,88 @@ export default function AgentTest() {
     pid > 0 ? n.set('project', String(pid)) : n.delete('project')
     setSearch(n, { replace: true })
   }
+
+  /** 从服务端拉取项目历史会话（init/maintain 任意模式） */
+  const loadServerHistory = useCallback(async () => {
+    if (projectId <= 0) return
+    try {
+      const d = (await apiFetch('/agent/sessions?limit=50', { headers })) as {
+        sessions?: {
+          id: number
+          step_id: string
+          status: string
+          started_at: string
+          finished_at: string | null
+          design_text: string
+          review_text: string
+          execute_text: string
+          tools_json: string
+          error_text: string | null
+        }[]
+      }
+      const list = Array.isArray(d.sessions) ? d.sessions : []
+      const serverSessions: Session[] = list.map((s) => {
+        const evs: SseEvent[] = []
+        const stepId = s.step_id || ''
+        const isInit = !!stepId && stepId !== 'maintain' && stepId !== 'init'
+        const mode: 'init' | 'maintain' = (stepId === 'maintain') ? 'maintain' : (isInit ? 'init' : (stepId === 'init' ? 'init' : 'maintain'))
+        const phaseEntries: [string, string][] = [
+          ['design', s.design_text || ''],
+          ['review', s.review_text || ''],
+          ['execute', s.execute_text || ''],
+        ]
+        for (const [phase, text] of phaseEntries) {
+          if (text) evs.push({ ts: s.started_at, raw: { phase, type: 'token', text } })
+        }
+        try {
+          const tools = JSON.parse(s.tools_json || '[]') as Array<{
+            ts?: string; kind?: string; name?: string; body?: string; arguments?: string; preview?: string
+          }>
+          for (const t of tools) {
+            const kind = t.kind === 'result' ? 'tool_result' : 'tool_call'
+            evs.push({
+              ts: t.ts || s.started_at,
+              raw: {
+                phase: 'execute', type: kind, name: t.name || '',
+                arguments: t.arguments ?? t.body ?? '',
+                preview: t.preview ?? t.body ?? '',
+              },
+            })
+          }
+        } catch { /* ignore tool parse */ }
+        if (s.error_text) {
+          evs.push({ ts: s.finished_at || s.started_at, raw: { phase: 'execute', type: 'error', message: s.error_text } })
+        }
+        const totalMs = s.finished_at ? new Date(s.finished_at).getTime() - new Date(s.started_at).getTime() : null
+        const status: Metrics['status'] = s.status === 'error' ? 'error' : s.status === 'done' ? 'done' : 'running'
+        return {
+          id: `srv_${s.id}`,
+          projectId,
+          mode,
+          userMessage: `[${stepId || mode}] 服务端记录 #${s.id}`,
+          events: evs,
+          metrics: {
+            startedAt: s.started_at, finishedAt: s.finished_at,
+            totalMs, designMs: null, reviewMs: null, executeMs: null,
+            toolCalls: 0, tokenHint: null, status,
+          },
+        }
+      })
+      // 合并：本地 in-memory 会话置顶，服务端补充剩余（去重）
+      setHistory((prev) => {
+        const ids = new Set(prev.map((p) => p.id))
+        const merged = [...prev, ...serverSessions.filter((s) => !ids.has(s.id))]
+        return merged.slice(0, 50)
+      })
+    } catch (e) {
+      // 静默：没有数据库或权限时忽略
+      console.warn('[agent-monitor] load server sessions failed', e)
+    }
+  }, [projectId, headers])
+
+  useEffect(() => {
+    void loadServerHistory()
+  }, [loadServerHistory])
 
   function initPhase(): PhaseState {
     return { started: null, finished: null, text: '', logs: [], error: null, hasContent: false }
@@ -507,6 +595,7 @@ export default function AgentTest() {
           setHistory([])
           localStorage.removeItem(LS_KEY + '_history')
         }}
+        onRefresh={() => void loadServerHistory()}
       />
 
       <div className="am-main">

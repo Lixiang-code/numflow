@@ -10,11 +10,12 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.deps import ProjectDB, get_project_write
+from app.deps import ProjectDB, get_project_read, get_project_write
 
 from app.config import DASHSCOPE_API_KEY, QWEN_MODEL
 from app.db.project_schema import (
     create_agent_session,
+    list_agent_sessions,
     update_agent_session,
 )
 from app.services import qwen_client
@@ -166,18 +167,34 @@ def agent_chat(body: ChatBody, p: ProjectDB = Depends(get_project_write)):
         failure_context=body.failure_context,
     )
 
-    # Persist session for trackable steps (init mode with a step_id)
+    # Persist session for ALL agent runs (so AgentMonitor can browse project history).
+    # init/recovery use the explicit step_id; maintain runs use synthetic step_id "maintain"
     step_id = body.step_id or (
         body.failure_context.get("step_id") if body.failure_context else None
     )
-    if step_id and body.mode in ("init", "recovery"):
-        try:
-            session_id = create_agent_session(p.conn, step_id)
-            gen = _session_tracking_wrapper(gen, p.conn, session_id)
-        except Exception:  # noqa: BLE001 — don't break streaming if session creation fails
-            pass
+    if not step_id:
+        step_id = body.mode  # "maintain" / "init" / "recovery"
+    try:
+        session_id = create_agent_session(p.conn, step_id)
+        gen = _session_tracking_wrapper(gen, p.conn, session_id)
+    except Exception:  # noqa: BLE001 — don't break streaming if session creation fails
+        pass
 
     return StreamingResponse(gen, media_type="text/event-stream")
+
+
+@router.get("/sessions")
+def agent_sessions(
+    limit: int = 50,
+    step_id: Optional[str] = None,
+    p: ProjectDB = Depends(get_project_read),
+) -> Dict[str, Any]:
+    """List recent agent sessions for this project (for AgentMonitor history)."""
+    try:
+        sessions = list_agent_sessions(p.conn, limit=max(1, min(int(limit), 200)), step_id=step_id)
+    except Exception:  # noqa: BLE001
+        sessions = []
+    return {"sessions": sessions}
 
 
 class DiagnosticsRunBody(BaseModel):

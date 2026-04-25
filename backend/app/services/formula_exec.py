@@ -179,7 +179,19 @@ def register_formula(conn: sqlite3.Connection, table_name: str, column_name: str
             (table_name, column_name, rt, rc),
         )
     conn.commit()
-    return {"ok": True, "refs": [{"table": t, "column": c} for t, c in sorted(refs)]}
+    # 注册成功后尝试自动执行一次（行存在的情况下立即填值）。失败不影响注册结果。
+    auto_executed: Optional[Dict[str, Any]] = None
+    auto_error: Optional[str] = None
+    try:
+        auto_executed = execute_formula_on_column(conn, table_name, column_name)
+    except Exception as e:  # noqa: BLE001
+        auto_error = str(e)
+    out: Dict[str, Any] = {"ok": True, "refs": [{"table": t, "column": c} for t, c in sorted(refs)]}
+    if auto_executed is not None:
+        out["auto_executed"] = auto_executed
+    if auto_error is not None:
+        out["auto_execute_error"] = auto_error
+    return out
 
 
 def recalculate_downstream(conn: sqlite3.Connection, table_name: str, column_name: str) -> Dict[str, Any]:
