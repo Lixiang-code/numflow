@@ -251,22 +251,37 @@ function TreeNodeRow({
 /* ─────────────────────────────────────────────────────────────
    子组件：步骤2 子系统展开块
    ───────────────────────────────────────────────────────────── */
+type CustomSub = { id: string; label: string }
+
 function SubsystemBlock({
-  pathLabel, subs, onToggle,
+  pathLabel, subs, customSubs, onToggle, onAddCustomSub, onRemoveCustomSub,
 }: {
   pathId?: string
   pathLabel: string
   subs: string[]
+  customSubs: CustomSub[]
   onToggle: (subId: string, on: boolean) => void
+  onAddCustomSub: (label: string) => void
+  onRemoveCustomSub: (id: string) => void
 }) {
   const [open, setOpen] = useState(false)
+  const [adding, setAdding] = useState(false)
+  const [customInput, setCustomInput] = useState('')
+
+  function commitCustomSub() {
+    const t = customInput.trim()
+    if (t) { onAddCustomSub(t); setCustomInput(''); setAdding(false) }
+  }
+
+  const totalOptions = SUBSYSTEM_OPTIONS.length + customSubs.length
+
   return (
     <div className="subsystem-expand">
       <div className={`subsystem-expand-head${open ? ' open' : ''}`} onClick={() => setOpen((v) => !v)}>
         <span className="chevron">▶</span>
         <span>{pathLabel}</span>
         <span style={{ marginLeft: 'auto', fontWeight: 400, fontSize: '0.75rem', color: '#999' }}>
-          已选 {subs.length}/{SUBSYSTEM_OPTIONS.length}
+          已选 {subs.length}/{totalOptions}
         </span>
       </div>
       {open && (
@@ -281,8 +296,86 @@ function SubsystemBlock({
               {opt.label}
             </label>
           ))}
+          {customSubs.map((cs) => (
+            <label key={cs.id} style={{ color: '#217346', fontStyle: 'italic' }}>
+              <input
+                type="checkbox"
+                checked={subs.includes(cs.id)}
+                onChange={(e) => onToggle(cs.id, e.target.checked)}
+              />
+              {cs.label}
+              <button
+                type="button"
+                onClick={(e) => { e.preventDefault(); onRemoveCustomSub(cs.id) }}
+                style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#c00', fontSize: '0.7rem', marginLeft: 2, padding: 0 }}
+                title="删除"
+              >×</button>
+            </label>
+          ))}
+          {adding ? (
+            <div className="custom-add-row" style={{ gridColumn: '1 / -1', marginTop: 4 }}>
+              <input
+                autoFocus
+                placeholder="自定义子系统名称…"
+                value={customInput}
+                onChange={(e) => setCustomInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') commitCustomSub()
+                  if (e.key === 'Escape') setAdding(false)
+                }}
+              />
+              <button type="button" className="add-btn" onClick={commitCustomSub}>确定</button>
+              <button type="button" className="add-btn"
+                style={{ background: '#efefef', borderColor: '#ccc', color: '#666' }}
+                onClick={() => setAdding(false)}>取消</button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              style={{
+                gridColumn: '1 / -1', border: '1px dashed #c6e0b4', background: 'transparent',
+                color: '#217346', fontSize: '0.75rem', padding: '0.2rem 0.5rem',
+                borderRadius: '4px', cursor: 'pointer', marginTop: 4,
+              }}
+              onClick={() => setAdding(true)}>
+              + 自定义维度
+            </button>
+          )}
         </div>
       )}
+    </div>
+  )
+}
+
+/* ─────────────────────────────────────────────────────────────
+   子组件：自定义属性追加按钮
+   ───────────────────────────────────────────────────────────── */
+function AttrCustomAdder({ label, indent, onAdd }: { label: string; indent: number; onAdd: (l: string) => void }) {
+  const [adding, setAdding] = useState(false)
+  const [val, setVal] = useState('')
+  function commit() {
+    const t = val.trim()
+    if (t) { onAdd(t); setVal(''); setAdding(false) }
+  }
+  if (adding) {
+    return (
+      <div className="custom-add-row" style={{ paddingLeft: indent }}>
+        <input autoFocus placeholder="属性名称…" value={val}
+          onChange={(e) => setVal(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setAdding(false) }} />
+        <button type="button" className="add-btn" onClick={commit}>确定</button>
+        <button type="button" className="add-btn"
+          style={{ background: '#efefef', borderColor: '#ccc', color: '#666' }}
+          onClick={() => setAdding(false)}>取消</button>
+      </div>
+    )
+  }
+  return (
+    <div style={{ paddingLeft: indent, paddingBottom: 3, paddingTop: 3 }}>
+      <button type="button"
+        style={{ border: '1px dashed #c6e0b4', background: 'transparent', color: '#217346',
+          fontSize: '0.75rem', padding: '0.2rem 0.5rem', borderRadius: '4px', cursor: 'pointer' }}
+        onClick={() => setAdding(true)}>{label}</button>
     </div>
   )
 }
@@ -407,6 +500,37 @@ export default function NewProject() {
     })
   }
 
+  function addCustomSubsystem(pathId: string, label: string) {
+    const id = `customsub_${Date.now()}`
+    setGameSystems((gs) => {
+      const cur = new Set(gs.subsystemsByPath[pathId] ?? [])
+      cur.add(id)
+      return {
+        ...gs,
+        subsystemsByPath: { ...gs.subsystemsByPath, [pathId]: [...cur] },
+        customSubsByPath: {
+          ...gs.customSubsByPath,
+          [pathId]: [...(gs.customSubsByPath[pathId] ?? []), { id, label }],
+        },
+      }
+    })
+  }
+
+  function removeCustomSubsystem(pathId: string, subId: string) {
+    setGameSystems((gs) => {
+      const cur = new Set(gs.subsystemsByPath[pathId] ?? [])
+      cur.delete(subId)
+      return {
+        ...gs,
+        subsystemsByPath: { ...gs.subsystemsByPath, [pathId]: [...cur] },
+        customSubsByPath: {
+          ...gs.customSubsByPath,
+          [pathId]: (gs.customSubsByPath[pathId] ?? []).filter((c) => c.id !== subId),
+        },
+      }
+    })
+  }
+
   function addCustomNode(parentId: string | null, label: string) {
     const id = `custom_${Date.now()}`
     setGameSystems((gs) => ({
@@ -458,6 +582,31 @@ export default function NewProject() {
         for (const g of ATTR_GROUPS) findAndRemove(g.nodes)
       }
       return { ...a, selectedAttrs: [...s] }
+    })
+  }
+
+  function addCustomAttr(parentId: string | null, label: string) {
+    const id = `customattr_${Date.now()}`
+    setAttributes((a) => {
+      const s = new Set(a.selectedAttrs)
+      s.add(id)
+      return {
+        ...a,
+        selectedAttrs: [...s],
+        customAttrs: [...a.customAttrs, { id, label, parentId }],
+      }
+    })
+  }
+
+  function removeCustomAttr(id: string) {
+    setAttributes((a) => {
+      const s = new Set(a.selectedAttrs)
+      s.delete(id)
+      return {
+        ...a,
+        selectedAttrs: [...s],
+        customAttrs: a.customAttrs.filter((c) => c.id !== id),
+      }
     })
   }
 
@@ -789,15 +938,22 @@ export default function NewProject() {
                     <p className="muted small" style={{ marginBottom: '0.5rem' }}>
                       点击展开每个系统独立配置；未展开保持默认（基础属性 + 升级）。
                     </p>
-                    {gameSystems.checkedPaths.map((pathId) => (
-                      <SubsystemBlock
-                        key={pathId}
-                        pathId={pathId}
-                        pathLabel={getTreeNodeLabel(pathId)}
-                        subs={gameSystems.subsystemsByPath[pathId] ?? []}
-                        onToggle={(subId, on) => toggleSubsystem(pathId, subId, on)}
-                      />
-                    ))}
+                    {gameSystems.checkedPaths.map((pathId) => {
+                        const customNode = gameSystems.customNodes.find((c) => c.id === pathId)
+                        const pathLabel = customNode ? customNode.label : getTreeNodeLabel(pathId)
+                        return (
+                          <SubsystemBlock
+                            key={pathId}
+                            pathId={pathId}
+                            pathLabel={pathLabel}
+                            subs={gameSystems.subsystemsByPath[pathId] ?? []}
+                            customSubs={gameSystems.customSubsByPath[pathId] ?? []}
+                            onToggle={(subId, on) => toggleSubsystem(pathId, subId, on)}
+                            onAddCustomSub={(label) => addCustomSubsystem(pathId, label)}
+                            onRemoveCustomSub={(subId) => removeCustomSubsystem(pathId, subId)}
+                          />
+                        )
+                      })}
                   </div>
                 )}
 
@@ -851,6 +1007,65 @@ export default function NewProject() {
                         ))}
                       </div>
                     ))}
+                    {/* 自定义属性区块 */}
+                    <div>
+                      <div className="attr-group-title">自定义属性</div>
+                      {attributes.customAttrs.filter((c) => c.parentId === null).map((ca) => (
+                        <div key={ca.id}>
+                          <div className="attr-row" style={{ paddingLeft: 8 }}>
+                            <input
+                              type="checkbox"
+                              checked={selectedAttrsSet.has(ca.id)}
+                              onChange={(e) => {
+                                const s = new Set(attributes.selectedAttrs)
+                                if (e.target.checked) s.add(ca.id); else {
+                                  s.delete(ca.id)
+                                  attributes.customAttrs.filter(c2 => c2.parentId === ca.id).forEach(c2 => s.delete(c2.id))
+                                }
+                                setAttributes(a => ({ ...a, selectedAttrs: [...s] }))
+                              }}
+                            />
+                            <span className="attr-label" style={{ flex: 1, fontStyle: 'italic' }}>{ca.label}</span>
+                            <span className="node-badge" style={{ color: '#217346', fontSize: '0.7rem' }}>自定义</span>
+                            <button
+                              type="button"
+                              onClick={() => removeCustomAttr(ca.id)}
+                              style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#c00', fontSize: '0.75rem', padding: '0 4px' }}
+                              title="删除">×</button>
+                          </div>
+                          {/* 次级自定义 */}
+                          {attributes.customAttrs.filter((c) => c.parentId === ca.id).map((ca2) => (
+                            <div key={ca2.id} className="attr-row child-1" style={{ paddingLeft: 28 }}>
+                              <input
+                                type="checkbox"
+                                checked={selectedAttrsSet.has(ca2.id)}
+                                onChange={(e) => {
+                                  const s = new Set(attributes.selectedAttrs)
+                                  if (e.target.checked) s.add(ca2.id); else s.delete(ca2.id)
+                                  setAttributes(a => ({ ...a, selectedAttrs: [...s] }))
+                                }}
+                              />
+                              <span className="attr-label" style={{ flex: 1, fontStyle: 'italic' }}>{ca2.label}</span>
+                              <button
+                                type="button"
+                                onClick={() => removeCustomAttr(ca2.id)}
+                                style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#c00', fontSize: '0.75rem', padding: '0 4px' }}
+                                title="删除">×</button>
+                            </div>
+                          ))}
+                          <AttrCustomAdder
+                            label="+ 添加次级属性"
+                            indent={28}
+                            onAdd={(lbl) => addCustomAttr(ca.id, lbl)}
+                          />
+                        </div>
+                      ))}
+                      <AttrCustomAdder
+                        label="+ 添加顶级自定义属性"
+                        indent={8}
+                        onAdd={(lbl) => addCustomAttr(null, lbl)}
+                      />
+                    </div>
                   </div>
                 </div>
 

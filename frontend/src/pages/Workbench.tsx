@@ -5,6 +5,7 @@ import { getInitAgentPrompt, pipelineStepLabel } from '../data/pipelineSteps'
 import { createUniver, LocaleType, defaultTheme, type Univer } from '@univerjs/presets'
 import type { FUniver } from '@univerjs/core/lib/facade'
 import { UniverSheetsCorePreset, type FWorkbook } from '@univerjs/preset-sheets-core'
+import UniverZhCN from '@univerjs/preset-sheets-core/locales/zh-CN'
 import '@univerjs/preset-sheets-core/lib/index.css'
 
 type TableInfo = { table_name: string; validation_status: string; layer: string; purpose?: string }
@@ -110,17 +111,21 @@ export default function Workbench() {
   }, [headers])
 
   const loadValidation = useCallback(async () => {
-    const v = (await apiFetch('/validate/run', { method: 'POST', headers })) as Partial<ValidateReport>
-    setValidateReport({
-      passed: Boolean(v.passed),
-      warnings: Array.isArray(v.warnings) ? v.warnings : [],
-      per_table:
-        v.per_table != null && typeof v.per_table === 'object' && !Array.isArray(v.per_table)
-          ? (v.per_table as Record<string, string>)
-          : {},
-      violations: Array.isArray(v.violations) ? v.violations : [],
-      rule_summaries: Array.isArray(v.rule_summaries) ? (v.rule_summaries as RuleSummary[]) : [],
-    })
+    try {
+      const v = (await apiFetch('/validate/run', { method: 'POST', headers })) as Partial<ValidateReport>
+      setValidateReport({
+        passed: Boolean(v.passed),
+        warnings: Array.isArray(v.warnings) ? v.warnings : [],
+        per_table:
+          v.per_table != null && typeof v.per_table === 'object' && !Array.isArray(v.per_table)
+            ? (v.per_table as Record<string, string>)
+            : {},
+        violations: Array.isArray(v.violations) ? v.violations : [],
+        rule_summaries: Array.isArray(v.rule_summaries) ? (v.rule_summaries as RuleSummary[]) : [],
+      })
+    } catch {
+      setValidateReport(null)
+    }
   }, [headers])
 
   const loadPipeline = useCallback(async () => {
@@ -154,6 +159,7 @@ export default function Workbench() {
     if (!host) return
     const { univer, univerAPI } = createUniver({
       locale: LocaleType.ZH_CN,
+      locales: { [LocaleType.ZH_CN]: UniverZhCN },
       theme: defaultTheme,
       presets: [UniverSheetsCorePreset({ container: host })],
     })

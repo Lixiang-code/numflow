@@ -308,6 +308,8 @@ export type GameSystemsDraft = {
   subsystemsByPath: Record<string, string[]>
   /** 自定义系统：每项有唯一 id（custom_<timestamp>）、label、parentId */
   customNodes: Array<{ id: string; label: string; parentId: string | null }>
+  /** 每个系统路径下的自定义子系统维度 */
+  customSubsByPath: Record<string, Array<{ id: string; label: string }>>
 }
 
 export type AttributesDraft = {
@@ -315,6 +317,8 @@ export type AttributesDraft = {
   selectedAttrs: string[]
   /** 对抗属性等级化（独立全局开关） */
   combatLevelized: boolean
+  /** 自定义属性节点（顶级 parentId=null，次级 parentId=父id） */
+  customAttrs: Array<{ id: string; label: string; parentId: string | null }>
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -349,7 +353,7 @@ export function defaultGameSystems(): GameSystemsDraft {
   const sub = defaultSubsystems()
   const subsystemsByPath: Record<string, string[]> = {}
   for (const id of checkedPaths) subsystemsByPath[id] = [...sub]
-  return { checkedPaths, subsystemsByPath, customNodes: [] }
+  return { checkedPaths, subsystemsByPath, customNodes: [], customSubsByPath: {} }
 }
 
 /** 收集属性树中默认选中的节点 id */
@@ -364,7 +368,7 @@ function collectDefaultAttrs(nodes: AttrNode[], gameType: string, out: Set<strin
 export function defaultAttributes(gameType = 'rpg_turn'): AttributesDraft {
   const sel = new Set<string>()
   for (const g of ATTR_GROUPS) collectDefaultAttrs(g.nodes, gameType, sel)
-  return { selectedAttrs: [...sel], combatLevelized: false }
+  return { selectedAttrs: [...sel], combatLevelized: false, customAttrs: [] }
 }
 
 export function pruneUnknownPaths(draft: GameSystemsDraft): GameSystemsDraft {
@@ -377,6 +381,7 @@ export function pruneUnknownPaths(draft: GameSystemsDraft): GameSystemsDraft {
     checkedPaths: validPaths,
     subsystemsByPath,
     customNodes: draft.customNodes ?? [],
+    customSubsByPath: draft.customSubsByPath ?? {},
   }
 }
 
@@ -389,12 +394,13 @@ export function migrateAttributesDraft(raw: unknown): AttributesDraft {
     return {
       selectedAttrs: d.selectedAttrs as string[],
       combatLevelized: Boolean(d.combatLevelized),
+      customAttrs: Array.isArray(d.customAttrs) ? (d.customAttrs as AttributesDraft['customAttrs']) : [],
     }
   }
   // 旧格式 {basics, extras}
   const basics = Array.isArray(d.basics) ? (d.basics as string[]) : []
   const extras = Array.isArray(d.extras) ? (d.extras as string[]) : []
-  return { selectedAttrs: [...basics, ...extras], combatLevelized: false }
+  return { selectedAttrs: [...basics, ...extras], combatLevelized: false, customAttrs: [] }
 }
 
 /** 找树节点 label（用于展示） */
