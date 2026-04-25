@@ -138,6 +138,28 @@ _REVIEW_SYSTEM_TAIL = (
 
 _EXECUTE_SYSTEM_TAIL = (
     "【当前阶段=execute】按 review 给出的最终方案执行。允许调用工具。\n"
+
+    "【★ TODO 强制追踪 ★】\n"
+    "  · 第一回合**必须**先输出 TODO 清单，格式严格如下（无需工具调用，纯文本输出）：\n"
+    "    ```todo\n"
+    "    - [ ] 任务描述1\n"
+    "    - [ ] 任务描述2\n"
+    "    ```\n"
+    "  · 每完成一项，在后续回合文本中立即标记 `- [x] 任务描述`；\n"
+    "  · **禁止**在仍有 `- [ ]` 未关闭时输出最终总结或结束会话；\n"
+    "  · 若发现 review 方案遗漏了新任务，允许在 TODO 中追加条目。\n"
+
+    "【★ 行动目标声明 ★】\n"
+    "  · 每次发起工具调用**之前**，必须先输出一行：`【行动目标】<本次调用的目标，15字内>`；\n"
+    "  · 该行紧接工具调用，不算做最终总结。\n"
+
+    "【★ 失败后强制 CoT ★】\n"
+    "  · 当任何工具返回 status=error 或 ok=false 时，**下一回合必须先输出**：\n"
+    "    `【失败分析】<根因，30字内>`\n"
+    "    `【后续行动】<调整方案，1-2步>`\n"
+    "  · 然后才允许继续工具调用；禁止不分析直接重试相同操作。\n"
+    "  · 若同一操作失败 2 次仍无法绕过，立即在 TODO 中将该项标记为 `- [!] 阻塞：<原因>` 并继续完成其他项。\n"
+
     "【★ 高效硬规则 ★】违反将直接判为低质量结果：\n"
     "  1. **公式优先**：任何 ≥10 行的规律列（属性、消耗、经验、伤害…）必须用 `setup_level_table` 一次建好，"
     "     或用 `bulk_register_and_compute` 一次注册并执行多列公式；**严禁**对规律数据使用 `write_cells` 逐行/逐格写入。"
@@ -149,7 +171,7 @@ _EXECUTE_SYSTEM_TAIL = (
     "     只有真正存在依赖关系（B 需读 A 的结果）时才允许下一回合再发。\n"
     "  4. **每张新等级表只调用一次 setup_level_table**：把所有列的公式同时塞进 columns 数组，一次建表 + 全量回填，不要分多次。\n"
     "  5. **单次 write_cells 不超过 30 行**：若必须手写数据，每次 updates 最多 30 条，超出须分多次调用（否则 JSON 会被截断）。\n"
-    "  6. 简短自然语言总结放在最后一回合，引用工具结果中的 `executed_count / rows_updated` 等关键字段。"
+    "  6. 最终总结必须包含：各 TODO 完成状态、`executed_count / rows_updated` 等关键字段、未完成项说明。"
 )
 
 
@@ -382,8 +404,15 @@ def run_agent_sse(
     yield _emit("execute", {"type": "log", "message": "execute 阶段开始（启用工具循环）"})
     final_text = ""
     round_i = 0
+    consec_errors = 0  # 连续错误计数
+    MAX_ROUNDS = 30
+    MAX_CONSEC_ERRORS = 4  # 连续失败4次强制退出
     while True:
         round_i += 1
+        if round_i > MAX_ROUNDS:
+            yield _emit("execute", {"type": "log", "message": f"⚠ 超过最大轮次 {MAX_ROUNDS}，强制结束"})
+            yield _emit("execute", {"type": "done", "full_text": final_text or "(超出最大轮次，任务可能不完整)", "design": design_text, "review": review_text})
+            return
         yield _emit(
             "execute",
             {"type": "log", "message": f"模型推理轮次 {round_i}"},
@@ -510,6 +539,10 @@ def run_agent_sse(
                     result = json.dumps({"ok": False, "error": err_msg}, ensure_ascii=False)
 
                 tool_status = "error" if ('"status": "error"' in result or '"ok": false' in result.lower()) else "success"
+                if tool_status == "error":
+                    consec_errors += 1
+                else:
+                    consec_errors = 0
                 yield _emit(
                     "execute",
                     {
@@ -528,6 +561,21 @@ def run_agent_sse(
                         "content": result,
                     }
                 )
+            if consec_errors >= MAX_CONSEC_ERRORS:
+                stop_msg = f"⚠ 连续 {MAX_CONSEC_ERRORS} 次工具失败，注入强制修复提示"
+                yield _emit("execute", {"type": "log", "message": stop_msg})
+                execute_messages.append({
+                    "role": "user",
+                    "content": (
+                        f"你已连续 {MAX_CONSEC_ERRORS} 次工具调用失败。**必须先停下来分析**：\n"
+                        "1. 输出【失败分析】：说明为何持续失败（根本原因）\n"
+                        "2. 输出【阻塞标记】：将 TODO 中受阻项标记为 `- [!] 阻塞：<原因>`\n"
+                        "3. 输出【绕行方案】：列出绕过阻塞的替代路径，或标记该任务为已知问题\n"
+                        "4. 继续完成剩余未阻塞的 TODO 项\n"
+                        "**禁止**继续重试相同的失败操作。"
+                    ),
+                })
+                consec_errors = 0  # 重置，给模型分析机会
             continue
 
         final_text = msg.content or ""

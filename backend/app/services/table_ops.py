@@ -100,15 +100,17 @@ def delete_dynamic_table(conn: sqlite3.Connection, *, table_name: str, confirm: 
     cur = conn.execute(
         """
         SELECT from_table, from_column, to_table, to_column
-        FROM _dependency_graph WHERE to_table = ?
+        FROM _dependency_graph
+        WHERE to_table = ?
+          AND from_table != ?
         """,
-        (t,),
+        (t, t),
     )
     blockers = [dict(r) for r in cur.fetchall()]
     if blockers:
         return {
             "ok": False,
-            "error": "存在公式依赖本表列，拒绝删除",
+            "error": "存在其他表的公式依赖本表列，拒绝删除",
             "blockers": blockers,
         }
     conn.execute(f'DROP TABLE IF EXISTS "{t}"')
