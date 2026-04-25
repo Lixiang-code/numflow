@@ -154,6 +154,27 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "set_project_setting",
+            "description": (
+                "写入 project_settings 中的一个键值对。"
+                "用于设置 max_level / currencies / stat_keys / resource_keys 等顶层项目参数。"
+                "value 可为任意 JSON 值（字符串/数字/数组/对象）。"
+                "注意：fixed_layer_config 受保护不可覆盖；global_readme 请用 update_global_readme。"
+                "调用示例：{\"key\": \"max_level\", \"value\": 200}"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "设置键名（如 max_level / currencies / stat_keys / resource_keys）"},
+                    "value": {"description": "设置值，任意 JSON 类型（数字/字符串/数组/对象均可）"},
+                },
+                "required": ["key", "value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_table",
             "description": "创建动态业务表并写入 _table_registry；columns 每项含 name、sql_type(TEXT|REAL|INTEGER)",
             "parameters": {
@@ -615,6 +636,32 @@ def _update_global_readme(conn: sqlite3.Connection, content: str) -> Dict[str, A
     return {"ok": True}
 
 
+_PROTECTED_SETTINGS = frozenset({"fixed_layer_config"})
+
+
+def _set_project_setting(conn: sqlite3.Connection, key: str, value: Any) -> Dict[str, Any]:
+    """写入 project_settings 中的任意键值对（保护 fixed_layer_config 不被覆盖）。"""
+    import time
+
+    if not key or not key.strip():
+        raise ValueError("key 不能为空")
+    if key in _PROTECTED_SETTINGS:
+        raise ValueError(f"键 {key!r} 受保护，请勿覆盖；如需更新全局 README 请用 update_global_readme")
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    value_json = json.dumps(value, ensure_ascii=False)
+    conn.execute(
+        """
+        INSERT INTO project_settings (key, value_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+            updated_at = excluded.updated_at
+        """,
+        (key, value_json, now),
+    )
+    conn.commit()
+    return {"ok": True, "key": key, "value_preview": value_json[:200]}
+
+
 def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: ProjectDB) -> str:
     conn = p.conn
     args: Dict[str, Any] = {}
@@ -677,6 +724,14 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
             out = {"error": "无写权限"}
         else:
             out = _update_global_readme(conn, str(args.get("content", "")))
+    elif name == "set_project_setting":
+        if not p.can_write:
+            out = {"error": "无写权限"}
+        else:
+            try:
+                out = _set_project_setting(conn, str(args.get("key", "")), args.get("value"))
+            except ValueError as e:
+                out = {"error": str(e)}
     elif name == "create_table":
         if not p.can_write:
             out = {"error": "无写权限"}

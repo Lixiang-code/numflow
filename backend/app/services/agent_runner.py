@@ -21,6 +21,7 @@ WRITE_TOOLS = {
     "recalculate_downstream",
     "update_table_readme",
     "update_global_readme",
+    "set_project_setting",
 }
 
 
@@ -328,7 +329,7 @@ def run_agent_sse(
     )
 
     yield _emit("execute", {"type": "log", "message": "execute 阶段开始（启用工具循环）"})
-    max_rounds = 8
+    max_rounds = 20
     final_text = ""
     for round_i in range(max_rounds):
         yield _emit(

@@ -14,10 +14,23 @@ from app.services.qwen_client import get_client
 DEFAULT_STEP_PROMPTS: Dict[str, str] = {
     "environment_global_readme": (
         "【步骤 1/11 环境与全局 README】"
-        "目标：固化项目级元数据与全局 README。"
-        "必产出：global_readme（写入 _global_readme，字段：项目定位/核心循环/数值哲学/版本节奏/术语表）；"
-        "确保 _project_settings 关键键齐备（max_level、currencies、stat_keys、resource_keys）。"
-        "验收：get_project_config 能返回完整 settings；_global_readme 含 6 字段且非占位。"
+        "目标：固化项目级元数据与全局 README，为后续所有步骤提供数值基线。\n"
+        "【操作流程】\n"
+        "1. 调用 get_project_config 读取现有配置，重点提取 fixed_layer_config.core 下的字段："
+        "   level_cap(最大等级)、lifecycle_days、game_type、business_model、theme、magnitude、"
+        "   defense_formula、combat_rhythm 等。\n"
+        "2. 使用 set_project_setting 写入以下顶层键（从 fixed_layer_config 中推导）："
+        "   - max_level: 整数（来自 level_cap）"
+        "   - currencies: 对象，例如 {\"gold\": \"软通货\", \"bound_diamond\": \"绑定硬通货\", \"dust\": \"玩法专属\"}"
+        "   - stat_keys: 数组，列出核心属性ID（从 attribute_systems.selectedAttrs 提取）"
+        "   - resource_keys: 数组，主要养成资源ID列表（根据 game_systems 推导）\n"
+        "3. 使用 update_global_readme 写入全面的全局 README（必须包含6个字段）："
+        "   goal / upstream_input / output / required_tables_cols / acceptance_criteria / pitfalls"
+        "   以及项目定位/核心循环/数值哲学/版本节奏/术语表。\n"
+        "【重要】不要尝试 create_table('project_settings')——project_settings 是系统表已存在！"
+        "【重要】不要尝试 write_cells 写 project_settings——应使用 set_project_setting 工具。\n"
+        "验收：get_project_config 返回包含 max_level/currencies/stat_keys/resource_keys 键；"
+        "global_readme 含完整6字段且非占位符。"
     ),
     "base_attribute_framework": (
         "【步骤 2/11 基础属性框架】"
