@@ -206,7 +206,14 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "write_cells",
-            "description": "批量写入单元格；跳过 user_manual。updates 每项含 row_id、column、value",
+    "description": (
+                "批量写入单元格值；跳过 user_manual 保护单元格。"
+                "适用场景：① 分类/标签/描述等非规律内容（系统名、道具名、备注等）"
+                "② 少量手工配置值（≤30行/次）。"
+                "禁止场景：等级序列/规律数值 → 用 setup_level_table；"
+                "整列计算值 → 用 register_formula+execute_formula。"
+                "updates 每项含 row_id、column、value；source_tag 默认 ai_generated。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

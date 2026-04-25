@@ -155,11 +155,12 @@ _EXECUTE_SYSTEM_TAIL = (
     "同一操作失败 2 次 → 标记 `- [!] 阻塞` → 立即跳到下一 TODO 项。\n\n"
 
     "═══ ★ 效率硬规则 ★ ═══\n"
-    "① ≥10 行规律数据 → 必须用 setup_level_table 或 bulk_register_and_compute，**禁止** write_cells 逐行写。\n"
-    "② 同一回合内所有独立工具 → **一次性并行调用**，不要一个一个排队。\n"
-    "③ setup_level_table：所有列公式同时放入 columns 数组，一次调用完成。\n"
-    "④ write_cells 单次 ≤30 行，超出分多次调用。\n"
-    "⑤ 最终总结：必须包含 TODO 完成状态 + executed_count/rows_updated 关键数字。"
+    "① 等级/数值序列（规律递增/递减/公式可算）→ 必须用 setup_level_table 或 bulk_register_and_compute，**禁止** write_cells 逐行写。\n"
+    "② write_cells 只用于：分类标签、名称、描述、少量手工配置等**非规律内容**。\n"
+    "③ 同一回合内所有独立工具 → **一次性并行调用**，不要一个一个排队。\n"
+    "④ setup_level_table：所有列公式同时放入 columns 数组，一次调用完成。\n"
+    "⑤ write_cells 单次 ≤30 行，超出分多次调用。\n"
+    "⑥ 最终总结：必须包含 TODO 完成状态 + executed_count/rows_updated 关键数字。"
 )
 
 
@@ -421,14 +422,13 @@ def run_agent_sse(
     consec_errors = 0   # 连续错误计数（重置于成功）
     total_errors = 0    # 累计错误（不重置）
     total_success = 0   # 累计成功
-    MAX_ROUNDS = 30
     MAX_CONSEC_ERRORS = 4  # 连续失败4次强制注入分析提示
     while True:
         round_i += 1
-        if round_i > MAX_ROUNDS:
-            yield _emit("execute", {"type": "log", "message": f"⚠ 超过最大轮次 {MAX_ROUNDS}，强制结束"})
-            yield _emit("execute", {"type": "done", "full_text": final_text or "(超出最大轮次，任务可能不完整)", "design": design_text, "review": review_text})
-            return
+
+        # ---- 每20轮发出一次进度警告（不强制终止）----
+        if round_i > 1 and round_i % 20 == 0:
+            yield _emit("execute", {"type": "log", "message": f"⏱ 已进行 {round_i} 轮推理，成功={total_success} 失败={total_errors}"})
 
         # ---- 每5轮注入状态锚点（防止小模型目标漂移）----
         if round_i > 1 and round_i % 5 == 0:
