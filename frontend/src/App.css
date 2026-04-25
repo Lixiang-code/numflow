@@ -1443,9 +1443,54 @@ pre {
 .am-phase-badge.execute { background: #e8f5e9; color: #1b5e20; }
 .am-phase-badge.route { background: #f3e5f5; color: #6a1b9a; }
 .am-phase-badge.done { background: #e8f5e9; color: #2e7d32; }
-.am-phase-title { font-size: 0.82rem; font-weight: 600; }
-.am-phase-meta { margin-left: auto; font-size: 0.72rem; color: var(--text-muted); }
-.am-phase-chevron { font-size: 0.65rem; color: var(--text-muted); transition: transform .15s; }
+.am-phase-title {
+  font-size: 0.82rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 进行中指示灯 */
+.am-live-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #ff9800;
+  animation: pulse-dot .9s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.3; transform: scale(0.7); }
+}
+/* 工具调用状态摘要小徽章 */
+.am-tool-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+.am-ts-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: #fff;
+  flex-shrink: 0;
+}
+.am-ts-dot.done { background: #43a047; }
+.am-ts-dot.error { background: #e53935; }
+.am-ts-dot.pending { background: #fb8c00; }
+.am-phase-meta { font-size: 0.72rem; color: var(--text-muted); flex-shrink: 0; }
+.am-phase-chevron { font-size: 0.65rem; color: var(--text-muted); transition: transform .15s; flex-shrink: 0; }
 .am-phase-chevron.open { transform: rotate(90deg); }
 .am-phase-content {
   padding: 0.6rem 0.75rem;
@@ -1501,6 +1546,19 @@ pre {
 }
 
 /* 工具调用时间线 */
+/* 工具调用状态圆点 */
+.tool-dot {
+  display: inline-block;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.tool-dot.done { background: #43a047; }
+.tool-dot.error { background: #e53935; }
+.tool-dot.pending {
+  background: #fb8c00;
+  animation: pulse-dot .9s ease-in-out infinite;
+}
 .am-tool-timeline {
   display: flex;
   flex-direction: column;
@@ -1522,19 +1580,18 @@ pre {
   font-size: 0.78rem;
 }
 .am-tool-item-head:hover { background: var(--green-light); }
-.am-tool-badge {
-  font-size: 0.68rem;
+.am-tool-name { font-weight: 600; font-size: 0.82rem; color: var(--text); }
+.am-tool-func-name { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); }
+.am-tool-time { margin-left: auto; font-size: 0.7rem; color: var(--text-muted); flex-shrink: 0; }
+.am-tool-body-label {
+  font-size: 0.7rem;
   font-weight: 700;
-  padding: 0.05rem 0.4rem;
-  border-radius: 99px;
+  color: var(--text-muted);
   text-transform: uppercase;
-  flex-shrink: 0;
+  letter-spacing: 0.05em;
+  display: block;
+  margin-bottom: 0.2rem;
 }
-.am-tool-badge.call { background: #e3f2fd; color: #0d47a1; }
-.am-tool-badge.result { background: #e8f5e9; color: #1b5e20; }
-.am-tool-badge.error { background: #ffebee; color: #c62828; }
-.am-tool-name { font-family: var(--font-mono); font-weight: 600; font-size: 0.8rem; color: var(--text); }
-.am-tool-time { margin-left: auto; font-size: 0.7rem; color: var(--text-muted); }
 .am-tool-item-body {
   font-family: var(--font-mono);
   font-size: 0.73rem;

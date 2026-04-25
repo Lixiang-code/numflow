@@ -30,7 +30,26 @@ type PhaseState = {
   error: string | null
   hasContent: boolean
 }
-type ToolEntry = { idx: number; ts: string; kind: 'call' | 'result'; name: string; body: string }
+type ToolEntry = {
+  idx: number
+  ts: string
+  kind: 'call' | 'result'
+  name: string
+  label: string
+  body: string
+  callId: string
+  status: 'pending' | 'done' | 'error'
+}
+type PairedTool = {
+  idx: number
+  callId: string
+  name: string
+  label: string
+  ts: string
+  status: 'pending' | 'done' | 'error'
+  arguments: string
+  resultPreview?: string
+}
 type Metrics = {
   startedAt: string
   finishedAt: string | null
@@ -48,6 +67,28 @@ type ProjectInfo = {
   name: string
   game_type?: string
   mode?: string
+}
+
+function pairTools(tools: ToolEntry[]): PairedTool[] {
+  const map = new Map<string, PairedTool>()
+  const ordered: PairedTool[] = []
+  for (const e of tools) {
+    if (e.kind === 'call') {
+      const p: PairedTool = {
+        idx: e.idx, callId: e.callId, name: e.name, label: e.label || e.name,
+        ts: e.ts, status: e.status, arguments: e.body,
+      }
+      map.set(e.callId, p)
+      ordered.push(p)
+    } else if (e.kind === 'result') {
+      const existing = map.get(e.callId)
+      if (existing) {
+        existing.status = e.status
+        existing.resultPreview = e.body
+      }
+    }
+  }
+  return ordered
 }
 
 // ─── util ────────────────────────────────────────────────────────────────────
@@ -76,20 +117,82 @@ function PhaseText({ text, live }: { text: string; live?: boolean }) {
   )
 }
 
+function StatusDot({ status }: { status: 'pending' | 'done' | 'error' }) {
+  const cls = status === 'done' ? 'tool-dot done' : status === 'error' ? 'tool-dot error' : 'tool-dot pending'
+  return <span className={cls} />
+}
+
+function ToolRow({ tool, isLive }: { tool: PairedTool; isLive?: boolean }) {
+  const [open, setOpen] = useState(false)
+  const status = isLive && tool.status === 'pending' ? 'pending' : tool.status
+  return (
+    <div className="am-tool-item">
+      <div className="am-tool-item-head" onClick={() => setOpen(o => !o)}>
+        <StatusDot status={status} />
+        <span className="am-tool-name">{tool.label}</span>
+        <span className="am-tool-func-name">{tool.name}</span>
+        <span className="am-tool-time">{tool.ts.slice(11, 19)}</span>
+        <span style={{ fontSize: '0.65rem', color: '#aaa', marginLeft: '4px' }}>{open ? '▲' : '▼'}</span>
+      </div>
+      {open && (
+        <div className="am-tool-item-body">
+          <div style={{ marginBottom: '0.3rem' }}>
+            <span className="am-tool-body-label">调用参数</span>
+            <pre>{tool.arguments}</pre>
+          </div>
+          {tool.resultPreview !== undefined && (
+            <div>
+              <span className="am-tool-body-label">{status === 'error' ? '❌ 返回' : '✓ 返回'}</span>
+              <pre>{tool.resultPreview}</pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function PhasePanel({ phaseKey, label, state, tools, live }: {
   phaseKey: string; label: string; state: PhaseState
   tools?: ToolEntry[]; live?: boolean
 }) {
-  const [open, setOpen] = useState(true)
-  const [expanded, setExpanded] = useState<Set<number>>(new Set())
+  // 默认：进行中的阶段展开，已完成/历史阶段折叠
+  const [open, setOpen] = useState(!!live)
+  useEffect(() => { if (live) setOpen(true) }, [live])
+
+  const paired = useMemo(() => pairTools(tools ?? []), [tools])
   const badge = phaseKey as 'route' | 'design' | 'review' | 'execute'
+  const pendingCount = paired.filter(t => t.status === 'pending').length
+  const doneCount = paired.filter(t => t.status === 'done').length
+  const errorCount = paired.filter(t => t.status === 'error').length
+
+  // 提取 AI 阶段标题：文本第一行（##STEP: ... 或普通首行）
+  const titleLine = useMemo(() => {
+    const firstLine = state.text.split('\n')[0] ?? ''
+    if (firstLine.startsWith('##STEP:')) return firstLine.replace('##STEP:', '').trim()
+    if (firstLine.startsWith('##')) return firstLine.replace(/^#+\s*/, '').trim()
+    return ''
+  }, [state.text])
+
   return (
     <div className="am-phase-panel">
       <div className="am-phase-header" onClick={() => setOpen(o => !o)}>
         <span className={`am-phase-badge ${badge}`}>{label}</span>
         <span className="am-phase-title">
-          {state.error ? '❌ 错误' : state.hasContent ? `✓ ${state.text.length} chars` : live ? '⟳ 进行中…' : '—'}
+          {state.error
+            ? '❌ 错误'
+            : live
+              ? <><span className="am-live-dot" />{titleLine || '进行中…'}</>
+              : titleLine || (state.hasContent ? `✓ ${state.text.length} chars` : '—')
+          }
         </span>
+        {paired.length > 0 && (
+          <span className="am-tool-summary">
+            {doneCount > 0 && <span className="am-ts-dot done">{doneCount}</span>}
+            {errorCount > 0 && <span className="am-ts-dot error">{errorCount}</span>}
+            {pendingCount > 0 && <span className="am-ts-dot pending">{pendingCount}</span>}
+          </span>
+        )}
         {state.started && (
           <span className="am-phase-meta">
             {fmtMs(msDiff(state.started, state.finished ?? nowIso()))}
@@ -110,20 +213,12 @@ function PhasePanel({ phaseKey, label, state, tools, live }: {
             </div>
           )}
           {(state.hasContent || live) && <PhaseText text={state.text} live={live} />}
-          {tools && tools.length > 0 && (
+          {paired.length > 0 && (
             <>
-              <div className="am-section-label">工具调用 ({tools.length})</div>
+              <div className="am-section-label">工具调用 ({paired.length})</div>
               <div className="am-tool-timeline">
-                {tools.map(e => (
-                  <div key={e.idx} className="am-tool-item">
-                    <div className="am-tool-item-head" onClick={() => setExpanded(s => { const n = new Set(s); n.has(e.idx) ? n.delete(e.idx) : n.add(e.idx); return n })}>
-                      <span className={`am-tool-badge ${e.kind}`}>{e.kind}</span>
-                      <span className="am-tool-name">{e.name}</span>
-                      <span className="am-tool-time">{e.ts.slice(11, 19)}</span>
-                      <span style={{ fontSize: '0.65rem', color: '#aaa', marginLeft: '4px' }}>{expanded.has(e.idx) ? '▲' : '▼'}</span>
-                    </div>
-                    {expanded.has(e.idx) && <div className="am-tool-item-body">{e.body}</div>}
-                  </div>
+                {paired.map(tool => (
+                  <ToolRow key={tool.callId || tool.idx} tool={tool} isLive={live && tool.status === 'pending'} />
                 ))}
               </div>
             </>
@@ -358,9 +453,31 @@ export default function ProjectSetup() {
           hasError = true
         } else if (type === 'tool_call') {
           toolCount++
-          localTools.push({ idx: localTools.length, ts: nowIso(), kind: 'call', name: String(raw.name ?? ''), body: String(raw.arguments ?? '') })
+          const callId = String(raw.call_id ?? String(toolCount))
+          localTools.push({
+            idx: localTools.length, ts: nowIso(), kind: 'call',
+            name: String(raw.name ?? ''),
+            label: String(raw.label ?? raw.name ?? ''),
+            body: String(raw.arguments ?? ''),
+            callId,
+            status: 'pending',
+          })
         } else if (type === 'tool_result') {
-          localTools.push({ idx: localTools.length, ts: nowIso(), kind: 'result', name: String(raw.name ?? ''), body: String(raw.preview ?? '') })
+          const callId = String(raw.call_id ?? '')
+          const resultStatus = raw.status === 'error' ? 'error' : 'done'
+          // Update matching call entry status
+          for (let i = localTools.length - 1; i >= 0; i--) {
+            if (localTools[i].kind === 'call' && localTools[i].callId === callId) {
+              localTools[i] = { ...localTools[i], status: resultStatus }
+              break
+            }
+          }
+          localTools.push({
+            idx: localTools.length, ts: nowIso(), kind: 'result',
+            name: String(raw.name ?? ''), label: '',
+            body: String(raw.preview ?? ''),
+            callId, status: resultStatus,
+          })
         } else if (type === 'done') {
           getOrInit(phase).finished = nowIso()
           lastRecoveryStatus = raw.recovery_status as string | undefined

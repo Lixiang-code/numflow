@@ -29,6 +29,38 @@ WRITE_TOOLS = {
     "create_snapshot",
 }
 
+# 工具名称 → 中文标签（用于前端监控显示）
+_TOOL_LABELS: Dict[str, str] = {
+    "create_table": "创建数值表",
+    "read_table": "读取表数据",
+    "write_cells": "写入单元格",
+    "delete_table": "删除表",
+    "list_tables": "列举所有表",
+    "register_formula": "注册公式",
+    "execute_formula": "执行公式",
+    "recalculate_downstream": "重算下游依赖",
+    "update_table_readme": "更新表 README",
+    "update_global_readme": "更新全局 README",
+    "get_readme": "读取 README",
+    "validate_table": "校验表数据",
+    "get_validation_report": "获取校验报告",
+    "create_snapshot": "创建快照",
+    "list_snapshots": "列举快照",
+    "restore_snapshot": "还原快照",
+    "bulk_register_and_compute": "批量注册公式",
+    "setup_level_table": "构建等级表",
+    "create_dynamic_table": "创建动态表",
+    "call_algorithm_api": "调用算法库",
+    "get_cell_provenance": "查询单元格来源",
+    "list_formulas": "列举公式",
+    "get_formula_detail": "查看公式详情",
+    "delete_formula": "删除公式",
+    "read_project_settings": "读取项目配置",
+    "set_project_setting": "更新项目配置",
+    "global_search": "全局搜索",
+    "suggest_action": "获取 Agent 建议",
+}
+
 
 def sse_event(obj: Dict[str, Any]) -> bytes:
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode("utf-8")
@@ -401,9 +433,11 @@ def run_agent_sse(
             for tc in tool_calls:
                 name = tc.function.name
                 args = tc.function.arguments or "{}"
+                call_id = tc.id
+                label = _TOOL_LABELS.get(name, name)
                 yield _emit(
                     "execute",
-                    {"type": "tool_call", "name": name, "arguments": args},
+                    {"type": "tool_call", "call_id": call_id, "name": name, "label": label, "arguments": args},
                 )
 
                 # ---- 可选 reviewer 旁路 ----
@@ -436,6 +470,11 @@ def run_agent_sse(
                                 "content": reject_payload,
                             }
                         )
+                        yield _emit(
+                            "execute",
+                            {"type": "tool_result", "call_id": call_id, "name": name, "status": "error",
+                             "preview": reject_payload[:500], "hint": "reviewer 拒绝"},
+                        )
                         continue
 
                 try:
@@ -446,11 +485,15 @@ def run_agent_sse(
                     err_msg = f"工具执行异常: {tool_exc!r}"
                     yield _emit("execute", {"type": "log", "message": err_msg})
                     result = json.dumps({"ok": False, "error": err_msg}, ensure_ascii=False)
+
+                tool_status = "error" if ('"status": "error"' in result or '"ok": false' in result.lower()) else "success"
                 yield _emit(
                     "execute",
                     {
                         "type": "tool_result",
+                        "call_id": call_id,
                         "name": name,
+                        "status": tool_status,
                         "preview": result[:2000],
                         "hint": "检查 JSON 内 status/warnings/blocked_cells",
                     },
@@ -654,9 +697,13 @@ def _run_recovery_sse(
                     args = json.loads(tc.function.arguments or "{}")
                 except json.JSONDecodeError:
                     pass
+                call_id = tc.id
+                label = _TOOL_LABELS.get(name, name)
                 yield _emit("execute", {
                     "type": "tool_call",
+                    "call_id": call_id,
                     "name": name,
+                    "label": label,
                     "arguments": tc.function.arguments or "{}",
                 })
                 try:
@@ -665,9 +712,12 @@ def _run_recovery_sse(
                     err_msg = f"工具执行异常: {tool_exc!r}"
                     yield _emit("execute", {"type": "log", "message": err_msg})
                     result = json.dumps({"ok": False, "error": err_msg}, ensure_ascii=False)
+                tool_status = "error" if ('"status": "error"' in result or '"ok": false' in result.lower()) else "success"
                 yield _emit("execute", {
                     "type": "tool_result",
+                    "call_id": call_id,
                     "name": name,
+                    "status": tool_status,
                     "preview": result[:2000],
                 })
                 execute_messages.append({
