@@ -329,12 +329,13 @@ def run_agent_sse(
     )
 
     yield _emit("execute", {"type": "log", "message": "execute 阶段开始（启用工具循环）"})
-    max_rounds = 20
     final_text = ""
-    for round_i in range(max_rounds):
+    round_i = 0
+    while True:
+        round_i += 1
         yield _emit(
             "execute",
-            {"type": "log", "message": f"模型推理轮次 {round_i + 1}/{max_rounds}"},
+            {"type": "log", "message": f"模型推理轮次 {round_i}"},
         )
         try:
             resp = client.chat.completions.create(
@@ -461,8 +462,6 @@ def run_agent_sse(
         )
         return
 
-    yield _emit("execute", {"type": "error", "message": "超过最大工具轮次"})
-
 
 # ─── Recovery Agent ──────────────────────────────────────────────────────────
 
@@ -582,10 +581,11 @@ def _run_recovery_sse(
         {"role": "user", "content": "请按照修复计划执行修复操作，完成后输出修复报告。"},
     ]
 
-    MAX_RECOVERY_ROUNDS = 8
     recovery_text = ""
+    _round = 0
 
-    for _round in range(MAX_RECOVERY_ROUNDS):
+    while True:
+        _round += 1
         try:
             resp = client.chat.completions.create(
                 model=QWEN_MODEL,
@@ -660,14 +660,4 @@ def _run_recovery_sse(
                 })
             except Exception as e:  # noqa: BLE001
                 yield _emit("execute", {"type": "log", "message": f"工具循环异常: {e!r}"})
-        continue
-
-    yield _emit("execute", {"type": "error", "message": "修复 Agent 超过最大工具轮次，放弃"})
-    yield _emit("execute", {
-        "type": "done",
-        "full_text": "RECOVERY_FAILED 超过最大轮次",
-        "design": design_text,
-        "review": "",
-        "recovery_status": "failed",
-    })
 
