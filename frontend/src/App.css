@@ -317,6 +317,40 @@ label > input, label > select, label > textarea { color: var(--text); }
 }
 .project-card .tag.readonly { background: #efefef; color: var(--text-muted); }
 
+/* project card wrapper with delete button */
+.project-card-wrap {
+  position: relative;
+}
+.project-card-wrap .project-card {
+  padding-right: 2.2rem; /* leave room for del button */
+}
+.project-card-del {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  width: 1.6rem;
+  height: 1.6rem;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: #bbb;
+  font-size: 0.75rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+  z-index: 2;
+}
+.project-card-del:hover {
+  background: #fde8e8;
+  color: #c0392b;
+}
+.project-card-del:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* ── 新建项目页 ──────────────────────────────────────────────── */
 .new-project-page {
   display: flex;

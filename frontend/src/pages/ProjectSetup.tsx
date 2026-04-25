@@ -217,6 +217,10 @@ export default function ProjectSetup() {
   }>>([])
 
   const abortRef = useRef<AbortController | null>(null)
+  // Refs so callbacks always see fresh values without stale closures
+  const busyRef = useRef(false)
+  const projectInfoRef = useRef(projectInfo)
+  useEffect(() => { projectInfoRef.current = projectInfo }, [projectInfo])
 
   // ── 加载 pipeline 状态 ───────────────────────────────────────────
   const loadPipeline = useCallback(async () => {
@@ -273,7 +277,8 @@ export default function ProjectSetup() {
 
   // ── run single step ──────────────────────────────────────────────
   const runStep = useCallback(async (stepId: string, projInfo: ProjectInfo, completedSteps: string[]) => {
-    if (busy) return
+    if (busyRef.current) return
+    busyRef.current = true
     resetAgentState()
     setBusy(true)
     setCurrentStep(stepId)
@@ -389,30 +394,31 @@ export default function ProjectSetup() {
     }
     setStepHistory(prev => [{ stepId, phases: { ...localPhases }, tools: [...localTools], metrics: finalMetrics }, ...prev])
     setLivePhase('')
+    busyRef.current = false
     setBusy(false)
     abortRef.current = null
 
     // advance pipeline
     await advancePipeline(stepId)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, headers])
+  }, [headers])
 
-  // ── auto-start: triggers when pipeline advances (completed_steps.length changes)
-  // or on initial load. Returns cleanup to cancel pending timer on re-trigger.
+  // ── auto-start: triggers when pipeline.next_expected_step changes (including initial load).
+  // For brand-new projects, completed_steps is always [] so .length=0 wouldn't re-trigger;
+  // using next_expected_step as dep ensures firing when pipeline goes null → loaded.
   useEffect(() => {
     if (!pipeline || allDone || !autoMode) return
     const step = pipeline.next_expected_step
     if (!step) return
-    // Don't re-schedule if already running
-    if (busy) return
+    if (busyRef.current) return
+    const completedSteps = pipeline.completed_steps ?? []
     const t = setTimeout(() => {
-      // Re-check busy inside timer to handle StrictMode double-invocation
-      void runStep(step, projectInfo, pipeline.completed_steps ?? [])
+      if (busyRef.current) return
+      void runStep(step, projectInfoRef.current, completedSteps)
     }, 600)
     return () => clearTimeout(t)
-  // We deliberately use .length to avoid re-triggering on other pipeline object changes
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [(pipeline?.completed_steps ?? []).length, allDone, autoMode])
+  }, [pipeline?.next_expected_step, allDone, autoMode])
 
   // ── stop ─────────────────────────────────────────────────────────
   function stop() {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from typing import Any, Dict, List, Optional
 
@@ -8,7 +9,7 @@ import sqlite3
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.db.paths import get_project_db_path
+from app.db.paths import get_project_db_path, get_project_dir
 from app.db.project_schema import init_project_db
 from app.db.server import connect_sqlite_file
 from app.deps import ensure_project_access, get_optional_user, get_server_db, require_user
@@ -113,3 +114,23 @@ def get_project(
         "slug": row["slug"],
         "is_template": bool(row["is_template"]),
     }
+
+
+@router.delete("/{project_id}")
+def delete_project(
+    project_id: int,
+    conn: sqlite3.Connection = Depends(get_server_db),
+    user: dict = Depends(require_user),
+):
+    row = ensure_project_access(conn, user, project_id, need_write=True)
+    if row["is_template"]:
+        raise HTTPException(status_code=403, detail="模板项目不能删除")
+    slug = row["slug"]
+    # Remove from server DB
+    conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+    conn.commit()
+    # Remove project data directory
+    project_dir = get_project_dir(slug)
+    if project_dir.exists():
+        shutil.rmtree(project_dir)
+    return {"ok": True, "deleted_id": project_id}
