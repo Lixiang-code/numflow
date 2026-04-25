@@ -582,9 +582,17 @@ export default function Workbench() {
         <Link to="/projects" className="link-btn">
           项目列表
         </Link>
-        <Link to={`/agent-test?project=${pid}`} className="link-btn">
-          AGENT TEST
-        </Link>
+        <button
+          type="button"
+          className="link-btn"
+          onClick={() => window.open(
+            `/agent-test?project=${pid}`,
+            'agent_monitor',
+            'width=1280,height=860,resizable=yes,scrollbars=yes'
+          )}
+        >
+          AGENT TEST ↗
+        </button>
         <span className="muted">项目 #{pid}</span>
       </header>
       {err && <p className="err banner">{err}</p>}

@@ -5,19 +5,18 @@ from __future__ import annotations
 import sqlite3
 
 
-def _pragma_columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    cur = conn.execute(f"PRAGMA table_info({table})")
-    return {str(r[1]) for r in cur.fetchall()}
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, col: str, col_def: str) -> None:
+    """幂等加列：列已存在则跳过（防并发 TOCTOU）。"""
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e):
+            raise
 
 
 def ensure_project_migrations(conn: sqlite3.Connection) -> None:
-    cols = _pragma_columns(conn, "_table_registry")
-    if "validation_rules_json" not in cols:
-        conn.execute("ALTER TABLE _table_registry ADD COLUMN validation_rules_json TEXT")
-
-    sn_cols = _pragma_columns(conn, "_snapshots")
-    if "payload_json" not in sn_cols:
-        conn.execute("ALTER TABLE _snapshots ADD COLUMN payload_json TEXT")
+    _add_column_if_missing(conn, "_table_registry", "validation_rules_json", "TEXT")
+    _add_column_if_missing(conn, "_snapshots", "payload_json", "TEXT")
 
     conn.execute(
         """
