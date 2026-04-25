@@ -392,6 +392,77 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "bulk_register_and_compute",
+            "description": (
+                "【高效】一次注册并执行多列公式（最常用）。"
+                "items 每项含 column_name + formula_string，可选 level_column/level_min/level_max；"
+                "可选 register_only=true 只注册不执行。"
+                "公式语法：支持 + - * / ** %、ROUND/FLOOR/CEIL/ABS/SQRT/EXP/LOG/POW/POWER/MIN/MAX/CLAMP/IF/IFS/PIECEWISE/AND/OR/NOT/MOD（大小写不敏感、可多元），"
+                "比较运算 < <= > >= == !=，跨表/同表引用 @表名[列名]。一个公式即可填满整列（200 行/8 列只需 8 次调用，请优先使用，禁止逐行 write_cells）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string"},
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "column_name": {"type": "string"},
+                                "formula_string": {"type": "string"},
+                                "level_column": {"type": "string"},
+                                "level_min": {"type": "number"},
+                                "level_max": {"type": "number"},
+                            },
+                            "required": ["column_name", "formula_string"],
+                        },
+                    },
+                    "register_only": {"type": "boolean", "default": False},
+                },
+                "required": ["table_name", "items"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "setup_level_table",
+            "description": (
+                "【高效·一步建好等级表】建表 + 自动生成 1..max_level 行 + 批量公式（每列一个公式）+ 立即执行。"
+                "适用于「随等级递增」的属性表/消耗表/经验表等规律表格。"
+                "level_column 默认 '等级'；columns 每项含 name + sql_type（默认 'REAL'）+ 可选 formula_string。"
+                "示例：columns=[{name:'等级',sql_type:'INTEGER'},{name:'HP',formula_string:'ROUND(1000+49000*POWER((@T[等级]-1)/199,0.85),0)'}]，"
+                "其中 @T[等级] 中 T 用占位 token，工具会自动替换为本表名。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string"},
+                    "max_level": {"type": "integer"},
+                    "level_column": {"type": "string", "default": "等级"},
+                    "columns": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "sql_type": {"type": "string", "default": "REAL"},
+                                "formula_string": {"type": "string"},
+                            },
+                            "required": ["name"],
+                        },
+                    },
+                    "readme": {"type": "string", "default": ""},
+                    "purpose": {"type": "string", "default": ""},
+                },
+                "required": ["table_name", "max_level", "columns"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_default_system_rules",
             "description": "读取文档 02 默认系统细则（全局可机读子集）",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -662,6 +733,136 @@ def _set_project_setting(conn: sqlite3.Connection, key: str, value: Any) -> Dict
     return {"ok": True, "key": key, "value_preview": value_json[:200]}
 
 
+def _bulk_register_and_compute(
+    conn: sqlite3.Connection,
+    table_name: str,
+    items: List[Dict[str, Any]],
+    register_only: bool,
+) -> Dict[str, Any]:
+    if not table_name:
+        return {"error": "缺少 table_name"}
+    if not items:
+        return {"error": "items 不能为空"}
+    registered: List[Dict[str, Any]] = []
+    executed: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    for it in items:
+        col = str(it.get("column_name", ""))
+        formula = str(it.get("formula_string", ""))
+        if not col or not formula:
+            errors.append(f"item 缺少 column_name/formula_string: {it!r}")
+            continue
+        try:
+            register_formula(conn, table_name, col, formula)
+            registered.append({"column": col, "formula": formula})
+        except ValueError as e:
+            errors.append(f"register {col}: {e}")
+            continue
+        if register_only:
+            continue
+        try:
+            lm = it.get("level_min")
+            lx = it.get("level_max")
+            res = execute_formula_on_column(
+                conn,
+                table_name,
+                col,
+                level_column=str(it["level_column"]) if it.get("level_column") else None,
+                level_min=float(lm) if lm is not None else None,
+                level_max=float(lx) if lx is not None else None,
+            )
+            executed.append({"column": col, **res})
+        except ValueError as e:
+            errors.append(f"execute {col}: {e}")
+    out: Dict[str, Any] = {
+        "table_name": table_name,
+        "registered_count": len(registered),
+        "executed_count": len(executed),
+        "registered": registered,
+        "executed": executed,
+    }
+    if errors:
+        out["errors"] = errors
+    return out
+
+
+def _setup_level_table(
+    conn: sqlite3.Connection,
+    *,
+    table_name: str,
+    max_level: int,
+    level_column: str,
+    columns: List[Dict[str, Any]],
+    readme: str = "",
+    purpose: str = "",
+) -> Dict[str, Any]:
+    if not table_name:
+        return {"error": "缺少 table_name"}
+    if max_level < 1:
+        return {"error": "max_level 必须 ≥ 1"}
+    if not columns:
+        return {"error": "columns 不能为空"}
+
+    pairs: List[tuple[str, str]] = []
+    has_level = False
+    for c in columns:
+        cname = str(c.get("name", ""))
+        if not cname:
+            return {"error": "列定义缺少 name"}
+        ctype = str(c.get("sql_type") or "REAL")
+        pairs.append((cname, ctype))
+        if cname == level_column:
+            has_level = True
+    if not has_level:
+        pairs.insert(0, (level_column, "INTEGER"))
+
+    try:
+        create_dynamic_table(
+            conn,
+            table_name=table_name,
+            columns=pairs,
+            readme=readme,
+            purpose=purpose,
+        )
+    except ValueError as e:
+        msg = str(e)
+        if "已存在" not in msg and "exists" not in msg.lower():
+            return {"error": f"建表失败: {e}"}
+
+    now_rows = 0
+    for lv in range(1, max_level + 1):
+        rid = str(lv)
+        conn.execute(
+            f'INSERT OR IGNORE INTO "{table_name}" (row_id, "{level_column}") VALUES (?, ?)',
+            (rid, lv),
+        )
+        now_rows += 1
+    conn.commit()
+
+    formula_items: List[Dict[str, Any]] = []
+    for c in columns:
+        cname = str(c.get("name", ""))
+        if cname == level_column:
+            continue
+        formula = c.get("formula_string")
+        if not formula:
+            continue
+        formula = str(formula).replace("@T[", f"@{table_name}[")
+        formula_items.append({"column_name": cname, "formula_string": formula})
+
+    bulk = _bulk_register_and_compute(conn, table_name, formula_items, False) if formula_items else {
+        "registered_count": 0,
+        "executed_count": 0,
+    }
+    return {
+        "table_name": table_name,
+        "rows_inserted": now_rows,
+        "level_column": level_column,
+        "max_level": max_level,
+        "bulk": bulk,
+    }
+
+
 def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: ProjectDB) -> str:
     conn = p.conn
     args: Dict[str, Any] = {}
@@ -866,6 +1067,29 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
         tn = args.get("table_name")
         ft = str(tn) if tn else None
         out = {"history": list_validation_history(conn, table_name=ft, limit=lim)}
+    elif name == "bulk_register_and_compute":
+        if not p.can_write:
+            out = {"error": "无写权限"}
+        else:
+            out = _bulk_register_and_compute(
+                conn,
+                str(args.get("table_name", "")),
+                args.get("items") or [],
+                bool(args.get("register_only", False)),
+            )
+    elif name == "setup_level_table":
+        if not p.can_write:
+            out = {"error": "无写权限"}
+        else:
+            out = _setup_level_table(
+                conn,
+                table_name=str(args.get("table_name", "")),
+                max_level=int(args.get("max_level", 1)),
+                level_column=str(args.get("level_column") or "等级"),
+                columns=args.get("columns") or [],
+                readme=str(args.get("readme", "")),
+                purpose=str(args.get("purpose", "")),
+            )
     elif name == "get_default_system_rules":
         out = get_default_rules_payload()
     else:

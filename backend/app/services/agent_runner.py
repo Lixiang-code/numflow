@@ -18,10 +18,15 @@ WRITE_TOOLS = {
     "create_table",
     "delete_table",
     "register_formula",
+    "execute_formula",
     "recalculate_downstream",
     "update_table_readme",
     "update_global_readme",
     "set_project_setting",
+    "call_algorithm_api",
+    "bulk_register_and_compute",
+    "setup_level_table",
+    "create_snapshot",
 }
 
 
@@ -99,9 +104,18 @@ _REVIEW_SYSTEM_TAIL = (
 )
 
 _EXECUTE_SYSTEM_TAIL = (
-    "【当前阶段=execute】按 review 给出的最终方案执行。允许调用工具；"
-    "每步先简述本步骤目的，再调用相应工具；遇到 partial/error 优先读 warnings/blocked_cells 修正；"
-    "全部完成后用简短自然语言总结，引用工具结果的关键字段。"
+    "【当前阶段=execute】按 review 给出的最终方案执行。允许调用工具。\n"
+    "【★ 高效硬规则 ★】违反将直接判为低质量结果：\n"
+    "  1. **公式优先**：任何 ≥10 行的规律列（属性、消耗、经验、伤害…）必须用 `setup_level_table` 一次建好，"
+    "     或用 `bulk_register_and_compute` 一次注册并执行多列公式；**严禁**对规律数据使用 `write_cells` 逐行/逐格写入。"
+    "     规律列例子：`ROUND(1000+49000*POWER((@T[等级]-1)/199,0.85),0)`、`IFS(@T[等级]<=10,100, @T[等级]<=50,500, 1000)`。\n"
+    "  2. **算法 API 备选**：若公式表达式复杂，调用 `call_algorithm_api` 选 `growth_curve / piecewise_curve / linear_resource_cost`，"
+    "     再以一次 `write_cells`（source_tag=algorithm_derived）批量写入；仍优先公式。\n"
+    "  3. **批量优先 / 一回合多工具调用**：本回合内**所有相互独立**的工具调用必须**一次性放在同一个 tool_calls 数组里返回**"
+    "     （例如：同时 get_default_system_rules + get_table_list + get_dependency_graph）；不要一次只发一个再等结果。"
+    "     只有真正存在依赖关系（B 需读 A 的结果）时才允许下一回合再发。\n"
+    "  4. **每张新等级表只调用一次 setup_level_table**：把所有列的公式同时塞进 columns 数组，一次建表 + 全量回填，不要分多次。\n"
+    "  5. 简短自然语言总结放在最后一回合，引用工具结果中的 `executed_count / rows_updated` 等关键字段。"
 )
 
 
