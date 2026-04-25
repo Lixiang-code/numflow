@@ -21,6 +21,29 @@ def apply_write_cells(
     cur = conn.execute("SELECT 1 FROM _table_registry WHERE table_name = ?", (t,))
     if not cur.fetchone():
         raise ValueError(f"未知表 {t}")
+
+    # 缓存当前列名集合，避免每行都 PRAGMA
+    existing_cols: set = {row[1] for row in conn.execute(f'PRAGMA table_info("{t}")')}
+    added_cols: List[str] = []
+
+    def _ensure_column(col: str, sample_val: Any) -> None:
+        if col in existing_cols:
+            return
+        sql_type = "REAL" if isinstance(sample_val, (int, float)) else "TEXT"
+        conn.execute(f'ALTER TABLE "{t}" ADD COLUMN "{col}" {sql_type} NULL')
+        existing_cols.add(col)
+        added_cols.append(col)
+        # 同步更新 _table_registry schema_json
+        row3 = conn.execute("SELECT schema_json FROM _table_registry WHERE table_name = ?", (t,)).fetchone()
+        if row3:
+            import json as _json
+            schema = _json.loads(row3[0] or '{"columns":[]}')
+            schema.setdefault("columns", []).append({"name": col, "sql_type": sql_type})
+            conn.execute(
+                "UPDATE _table_registry SET schema_json = ? WHERE table_name = ?",
+                (_json.dumps(schema, ensure_ascii=False), t),
+            )
+
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     skipped: List[Dict[str, str]] = []
     applied = 0
@@ -28,19 +51,16 @@ def apply_write_cells(
         row_id = str(u.get("row_id", ""))
         col = assert_col_or_table(str(u.get("column", "")))
         val = u.get("value")
-        cur = conn.execute(
-            """
-            SELECT source_tag FROM _cell_provenance
-            WHERE table_name = ? AND row_id = ? AND column_name = ?
-            """,
+        prow = conn.execute(
+            "SELECT source_tag FROM _cell_provenance WHERE table_name = ? AND row_id = ? AND column_name = ?",
             (t, row_id, col),
-        )
-        prow = cur.fetchone()
+        ).fetchone()
         if prow and prow["source_tag"] == "user_manual":
             skipped.append({"row_id": row_id, "column": col, "reason": "protected"})
             continue
-        cur = conn.execute(f'SELECT 1 FROM "{t}" WHERE row_id = ?', (row_id,))
-        if cur.fetchone():
+        # 确保列存在（自动补列）
+        _ensure_column(col, val)
+        if conn.execute(f'SELECT 1 FROM "{t}" WHERE row_id = ?', (row_id,)).fetchone():
             conn.execute(f'UPDATE "{t}" SET "{col}" = ? WHERE row_id = ?', (val, row_id))
         else:
             conn.execute(f'INSERT INTO "{t}" (row_id, "{col}") VALUES (?,?)', (row_id, val))
@@ -55,4 +75,7 @@ def apply_write_cells(
         )
         applied += 1
     conn.commit()
-    return {"applied": applied, "skipped": skipped}
+    result: Dict[str, Any] = {"applied": applied, "skipped": skipped}
+    if added_cols:
+        result["auto_added_columns"] = added_cols
+    return result
