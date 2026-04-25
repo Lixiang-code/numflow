@@ -343,8 +343,9 @@ def run_agent_sse(
                 messages=execute_messages,
                 tools=TOOLS_OPENAI,
                 tool_choice="auto",
+                parallel_tool_calls=True,
                 temperature=0.2,
-                max_tokens=2048,
+                max_tokens=4096,
             )
         except Exception as e:  # noqa: BLE001
             yield _emit("execute", {"type": "error", "message": f"execute 调用失败: {e!r}"})
@@ -592,8 +593,9 @@ def _run_recovery_sse(
                 messages=execute_messages,
                 tools=TOOLS_OPENAI,
                 tool_choice="auto",
+                parallel_tool_calls=True,
                 temperature=0.1,
-                max_tokens=1200,
+                max_tokens=4096,
             )
         except Exception as e:  # noqa: BLE001
             yield _emit("execute", {"type": "error", "message": f"修复执行调用失败: {e!r}"})
