@@ -74,6 +74,11 @@ export default function Workbench() {
   const [, setActiveColMeta] = useState<ColumnMeta[]>([])
   /** 当前活动表的中文显示名 */
   const [activeDisplayName, setActiveDisplayName] = useState<string>('')
+  /** 当前项目绑定的 AI 模型 */
+  const [aiModel, setAiModel] = useState<string>('')
+  /** 可用 AI 模型列表 */
+  const [aiModels, setAiModels] = useState<string[]>([])
+  const [modelSwitching, setModelSwitching] = useState(false)
 
   // -------- Univer 相关 --------
   const univerHostRef = useRef<HTMLDivElement | null>(null)
@@ -120,6 +125,29 @@ export default function Workbench() {
     const g = cfg.settings?.global_readme as { text?: string } | undefined
     const text = g?.text || ''
     setGlobalReadmeDraft(text)
+  }, [headers])
+
+  const loadAiModel = useCallback(async () => {
+    try {
+      const r = (await apiFetch('/meta/ai-model', { headers })) as { model: string }
+      setAiModel(r.model || '')
+    } catch { /* ignore */ }
+  }, [headers])
+
+  const loadAiModels = useCallback(async () => {
+    try {
+      const r = (await apiFetch('/meta/ai-models', { headers })) as { models: string[] }
+      setAiModels(Array.isArray(r.models) ? r.models : [])
+    } catch { /* ignore */ }
+  }, [headers])
+
+  const switchAiModel = useCallback(async (model: string) => {
+    setModelSwitching(true)
+    try {
+      await apiFetch('/meta/ai-model', { method: 'PUT', headers, body: JSON.stringify({ model }) })
+      setAiModel(model)
+    } catch { /* ignore */ }
+    setModelSwitching(false)
   }, [headers])
 
   const loadValidation = useCallback(async () => {
@@ -249,13 +277,15 @@ export default function Workbench() {
       loadPipeline(),
       loadValidation(),
       loadSnapshots(),
+      loadAiModel(),
+      loadAiModels(),
     ]).catch((e) => {
       if (!cancelled) setErr(String(e))
     })
     return () => {
       cancelled = true
     }
-  }, [pid, loadTables, loadProjectConfig, loadPipeline, loadValidation, loadSnapshots])
+  }, [pid, loadTables, loadProjectConfig, loadPipeline, loadValidation, loadSnapshots, loadAiModel, loadAiModels])
 
   /** 把一张表的数据写入对应 Univer sheet（首次或刷新调用） */
   const populateSheet = useCallback(
@@ -657,6 +687,24 @@ export default function Workbench() {
           AGENT TEST ↗
         </button>
         <span className="muted">项目 #{pid}{readOnly ? '（只读）' : ''}</span>
+        <span className="wb-model-selector">
+          <label htmlFor="ai-model-sel" style={{ fontSize: '0.78rem', opacity: 0.7 }}>模型：</label>
+          <select
+            id="ai-model-sel"
+            value={aiModel}
+            disabled={modelSwitching || aiModels.length === 0}
+            onChange={(e) => void switchAiModel(e.target.value)}
+            style={{ fontSize: '0.78rem', maxWidth: 160 }}
+          >
+            {aiModel && !aiModels.includes(aiModel) && (
+              <option value={aiModel}>{aiModel}</option>
+            )}
+            {aiModels.map((m) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+          {modelSwitching && <span style={{ marginLeft: 4, fontSize: '0.7rem' }}>切换中…</span>}
+        </span>
       </header>
       {err && <p className="err banner">{err}</p>}
       {validateReport && !validateReport.passed && (

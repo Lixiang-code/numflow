@@ -194,3 +194,89 @@ def put_validation_rules(
     )
     conn.commit()
     return {"ok": True}
+
+
+# ─── AI 模型设置 ──────────────────────────────────────────────────────────────
+
+_TEXT_MODEL_PREFIXES = (
+    "qwen3.6", "qwen3.5", "qwen3-", "qwen2.5", "qwen-max", "qwen-plus", "qwen-turbo",
+    "qwen-flash", "qwen-long", "deepseek-v", "deepseek-r1", "glm-", "kimi-k2",
+    "qwq-", "qwen3-coder", "MiniMax/MiniMax-M2",
+)
+_TEXT_MODEL_EXCLUDES = (
+    "image", "speech", "tts", "asr", "vl", "ocr", "omni", "wan", "realtime",
+    "livetranslate", "translate", "qvq", "char", "mt-", "deep-research", "deep-search",
+    "gui-", "s2s", "vc-", "vd-", "terminus",
+)
+
+FALLBACK_MODELS = [
+    "qwen3.6-flash",
+    "qwen3.6-plus",
+    "qwen-turbo",
+    "qwen-plus",
+    "qwen-max",
+    "qwen3-coder-flash",
+    "deepseek-v4-flash",
+]
+
+
+@router.get("/ai-models")
+def list_ai_models():
+    """返回可用于 Agent 的文本生成模型列表，优先从 DashScope 拉取，失败则返回内置列表。"""
+    from app.config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL
+    from openai import OpenAI
+    try:
+        client = OpenAI(api_key=DASHSCOPE_API_KEY, base_url=DASHSCOPE_BASE_URL)
+        raw = list(client.models.list())
+        models = []
+        for m in raw:
+            mid = m.id
+            if any(ex in mid for ex in _TEXT_MODEL_EXCLUDES):
+                continue
+            if any(mid.startswith(p) for p in _TEXT_MODEL_PREFIXES):
+                models.append(mid)
+        # 排序：qwen3.6 系列优先
+        models.sort(key=lambda x: (
+            0 if x.startswith("qwen3.6") else
+            1 if x.startswith("qwen3.5") else
+            2 if x.startswith("qwen3-") else
+            3 if x.startswith("qwen-") else 4
+        ))
+        return {"models": models, "source": "dashscope"}
+    except Exception as e:  # noqa: BLE001
+        return {"models": FALLBACK_MODELS, "source": "fallback", "error": str(e)}
+
+
+class AiModelBody(BaseModel):
+    model: str = Field(min_length=1, max_length=100)
+
+
+@router.get("/ai-model")
+def get_ai_model(p: ProjectDB = Depends(get_project_read)):
+    """获取当前项目绑定的 AI 模型（未设置则返回系统默认）。"""
+    from app.config import QWEN_MODEL
+    cur = p.conn.execute(
+        "SELECT value_json FROM project_settings WHERE key = 'agent_model'"
+    )
+    row = cur.fetchone()
+    if row:
+        try:
+            model = json.loads(row[0])
+        except Exception:
+            model = row[0]
+    else:
+        model = QWEN_MODEL
+    return {"model": model}
+
+
+@router.put("/ai-model")
+def set_ai_model(body: AiModelBody, p: ProjectDB = Depends(get_project_write)):
+    """为当前项目设置 AI 模型（持久化到 project_settings）。"""
+    p.conn.execute(
+        """INSERT INTO project_settings (key, value_json)
+           VALUES ('agent_model', ?)
+           ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json""",
+        (json.dumps(body.model),),
+    )
+    p.conn.commit()
+    return {"ok": True, "model": body.model}

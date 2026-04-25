@@ -678,7 +678,25 @@ label > input, label > select, label > textarea { color: var(--text); }
   background: transparent;
 }
 .wb-top .link-btn:hover { background: rgba(255,255,255,.15); }
-.wb-top .muted { color: rgba(255,255,255,.7); font-size: 0.8rem; margin-left: auto; }
+.wb-top .muted { color: rgba(255,255,255,.7); font-size: 0.8rem; }
+
+.wb-model-selector {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  color: rgba(255,255,255,.85);
+}
+.wb-model-selector select {
+  background: rgba(255,255,255,.12);
+  border: 1px solid rgba(255,255,255,.25);
+  border-radius: 4px;
+  color: #fff;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+.wb-model-selector select:disabled { opacity: 0.5; cursor: not-allowed; }
+.wb-model-selector select option { background: #2c2c2c; color: #fff; }
 
 /* 主体区域（三列布局） */
 .wb-body {

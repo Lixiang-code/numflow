@@ -170,10 +170,11 @@ def _stream_phase_text(
     phase: str,
     max_tokens: int,
     temperature: float = 0.2,
+    model: Optional[str] = None,
 ) -> Generator[bytes, None, str]:
     """无工具的纯文本阶段：调用一次模型，按 token 切片 emit；返回完整文本。"""
     resp = client.chat.completions.create(
-        model=QWEN_MODEL,
+        model=model or QWEN_MODEL,
         messages=messages,
         temperature=temperature,
         max_tokens=max_tokens,
@@ -207,11 +208,11 @@ def _current_step_id(p: ProjectDB) -> str:
         return ""
 
 
-def _reviewer_check(client, tool_name: str, tool_args: str) -> Dict[str, Any]:
+def _reviewer_check(client, tool_name: str, tool_args: str, *, model: Optional[str] = None) -> Dict[str, Any]:
     """轻量 reviewer：返回 {'verdict': 'approve'|'reject', 'reason': str}。"""
     try:
         resp = client.chat.completions.create(
-            model=QWEN_MODEL,
+            model=model or QWEN_MODEL,
             messages=[
                 {"role": "system", "content": _REVIEWER_SYSTEM},
                 {
@@ -242,10 +243,12 @@ def run_agent_sse(
     mode: str = "maintain",
     strict_review: bool = False,
     failure_context: Optional[Dict[str, Any]] = None,
+    model: Optional[str] = None,
 ) -> Generator[bytes, None, None]:
+    _model = model or QWEN_MODEL
     # recovery 模式：专门用于分析失败原因并尝试修复
     if mode == "recovery" and failure_context:
-        yield from _run_recovery_sse(user_message, p, failure_context)
+        yield from _run_recovery_sse(user_message, p, failure_context, model=_model)
         return
 
     mode_norm = mode if mode in ("init", "maintain") else "maintain"
@@ -259,7 +262,7 @@ def run_agent_sse(
     cfg_summary = _project_config_summary(p)
     yield _emit("route", {"type": "log", "message": f"提示词路由：step={step_id or '(none)'}"})
     try:
-        route = route_prompt(step_id, user_message, cfg_summary)
+        route = route_prompt(step_id, user_message, cfg_summary, model=_model)
     except Exception as e:  # noqa: BLE001
         route = {
             "hit": False,
@@ -296,7 +299,7 @@ def run_agent_sse(
     design_text = ""
     try:
         stream = client.chat.completions.create(
-            model=QWEN_MODEL,
+            model=_model,
             messages=design_messages,
             temperature=0.2,
             max_tokens=1200,
@@ -335,7 +338,7 @@ def run_agent_sse(
     review_text = ""
     try:
         stream = client.chat.completions.create(
-            model=QWEN_MODEL,
+            model=_model,
             messages=review_messages,
             temperature=0.2,
             max_tokens=900,
@@ -387,7 +390,7 @@ def run_agent_sse(
         )
         try:
             resp = client.chat.completions.create(
-                model=QWEN_MODEL,
+                model=_model,
                 messages=execute_messages,
                 tools=TOOLS_OPENAI,
                 tool_choice="auto",
@@ -462,7 +465,7 @@ def run_agent_sse(
 
                 # ---- 可选 reviewer 旁路 ----
                 if strict_review and name in WRITE_TOOLS:
-                    verdict_obj = _reviewer_check(client, name, args)
+                    verdict_obj = _reviewer_check(client, name, args, model=_model)
                     yield _emit(
                         "execute",
                         {
@@ -564,8 +567,11 @@ def _run_recovery_sse(
     user_message: str,
     p: ProjectDB,
     failure_context: Dict[str, Any],
+    *,
+    model: Optional[str] = None,
 ) -> Generator[bytes, None, None]:
     """Recovery Agent SSE：分析失败上下文，调用工具修复，输出修复报告。"""
+    _model = model or QWEN_MODEL
     client = get_client()
 
     step_id = failure_context.get("step_id", "unknown")
@@ -619,7 +625,7 @@ def _run_recovery_sse(
     design_text = ""
     try:
         stream = client.chat.completions.create(
-            model=QWEN_MODEL,
+            model=_model,
             messages=design_messages,
             temperature=0.1,
             max_tokens=1000,
@@ -667,7 +673,7 @@ def _run_recovery_sse(
         _round += 1
         try:
             resp = client.chat.completions.create(
-                model=QWEN_MODEL,
+                model=_model,
                 messages=execute_messages,
                 tools=TOOLS_OPENAI,
                 tool_choice="auto",

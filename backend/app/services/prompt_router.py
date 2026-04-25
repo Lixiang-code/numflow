@@ -131,6 +131,8 @@ def route_prompt(
     step_id: str,
     user_message: str,
     project_config_summary: str,
+    *,
+    model: str = None,
 ) -> Dict[str, Any]:
     """决定本次对话使用哪段提示词。
 
@@ -151,7 +153,7 @@ def route_prompt(
 
     try:
         resp = client.chat.completions.create(
-            model=QWEN_MODEL,
+            model=model or QWEN_MODEL,
             messages=[
                 {"role": "system", "content": _ROUTE_SYSTEM},
                 {"role": "user", "content": judge_user},
@@ -179,7 +181,7 @@ def route_prompt(
     # 未命中：让千问现写一段对应本步骤的提示词
     try:
         gen = client.chat.completions.create(
-            model=QWEN_MODEL,
+            model=model or QWEN_MODEL,
             messages=[
                 {
                     "role": "system",

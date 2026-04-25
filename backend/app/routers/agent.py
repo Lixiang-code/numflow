@@ -159,12 +159,25 @@ def agent_chat(body: ChatBody, p: ProjectDB = Depends(get_project_write)):
             detail="未配置 DASHSCOPE_API_KEY",
         )
 
+    # 读取项目绑定的 AI 模型（未设置则 None，由 run_agent_sse 回退到全局默认）
+    _project_model: Optional[str] = None
+    try:
+        import json as _json
+        row = p.conn.execute(
+            "SELECT value_json FROM project_settings WHERE key = 'agent_model'"
+        ).fetchone()
+        if row:
+            _project_model = _json.loads(row[0]) if row[0] else None
+    except Exception:  # noqa: BLE001
+        pass
+
     gen = run_agent_sse(
         body.message,
         p,
         mode=body.mode,
         strict_review=body.strict_review,
         failure_context=body.failure_context,
+        model=_project_model,
     )
 
     # Persist session for ALL agent runs (so AgentMonitor can browse project history).
