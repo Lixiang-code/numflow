@@ -161,8 +161,20 @@ def set_pipeline_state(
 
 # ─── Agent Session CRUD ───────────────────────────────────────────────────────
 
+def cleanup_stale_running_sessions(conn: sqlite3.Connection, step_id: str) -> int:
+    """Mark any lingering 'running' sessions for this step as 'error' (stale from server restart)."""
+    cur = conn.execute(
+        "UPDATE _agent_sessions SET status='error', error_text='stale_running_on_new_start' "
+        "WHERE step_id=? AND status='running'",
+        (step_id,),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
 def create_agent_session(conn: sqlite3.Connection, step_id: str) -> int:
     """Create a new running session for a step; returns the session id."""
+    cleanup_stale_running_sessions(conn, step_id)
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     cur = conn.execute(
         "INSERT INTO _agent_sessions (step_id, status, started_at) VALUES (?,?,?)",

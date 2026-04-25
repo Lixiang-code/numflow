@@ -77,8 +77,20 @@ def _session_tracking_wrapper(
                             design_buf.append(text)
                         elif phase == "review":
                             review_buf.append(text)
+                            # Save design text once review starts (phase transition checkpoint)
+                            if len(review_buf) == 1 and design_buf:
+                                try:
+                                    update_agent_session(conn, session_id, design_text="".join(design_buf))
+                                except Exception:  # noqa: BLE001
+                                    pass
                         elif phase == "execute":
                             execute_buf.append(text)
+                            # Save review text once execute starts (phase transition checkpoint)
+                            if len(execute_buf) == 1 and review_buf:
+                                try:
+                                    update_agent_session(conn, session_id, review_text="".join(review_buf))
+                                except Exception:  # noqa: BLE001
+                                    pass
 
                     elif etype == "tool_call":
                         call_id = str(raw.get("call_id", ""))

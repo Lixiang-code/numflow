@@ -182,7 +182,12 @@ _EXECUTE_SYSTEM_TAIL = (
     "③ 同一回合内所有独立工具 → **一次性并行调用**，不要一个一个排队。\n"
     "④ setup_level_table：所有列公式同时放入 columns 数组，一次调用完成。\n"
     "⑤ write_cells 单次 ≤30 行，超出分多次调用。\n"
-    "⑥ 最终总结：必须包含 TODO 完成状态 + executed_count/rows_updated 关键数字。"
+    "⑥ 最终总结：必须包含 TODO 完成状态 + executed_count/rows_updated 关键数字。\n\n"
+
+    "═══ ★ 收尾操作限制（每个 session 仅允许一次）★ ═══\n"
+    "create_snapshot：整个 execute 阶段只允许调用 **1次**（最终收尾时），严禁在循环中多次调用。\n"
+    "recalculate_downstream + run_validation：每张表只验证一次，验证通过后禁止重复调用。\n"
+    "完成最终快照后，**立即**输出最终总结并结束任务，禁止再调用任何工具。"
 )
 
 
@@ -445,6 +450,11 @@ def run_agent_sse(
     total_errors = 0    # 累计错误（不重置）
     total_success = 0   # 累计成功
     MAX_CONSEC_ERRORS = 4  # 连续失败4次强制注入分析提示
+    # ---- 反循环计数器 ----
+    _snapshot_count = 0        # create_snapshot 调用次数
+    _validation_count = 0      # run_validation 调用次数
+    _recalc_count = 0          # recalculate_downstream 调用次数
+    _recent_tools: List[str] = []  # 最近20次工具名（用于检测重复模式）
     while True:
         round_i += 1
 
@@ -457,6 +467,25 @@ def run_agent_sse(
             anchor = _make_state_anchor(round_i, user_message, total_success, total_errors)
             execute_messages.append({"role": "user", "content": anchor})
             yield _emit("execute", {"type": "log", "message": f"第 {round_i} 轮：注入状态锚点"})
+
+        # ---- 反循环检测：快照/验证次数超限，强制结束 ----
+        if _snapshot_count >= 3:
+            loop_msg = (
+                "⚠ 反循环保护触发：你已调用 create_snapshot 超过 3 次，陷入验证-快照死循环。\n"
+                "立即停止任何进一步的 recalculate_downstream / run_validation / create_snapshot 调用。\n"
+                "直接输出最终总结（包含 TODO 完成状态 + executed_count/rows_updated 关键数字）并结束任务。"
+            )
+            execute_messages.append({"role": "user", "content": loop_msg})
+            yield _emit("execute", {"type": "log", "message": "⚠ 反循环保护：快照次数超限，注入强制结束提示"})
+            _snapshot_count = -9999  # 防止重复触发
+        elif _validation_count >= 8:
+            loop_msg = (
+                f"⚠ 反循环保护触发：你已调用 run_validation {_validation_count} 次，存在过度验证循环。\n"
+                "每张表只需验证一次。请检查 TODO 清单，若所有项目已完成，直接输出最终总结并结束任务。"
+            )
+            execute_messages.append({"role": "user", "content": loop_msg})
+            yield _emit("execute", {"type": "log", "message": f"⚠ 反循环保护：验证次数={_validation_count}，注入提示"})
+            _validation_count = -9999
 
         yield _emit(
             "execute",
@@ -590,6 +619,16 @@ def run_agent_sse(
                 else:
                     consec_errors = 0
                     total_success += 1
+                # ---- 反循环计数 ----
+                _recent_tools.append(name)
+                if len(_recent_tools) > 20:
+                    _recent_tools.pop(0)
+                if name == "create_snapshot" and tool_status == "success":
+                    _snapshot_count += 1
+                elif name == "run_validation" and tool_status == "success":
+                    _validation_count += 1
+                elif name == "recalculate_downstream" and tool_status == "success":
+                    _recalc_count += 1
                 yield _emit(
                     "execute",
                     {
