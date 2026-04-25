@@ -1,26 +1,16 @@
-/* 全局基底：与 App.css 中的 Numflow 主题配合 */
-:root {
-  color-scheme: dark;
-}
+/* Numflow — Excel 2019/365 Light 主题全局基础 */
+*, *::before, *::after { box-sizing: border-box; }
 
-html,
-body,
-#root {
-  min-height: 100%;
-}
+html { font-size: 14px; }
 
 body {
   margin: 0;
-  -webkit-font-smoothing: antialiased;
+  font-family: 'Segoe UI', -apple-system, system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-size: 1rem;
+  line-height: 1.5;
+  color: #212121;
+  background: #f0f0f0;
 }
 
-/* 覆盖旧 Vite 模板：全宽应用、左对齐 */
-#root {
-  width: 100%;
-  max-width: none;
-  margin: 0;
-  text-align: left;
-  border: none;
-  min-height: 100svh;
-  display: block;
-}
+a { color: #217346; text-decoration: none; }
+a:hover { color: #1a5c38; text-decoration: underline; }

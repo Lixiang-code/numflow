@@ -24,34 +24,35 @@ export default function Register() {
   }
 
   return (
-    <div className="auth-page">
-      <h1>注册</h1>
-      <form onSubmit={onSubmit} className="auth-form">
-        <label>
-          用户名
-          <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" />
-        </label>
-        <label>
-          密码（至少 6 位）
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete="new-password"
-          />
-        </label>
-        <label>
-          邀请码
-          <input value={invite} onChange={(e) => setInvite(e.target.value)} />
-        </label>
-        {err && <p className="err">{err}</p>}
-        <button type="submit" className="btn primary">
-          注册并登录
-        </button>
-      </form>
-      <p className="muted">
-        已有账号？<Link to="/login">登录</Link>
-      </p>
+    <div className="auth-wrap">
+      <div className="auth-page">
+        <h1>Numflow</h1>
+        <p className="sub-title">注册新账号</p>
+        <form onSubmit={onSubmit} className="auth-form">
+          <label>
+            用户名
+            <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" />
+          </label>
+          <label>
+            密码（至少 6 位）
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="new-password"
+            />
+          </label>
+          <label>
+            邀请码
+            <input value={invite} onChange={(e) => setInvite(e.target.value)} />
+          </label>
+          {err && <p className="err">{err}</p>}
+          <button type="submit" className="btn primary">注册并登录</button>
+        </form>
+        <p className="auth-footer">
+          已有账号？<Link to="/login">登录</Link>
+        </p>
+      </div>
     </div>
   )
 }

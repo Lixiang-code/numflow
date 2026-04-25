@@ -43,31 +43,33 @@ export default function Projects() {
   return (
     <div className="projects-page">
       <header className="topbar">
-        <h1>Numflow 项目</h1>
+        <h1>Numflow</h1>
         {user && (
           <div className="topbar-right">
             <span className="muted">
               {user.username}
               {user.is_admin ? '（管理员）' : ''}
             </span>
-            <Link to="/projects/new" className="link-btn">
-              新建项目
-            </Link>
-            <button type="button" className="btn ghost" onClick={logout}>
-              退出
-            </button>
+            <Link to="/projects/new" className="link-btn">+ 新建项目</Link>
+            <button type="button" className="btn ghost" onClick={logout}>退出</button>
           </div>
         )}
       </header>
-      {err && <p className="err">{err}</p>}
-      <div className="card-grid">
-        {list.map((p) => (
-          <Link key={p.id} to={`/workbench/${p.id}`} className="project-card">
-            <h2>{p.name}</h2>
-            <p className="muted">{p.is_template ? '模板项目' : `slug: ${p.slug}`}</p>
-            <p className="tag">{p.can_write ? '可编辑' : '只读'}</p>
-          </Link>
-        ))}
+      <div className="projects-body">
+        {err && <p className="err">{err}</p>}
+        <div className="card-grid">
+          {list.map((p) => (
+            <Link key={p.id} to={`/workbench/${p.id}`} className="project-card">
+              <h2>{p.name}</h2>
+              <p className="muted" style={{ marginTop: '0.25rem' }}>
+                {p.is_template ? '模板项目' : `slug: ${p.slug}`}
+              </p>
+              <span className={`tag${p.can_write ? '' : ' readonly'}`}>
+                {p.can_write ? '可编辑' : '只读'}
+              </span>
+            </Link>
+          ))}
+        </div>
       </div>
     </div>
   )
