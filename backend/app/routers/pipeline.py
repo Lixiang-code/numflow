@@ -13,6 +13,7 @@ from app.data.pipeline_step_specs import (
     render_spec_markdown,
 )
 from app.db.project_schema import (
+    get_latest_agent_session,
     get_pipeline_state,
     get_setting,
     set_pipeline_state,
@@ -166,3 +167,23 @@ def pipeline_step_readme_put(
 @router.get("/specs")
 def pipeline_specs(p: ProjectDB = Depends(get_project_read)):
     return {"specs": [s.to_dict() for s in list_step_specs()]}
+
+
+@router.get("/step/{step_id}/session")
+def pipeline_step_session(step_id: str, p: ProjectDB = Depends(get_project_read)):
+    """Return the latest agent session for a pipeline step (for client-side recovery on refresh)."""
+    session = get_latest_agent_session(p.conn, step_id)
+    if session is None:
+        return {"session": None}
+    return {"session": session}
+
+
+@router.delete("/step/{step_id}/session")
+def pipeline_step_session_clear(step_id: str, p: ProjectDB = Depends(get_project_write)):
+    """Clear the latest session for a step so it will re-run from scratch."""
+    try:
+        p.conn.execute("DELETE FROM _agent_sessions WHERE step_id = ?", (step_id,))
+        p.conn.commit()
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True, "step_id": step_id}

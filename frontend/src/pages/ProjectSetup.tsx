@@ -68,6 +68,20 @@ type ProjectInfo = {
   game_type?: string
   mode?: string
 }
+// Status of a previously persisted server-side agent session
+type SessionStatus = 'none' | 'loading' | 'done' | 'error' | 'interrupted'
+type ServerSession = {
+  id: number
+  step_id: string
+  status: string
+  started_at: string
+  finished_at: string | null
+  design_text: string
+  review_text: string
+  execute_text: string
+  tools: { callId: string; name: string; label: string; arguments: string; status: string; resultPreview: string | null }[]
+  error_text: string | null
+}
 
 function pairTools(tools: ToolEntry[]): PairedTool[] {
   const map = new Map<string, PairedTool>()
@@ -299,6 +313,9 @@ export default function ProjectSetup() {
   const [busy, setBusy] = useState(false)
   const [autoMode, setAutoMode] = useState(true) // 是否自动推进每步
 
+  // ── Server-side session state ────────────────────────────────────
+  const [sessionStatus, setSessionStatus] = useState<SessionStatus>('none')
+
   // ── Recovery Agent 状态 ──────────────────────────────────────────
   const [recoveryMode, setRecoveryMode] = useState(false)
   const [recoveryLivePhase, setRecoveryLivePhase] = useState('')
@@ -343,11 +360,81 @@ export default function ProjectSetup() {
         setAllDone(true)
       } else {
         setCurrentStep(plData.next_expected_step)
+        // Check if there's a persisted session for this step
+        void checkExistingSession(plData.next_expected_step, plData.completed_steps ?? [])
       }
     } catch (e) {
       setLoadErr(String(e))
     }
-  }, [headers, pid])
+  }, [headers, pid]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Restore a server-persisted session for the current step */
+  const checkExistingSession = useCallback(async (stepId: string, _completedSteps: string[]) => {
+    setSessionStatus('loading')
+    try {
+      const data = await apiFetch(`/pipeline/step/${stepId}/session`, { headers }) as { session: ServerSession | null }
+      const sess = data.session
+      if (!sess) {
+        setSessionStatus('none')
+        return
+      }
+      // Reconstruct phases display from stored session
+      const ts = sess.started_at
+      const restoredPhases: Record<string, PhaseState> = {}
+      const addPhase = (key: string, text: string, error?: string | null) => {
+        if (text || error) {
+          restoredPhases[key] = {
+            started: ts, finished: sess.finished_at,
+            text, logs: [], error: error ?? null,
+            hasContent: !!text,
+          }
+        }
+      }
+      addPhase('design', sess.design_text)
+      addPhase('review', sess.review_text)
+      addPhase('execute', sess.execute_text, sess.error_text)
+
+      // Reconstruct tool entries
+      const restoredTools: ToolEntry[] = []
+      sess.tools.forEach((t, i) => {
+        restoredTools.push({
+          idx: i * 2, ts, kind: 'call',
+          name: t.name, label: t.label || t.name,
+          body: t.arguments, callId: t.callId, status: t.status as ToolEntry['status'],
+        })
+        if (t.resultPreview != null) {
+          restoredTools.push({
+            idx: i * 2 + 1, ts, kind: 'result',
+            name: t.name, label: '',
+            body: t.resultPreview, callId: t.callId, status: t.status as ToolEntry['status'],
+          })
+        }
+      })
+
+      setPhases(restoredPhases)
+      setTools(restoredTools)
+      setMetrics({
+        startedAt: sess.started_at,
+        finishedAt: sess.finished_at,
+        totalMs: msDiff(sess.started_at, sess.finished_at ?? sess.started_at),
+        toolCalls: sess.tools.length,
+        status: sess.status === 'done' ? 'done' : sess.status === 'error' ? 'error' : 'running',
+      })
+      if (sess.error_text) setAgentErr(sess.error_text)
+
+      const sStatus: SessionStatus = sess.status === 'done' ? 'done'
+        : sess.status === 'error' ? 'error' : 'interrupted'
+      setSessionStatus(sStatus)
+
+      // If the session was successfully completed but pipeline not yet advanced, advance now
+      if (sess.status === 'done') {
+        void advancePipeline(stepId)
+      }
+    } catch {
+      // Failed to fetch session → fall back to normal auto-run
+      setSessionStatus('none')
+    }
+  }, [headers]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { void loadPipeline() }, [loadPipeline])
 
@@ -591,6 +678,7 @@ export default function ProjectSetup() {
     resetRecoveryState()
     setBusy(true)
     setCurrentStep(stepId)
+    setSessionStatus('none') // clear any restored-session state
 
     const startTime = nowIso()
     const abort = new AbortController()
@@ -605,7 +693,7 @@ export default function ProjectSetup() {
         method: 'POST',
         credentials: 'include',
         headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, mode: 'init' }),
+        body: JSON.stringify({ message, mode: 'init', step_id: stepId }),
         signal: abort.signal,
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
@@ -677,10 +765,13 @@ export default function ProjectSetup() {
   }, [headers, autoMode, runRecovery])
 
   // ── auto-start: triggers when pipeline.next_expected_step changes (including initial load).
-  // For brand-new projects, completed_steps is always [] so .length=0 wouldn't re-trigger;
-  // using next_expected_step as dep ensures firing when pipeline goes null → loaded.
+  // Guard: do NOT auto-run if sessionStatus is still loading, or if a session is already done/interrupted.
   useEffect(() => {
     if (!pipeline || allDone || !autoMode) return
+    // Still checking for existing session → wait
+    if (sessionStatus === 'loading') return
+    // A prior session was found (done or interrupted) → don't re-run automatically
+    if (sessionStatus === 'done' || sessionStatus === 'interrupted' || sessionStatus === 'error') return
     const step = pipeline.next_expected_step
     if (!step) return
     if (busyRef.current) return
@@ -691,7 +782,7 @@ export default function ProjectSetup() {
     }, 600)
     return () => clearTimeout(t)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pipeline?.next_expected_step, allDone, autoMode])
+  }, [pipeline?.next_expected_step, allDone, autoMode, sessionStatus])
 
   // ── stop ─────────────────────────────────────────────────────────
   function stop() {
@@ -741,7 +832,7 @@ export default function ProjectSetup() {
               ■ 暂停自动推进
             </button>
           )}
-          {!busy && !allDone && pipeline?.next_expected_step && (
+          {!busy && !allDone && pipeline?.next_expected_step && sessionStatus !== 'done' && (
             <button
               type="button"
               className="btn secondary small"
@@ -753,6 +844,29 @@ export default function ProjectSetup() {
               }}
             >
               ▶ 继续下一步
+            </button>
+          )}
+          {!busy && (sessionStatus === 'interrupted' || sessionStatus === 'error') && pipeline?.next_expected_step && (
+            <button
+              type="button"
+              className="btn warn small"
+              onClick={async () => {
+                const stepId = pipeline?.next_expected_step
+                if (!stepId) return
+                try {
+                  await fetch(`/api/pipeline/step/${stepId}/session`, {
+                    method: 'DELETE',
+                    credentials: 'include',
+                    headers,
+                  })
+                } catch { /* ignore */ }
+                setSessionStatus('none')
+                resetAgentState()
+                setAutoMode(true)
+                void runStep(stepId, projectInfo, pipeline?.completed_steps ?? [])
+              }}
+            >
+              ↺ 重新运行此步
             </button>
           )}
           {allDone && (
@@ -834,6 +948,26 @@ export default function ProjectSetup() {
               <span className="ps-step-num">步骤 {(pipeline?.completed_steps.length ?? 0) + 1}/{totalSteps}</span>
               <h2>{pipelineStepLabel(currentStep)}</h2>
               <code className="muted small">{currentStep}</code>
+            </div>
+          )}
+
+          {/* Session restore banners */}
+          {!viewingHistory && sessionStatus === 'loading' && (
+            <div className="ps-viewing-banner">⏳ 正在检查已有会话...</div>
+          )}
+          {!viewingHistory && sessionStatus === 'done' && (
+            <div className="ps-viewing-banner" style={{ background: 'var(--success-bg, #e6f4ea)', color: 'var(--success, #1a7f37)' }}>
+              ✅ 已恢复此步骤的完成会话（服务端执行记录）。若需重新运行，点击"重新运行此步"按钮。
+            </div>
+          )}
+          {!viewingHistory && sessionStatus === 'interrupted' && (
+            <div className="ps-viewing-banner" style={{ background: 'var(--warn-bg, #fff8e1)', color: 'var(--warn, #b45309)' }}>
+              ⚠ 检测到上次运行被中断（可能因页面刷新）。已恢复进度，可继续查看或点击"重新运行此步"重新执行。
+            </div>
+          )}
+          {!viewingHistory && sessionStatus === 'error' && (
+            <div className="ps-viewing-banner" style={{ background: 'var(--err-bg, #fff2f0)', color: 'var(--err, #cf1322)' }}>
+              ✗ 上次运行出错（已恢复错误记录）。可点击"重新运行此步"重试。
             </div>
           )}
 

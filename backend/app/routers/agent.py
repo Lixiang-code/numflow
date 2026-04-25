@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
+import json
+import sqlite3
+from typing import Any, Dict, Generator, List, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -11,6 +13,10 @@ from pydantic import BaseModel, Field
 from app.deps import ProjectDB, get_project_write
 
 from app.config import DASHSCOPE_API_KEY, QWEN_MODEL
+from app.db.project_schema import (
+    create_agent_session,
+    update_agent_session,
+)
 from app.services import qwen_client
 from app.services.agent_runner import run_agent_sse
 
@@ -23,6 +29,10 @@ class ChatBody(BaseModel):
         default="maintain",
         description="init=首次建模；maintain=日常增量；recovery=失败修复",
     )
+    step_id: Optional[str] = Field(
+        default=None,
+        description="当前 pipeline 步骤 ID（用于服务端持久化 session，刷新后可恢复）",
+    )
     strict_review: bool = Field(
         default=False,
         description="为 True 时，execute 阶段每次写工具调用前都过一遍轻量 reviewer（可拒绝该 tool_call）",
@@ -33,6 +43,113 @@ class ChatBody(BaseModel):
     )
 
 
+def _session_tracking_wrapper(
+    gen: Generator[bytes, None, None],
+    conn: sqlite3.Connection,
+    session_id: int,
+) -> Generator[bytes, None, None]:
+    """Intercept SSE events from `gen`, persist state to DB, then yield the same bytes."""
+    design_buf: list[str] = []
+    review_buf: list[str] = []
+    execute_buf: list[str] = []
+    tools: list[dict] = []
+    tool_map: dict[str, dict] = {}
+
+    def _flush_tools() -> None:
+        try:
+            update_agent_session(conn, session_id, tools_json=json.dumps(tools, ensure_ascii=False))
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        for chunk in gen:
+            # Intercept and parse each SSE event
+            if chunk.startswith(b"data: "):
+                try:
+                    raw = json.loads(chunk[6:].decode("utf-8").strip())
+                    phase = str(raw.get("phase", ""))
+                    etype = str(raw.get("type", ""))
+
+                    if etype == "token":
+                        text = str(raw.get("text", ""))
+                        if phase == "design":
+                            design_buf.append(text)
+                        elif phase == "review":
+                            review_buf.append(text)
+                        elif phase == "execute":
+                            execute_buf.append(text)
+
+                    elif etype == "tool_call":
+                        call_id = str(raw.get("call_id", ""))
+                        entry = {
+                            "callId": call_id,
+                            "name": str(raw.get("name", "")),
+                            "label": str(raw.get("label", "")),
+                            "arguments": str(raw.get("arguments", "")),
+                            "status": "pending",
+                            "resultPreview": None,
+                        }
+                        tools.append(entry)
+                        if call_id:
+                            tool_map[call_id] = entry
+                        _flush_tools()
+
+                    elif etype == "tool_result":
+                        call_id = str(raw.get("call_id", ""))
+                        status = str(raw.get("status", "done"))
+                        if call_id in tool_map:
+                            tool_map[call_id]["status"] = status
+                            tool_map[call_id]["resultPreview"] = str(raw.get("preview", ""))[:600]
+                        _flush_tools()
+                        # Also persist accumulated execute text so far (on each tool result)
+                        try:
+                            update_agent_session(
+                                conn, session_id,
+                                execute_text="".join(execute_buf),
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+
+                    elif etype == "done" and phase == "execute":
+                        # All three phases complete — final save
+                        try:
+                            update_agent_session(
+                                conn, session_id,
+                                status="done",
+                                design_text="".join(design_buf),
+                                review_text="".join(review_buf),
+                                execute_text=str(raw.get("full_text", "".join(execute_buf))),
+                                tools_json=json.dumps(tools, ensure_ascii=False),
+                                finished=True,
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+
+                    elif etype == "error":
+                        try:
+                            update_agent_session(
+                                conn, session_id,
+                                status="error",
+                                design_text="".join(design_buf),
+                                review_text="".join(review_buf),
+                                execute_text="".join(execute_buf),
+                                tools_json=json.dumps(tools, ensure_ascii=False),
+                                error_text=str(raw.get("message", ""))[:2000],
+                                finished=True,
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+
+                except Exception:  # noqa: BLE001 — never crash the stream
+                    pass
+
+            yield chunk
+
+    except GeneratorExit:
+        # Client disconnected — session stays 'running' (partial data already persisted)
+        pass
+
+
 @router.post("/chat")
 def agent_chat(body: ChatBody, p: ProjectDB = Depends(get_project_write)):
     if not DASHSCOPE_API_KEY:
@@ -40,16 +157,27 @@ def agent_chat(body: ChatBody, p: ProjectDB = Depends(get_project_write)):
             status_code=503,
             detail="未配置 DASHSCOPE_API_KEY",
         )
-    return StreamingResponse(
-        run_agent_sse(
-            body.message,
-            p,
-            mode=body.mode,
-            strict_review=body.strict_review,
-            failure_context=body.failure_context,
-        ),
-        media_type="text/event-stream",
+
+    gen = run_agent_sse(
+        body.message,
+        p,
+        mode=body.mode,
+        strict_review=body.strict_review,
+        failure_context=body.failure_context,
     )
+
+    # Persist session for trackable steps (init mode with a step_id)
+    step_id = body.step_id or (
+        body.failure_context.get("step_id") if body.failure_context else None
+    )
+    if step_id and body.mode in ("init", "recovery"):
+        try:
+            session_id = create_agent_session(p.conn, step_id)
+            gen = _session_tracking_wrapper(gen, p.conn, session_id)
+        except Exception:  # noqa: BLE001 — don't break streaming if session creation fails
+            pass
+
+    return StreamingResponse(gen, media_type="text/event-stream")
 
 
 class DiagnosticsRunBody(BaseModel):

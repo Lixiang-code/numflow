@@ -66,6 +66,19 @@ def init_project_db(conn: sqlite3.Connection, *, seed_readme: bool = True) -> No
             updated_at TEXT NOT NULL,
             PRIMARY KEY (table_name, row_id, column_name)
         );
+
+        CREATE TABLE IF NOT EXISTS _agent_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            step_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'running',
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            design_text TEXT NOT NULL DEFAULT '',
+            review_text TEXT NOT NULL DEFAULT '',
+            execute_text TEXT NOT NULL DEFAULT '',
+            tools_json TEXT NOT NULL DEFAULT '[]',
+            error_text TEXT
+        );
         """
     )
     if seed_readme:
@@ -144,3 +157,83 @@ def set_pipeline_state(
             (current_step, json.dumps(completed_steps, ensure_ascii=False), now),
         )
     conn.commit()
+
+
+# ─── Agent Session CRUD ───────────────────────────────────────────────────────
+
+def create_agent_session(conn: sqlite3.Connection, step_id: str) -> int:
+    """Create a new running session for a step; returns the session id."""
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    cur = conn.execute(
+        "INSERT INTO _agent_sessions (step_id, status, started_at) VALUES (?,?,?)",
+        (step_id, "running", now),
+    )
+    conn.commit()
+    return cur.lastrowid  # type: ignore[return-value]
+
+
+def update_agent_session(
+    conn: sqlite3.Connection,
+    session_id: int,
+    *,
+    status: Optional[str] = None,
+    design_text: Optional[str] = None,
+    review_text: Optional[str] = None,
+    execute_text: Optional[str] = None,
+    tools_json: Optional[str] = None,
+    error_text: Optional[str] = None,
+    finished: bool = False,
+) -> None:
+    """Partial update of a session record (only non-None fields are updated)."""
+    fields = []
+    params: list = []
+    if status is not None:
+        fields.append("status = ?"); params.append(status)
+    if design_text is not None:
+        fields.append("design_text = ?"); params.append(design_text)
+    if review_text is not None:
+        fields.append("review_text = ?"); params.append(review_text)
+    if execute_text is not None:
+        fields.append("execute_text = ?"); params.append(execute_text)
+    if tools_json is not None:
+        fields.append("tools_json = ?"); params.append(tools_json)
+    if error_text is not None:
+        fields.append("error_text = ?"); params.append(error_text)
+    if finished:
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        fields.append("finished_at = ?"); params.append(now)
+    if not fields:
+        return
+    params.append(session_id)
+    conn.execute(f"UPDATE _agent_sessions SET {', '.join(fields)} WHERE id = ?", params)
+    conn.commit()
+
+
+def get_latest_agent_session(conn: sqlite3.Connection, step_id: str) -> Optional[Dict[str, Any]]:
+    """Return the most recent session for a step_id, or None if none exists."""
+    cur = conn.execute(
+        """SELECT id, step_id, status, started_at, finished_at,
+                  design_text, review_text, execute_text, tools_json, error_text
+           FROM _agent_sessions WHERE step_id = ? ORDER BY id DESC LIMIT 1""",
+        (step_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    tools = []
+    try:
+        tools = json.loads(row[8] or "[]")
+    except json.JSONDecodeError:
+        pass
+    return {
+        "id": row[0],
+        "step_id": row[1],
+        "status": row[2],
+        "started_at": row[3],
+        "finished_at": row[4],
+        "design_text": row[5] or "",
+        "review_text": row[6] or "",
+        "execute_text": row[7] or "",
+        "tools": tools,
+        "error_text": row[9],
+    }
