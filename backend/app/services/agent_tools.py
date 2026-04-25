@@ -482,6 +482,21 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
 ]
 
 
+def _list_known_tables(conn: sqlite3.Connection) -> List[str]:
+    """返回 _table_registry 中所有表名，用于在错误消息里给模型提示。"""
+    cur = conn.execute("SELECT table_name FROM _table_registry ORDER BY table_name")
+    return [r[0] for r in cur.fetchall()]
+
+
+def _list_table_columns(conn: sqlite3.Connection, table_name: str) -> List[str]:
+    """返回指定表的列名列表（排除 row_id），用于列相关错误提示。"""
+    try:
+        cur = conn.execute(f'PRAGMA table_info("{table_name}")')
+        return [r["name"] for r in cur.fetchall() if r["name"] != "row_id"]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _get_project_config(conn: sqlite3.Connection) -> Dict[str, Any]:
     cur = conn.execute("SELECT key, value_json FROM project_settings")
     settings: Dict[str, Any] = {}
@@ -547,7 +562,7 @@ def _read_table(
         (table_name,),
     )
     if not cur.fetchone():
-        return {"error": f"未知表 {table_name}"}
+        return {"error": f"未知表 '{table_name}'", "fix": f"用 get_table_list 确认表名，当前已注册: {_list_known_tables(conn)}"}
     lim = max(1, min(int(limit or 50), 200))
     try:
         t = assert_col_or_table(table_name)
@@ -565,7 +580,8 @@ def _read_table(
             try:
                 cq = assert_col_or_table(coln)
             except ValueError:
-                return {"error": f"非法列 filter {coln}"}
+                known_cols = _list_table_columns(conn, table_name)
+                return {"error": f"filter 列名 '{coln}' 非法（含非法字符或格式错误）", "fix": f"表 '{table_name}' 的可用列: {known_cols}"}
             where_parts.append(f'"{cq}" = ?')
             params.append(f.get("value"))
     if level_column is not None and level_min is not None and level_max is not None:
@@ -612,7 +628,12 @@ def _read_cell(conn: sqlite3.Connection, table_name: str, row_id: str, column_na
     cur = conn.execute(f'SELECT "{col}" AS v FROM "{t}" WHERE row_id = ?', (str(row_id),))
     row = cur.fetchone()
     if not row:
-        return {"error": "行不存在"}
+        cur2 = conn.execute(f'SELECT MIN(row_id), MAX(row_id), COUNT(*) FROM "{t}"')
+        meta = cur2.fetchone()
+        return {
+            "error": f"表 '{t}' 中 row_id='{row_id}' 不存在",
+            "fix": f"该表共 {meta[2]} 行，row_id 范围 [{meta[0]}, {meta[1]}]，请确认 row_id 正确",
+        }
     cur = conn.execute(
         """
         SELECT source_tag FROM _cell_provenance
@@ -635,7 +656,7 @@ def _get_protected_cells(conn: sqlite3.Connection, table_name: str) -> Dict[str,
         (t,),
     )
     if not cur.fetchone():
-        return {"error": f"未知表 {t}"}
+        return {"error": f"未知表 '{t}'", "fix": f"用 get_table_list 确认表名，当前已注册: {_list_known_tables(conn)}"}
     cur = conn.execute(
         """
         SELECT row_id, column_name FROM _cell_provenance
@@ -682,7 +703,7 @@ def _get_table_readme(conn: sqlite3.Connection, table_name: str) -> Dict[str, An
     )
     row = cur.fetchone()
     if not row:
-        return {"error": f"未知表 {table_name}"}
+        return {"error": f"未知表 '{table_name}'", "fix": f"用 get_table_list 确认表名，当前已注册: {_list_known_tables(conn)}"}
     return {"table_name": table_name, "readme": row["readme"] or ""}
 
 
@@ -692,7 +713,7 @@ def _update_table_readme(conn: sqlite3.Connection, table_name: str, content: str
         (table_name,),
     )
     if not cur.fetchone():
-        return {"error": f"未知表 {table_name}"}
+        return {"error": f"未知表 '{table_name}'", "fix": f"用 get_table_list 确认表名，当前已注册: {_list_known_tables(conn)}"}
     conn.execute(
         "UPDATE _table_registry SET readme = ? WHERE table_name = ?",
         (content, table_name),
@@ -751,9 +772,9 @@ def _bulk_register_and_compute(
     register_only: bool,
 ) -> Dict[str, Any]:
     if not table_name:
-        return {"error": "缺少 table_name"}
+        return {"error": "缺少 table_name", "fix": "请提供 table_name 参数，可通过 get_table_list 查看已有表"}
     if not items:
-        return {"error": "items 不能为空"}
+        return {"error": "items 不能为空", "fix": "items 是公式注册列表，每项含 column_name 和 formula_string"}
     registered: List[Dict[str, Any]] = []
     executed: List[Dict[str, Any]] = []
     errors: List[str] = []
@@ -767,7 +788,8 @@ def _bulk_register_and_compute(
             register_formula(conn, table_name, col, formula)
             registered.append({"column": col, "formula": formula})
         except ValueError as e:
-            errors.append(f"register {col}: {e}")
+            known_cols = _list_table_columns(conn, table_name)
+            errors.append(f"register '{col}' 失败: {e}。表 '{table_name}' 已有列: {known_cols}")
             continue
         if register_only:
             continue
@@ -784,7 +806,7 @@ def _bulk_register_and_compute(
             )
             executed.append({"column": col, **res})
         except ValueError as e:
-            errors.append(f"execute {col}: {e}")
+            errors.append(f"execute '{col}' 失败: {e}。检查公式中 @col 引用是否与表列名一致")
     out: Dict[str, Any] = {
         "table_name": table_name,
         "registered_count": len(registered),
@@ -816,10 +838,10 @@ def _setup_level_table(
 
     pairs: List[tuple[str, str]] = []
     has_level = False
-    for c in columns:
+    for i, c in enumerate(columns):
         cname = str(c.get("name", ""))
         if not cname:
-            return {"error": "列定义缺少 name"}
+            return {"error": f"columns[{i}] 缺少 name 字段", "fix": "每个列定义必须包含 name(英文标识)、sql_type(TEXT|REAL|INTEGER)、display_name(中文名)"}
         ctype = str(c.get("sql_type") or "REAL")
         pairs.append((cname, ctype))
         if cname == level_column:
@@ -838,7 +860,8 @@ def _setup_level_table(
     except ValueError as e:
         msg = str(e)
         if "已存在" not in msg and "exists" not in msg.lower():
-            return {"error": f"建表失败: {e}"}
+            known = _list_known_tables(conn)
+            return {"error": f"建表失败: {e}", "fix": f"若表名冲突请先 delete_table，或换个表名。当前已有表: {known}"}
 
     now_rows = 0
     for lv in range(1, max_level + 1):
@@ -981,7 +1004,10 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
         else:
             tag = args.get("source_tag") or "ai_generated"
             if tag not in ("ai_generated", "algorithm_derived", "formula_computed"):
-                out = {"error": "非法 source_tag"}
+                out = {
+                    "error": f"非法 source_tag: '{tag}'",
+                    "fix": "source_tag 合法值: ai_generated（AI 生成） | algorithm_derived（算法推导） | formula_computed（公式计算），通常应使用 ai_generated",
+                }
             else:
                 try:
                     out = apply_write_cells(
@@ -996,32 +1022,37 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
         if not p.can_write:
             out = {"error": "无写权限"}
         else:
+            tname = str(args.get("table_name", ""))
+            cname = str(args.get("column_name", ""))
             try:
-                out = register_formula(
-                    conn,
-                    str(args.get("table_name", "")),
-                    str(args.get("column_name", "")),
-                    str(args.get("formula_string", "")),
-                )
+                out = register_formula(conn, tname, cname, str(args.get("formula_string", "")))
             except ValueError as e:
-                out = {"error": str(e)}
+                known_cols = _list_table_columns(conn, tname)
+                out = {
+                    "error": f"register_formula 失败 (表='{tname}', 列='{cname}'): {e}",
+                    "fix": f"检查列名是否存在于表中。表 '{tname}' 的列: {known_cols}；公式中 @引用 的列名必须与表列名完全一致",
+                }
     elif name == "execute_formula":
         if not p.can_write:
             out = {"error": "无写权限"}
         else:
+            tname = str(args.get("table_name", ""))
+            cname = str(args.get("column_name", ""))
             try:
                 lm = args.get("level_min")
                 lx = args.get("level_max")
                 out = execute_formula_on_column(
-                    conn,
-                    str(args.get("table_name", "")),
-                    str(args.get("column_name", "")),
+                    conn, tname, cname,
                     level_column=str(args["level_column"]) if args.get("level_column") else None,
                     level_min=float(lm) if lm is not None else None,
                     level_max=float(lx) if lx is not None else None,
                 )
             except ValueError as e:
-                out = {"error": str(e)}
+                known_cols = _list_table_columns(conn, tname)
+                out = {
+                    "error": f"execute_formula 失败 (表='{tname}', 列='{cname}'): {e}",
+                    "fix": f"确认公式已注册且 @col 引用存在。表 '{tname}' 的列: {known_cols}",
+                }
     elif name == "recalculate_downstream":
         if not p.can_write:
             out = {"error": "无写权限"}
