@@ -8,6 +8,17 @@ from typing import Any, Dict, List, Tuple, Union
 
 from app.util.identifiers import assert_table_or_column as assert_ident
 
+# 系统保留表名，Agent 不得创建
+_SYSTEM_TABLES = frozenset({
+    "project_settings",
+    "_table_registry",
+    "_dependency_graph",
+    "_formula_registry",
+    "_snapshots",
+    "pipeline_state",
+    "_cell_provenance",
+})
+
 
 def create_dynamic_table(
     conn: sqlite3.Connection,
@@ -19,9 +30,17 @@ def create_dynamic_table(
 ) -> Dict[str, Any]:
     """columns: (列名, TEXT|REAL|INTEGER)，不含 row_id。"""
     t = assert_ident(table_name)
+    # 禁止创建系统保留表
+    if t in _SYSTEM_TABLES:
+        raise ValueError(f"表名 {t!r} 是系统保留名，不允许通过工具创建")
+    # 检查 _table_registry（动态表注册）
     cur = conn.execute("SELECT 1 FROM _table_registry WHERE table_name = ?", (t,))
     if cur.fetchone():
-        raise ValueError("表已存在")
+        raise ValueError(f"表 {t!r} 已存在（已注册为动态表）")
+    # 检查 SQLite 实际表（防止与任何已有表冲突）
+    cur2 = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,))
+    if cur2.fetchone():
+        raise ValueError(f"表 {t!r} 已存在于数据库中（可能是系统表或先前创建的表）")
     cols_sql = ["row_id TEXT PRIMARY KEY"]
     schema_cols: List[Dict[str, str]] = [{"name": "row_id", "sql_type": "TEXT"}]
     for name, sql_type in columns:

@@ -1946,13 +1946,81 @@ pre {
 /* 错误提示 */
 .ps-agent-err {
   margin: 0.75rem 1.25rem;
-  padding: 0.65rem 0.9rem;
-  background: #ffebee;
   border: 1px solid #ef9a9a;
   border-radius: var(--radius);
   font-size: 0.83rem;
   color: #c62828;
   flex-shrink: 0;
+  overflow: hidden;
+}
+.ps-err-header {
+  padding: 0.5rem 0.9rem;
+  background: #ffebee;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.ps-err-body {
+  padding: 0.5rem 0.9rem;
+  background: #fff5f5;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow-y: auto;
+  border-top: 1px solid #ef9a9a;
+}
+.ps-err-actions {
+  padding: 0.4rem 0.9rem;
+  display: flex;
+  gap: 0.5rem;
+  background: #ffebee;
+  border-top: 1px solid #ef9a9a;
+}
+
+/* Recovery Agent Panel */
+.ps-recovery-panel {
+  margin: 0.75rem 1.25rem;
+  border: 1.5px solid #7b1fa2;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.ps-recovery-header {
+  padding: 0.5rem 0.9rem;
+  background: linear-gradient(135deg, #7b1fa2 0%, #9c27b0 100%);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.ps-recovery-header .muted { color: rgba(255,255,255,.7); }
+.ps-recovery-badge {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+.ps-recovery-phases {
+  background: #fdf5ff;
+  padding: 0.5rem;
+}
+.ps-recovery-summary {
+  padding: 0.6rem 0.9rem;
+  background: #f3e5f5;
+  border-top: 1px solid #ce93d8;
+  font-size: 0.78rem;
+}
+.ps-recovery-summary pre {
+  margin-top: 0.3rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #4a148c;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  max-height: 150px;
+  overflow-y: auto;
 }
 
 /* btn size variants */

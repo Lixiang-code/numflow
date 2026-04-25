@@ -19,13 +19,17 @@ router = APIRouter()
 
 class ChatBody(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
-    mode: Literal["init", "maintain"] = Field(
+    mode: Literal["init", "maintain", "recovery"] = Field(
         default="maintain",
-        description="init=首次建模（文档 06）；maintain=日常增量（五步循环）",
+        description="init=首次建模；maintain=日常增量；recovery=失败修复",
     )
     strict_review: bool = Field(
         default=False,
         description="为 True 时，execute 阶段每次写工具调用前都过一遍轻量 reviewer（可拒绝该 tool_call）",
+    )
+    failure_context: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="mode=recovery 时必填：{step_id, error, tool_history, partial_design}",
     )
 
 
@@ -42,6 +46,7 @@ def agent_chat(body: ChatBody, p: ProjectDB = Depends(get_project_write)):
             p,
             mode=body.mode,
             strict_review=body.strict_review,
+            failure_context=body.failure_context,
         ),
         media_type="text/event-stream",
     )

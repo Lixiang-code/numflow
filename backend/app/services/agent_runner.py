@@ -192,7 +192,13 @@ def run_agent_sse(
     *,
     mode: str = "maintain",
     strict_review: bool = False,
+    failure_context: Optional[Dict[str, Any]] = None,
 ) -> Generator[bytes, None, None]:
+    # recovery 模式：专门用于分析失败原因并尝试修复
+    if mode == "recovery" and failure_context:
+        yield from _run_recovery_sse(user_message, p, failure_context)
+        return
+
     mode_norm = mode if mode in ("init", "maintain") else "maintain"
     role_label = "初始化 Agent" if mode_norm == "init" else "维护 Agent"
     yield _emit("route", {"type": "log", "message": f"开始调度 Agent（{role_label}）"})
@@ -414,7 +420,14 @@ def run_agent_sse(
                         )
                         continue
 
-                result = dispatch_tool(name, args, p)
+                try:
+                    result = dispatch_tool(name, args, p)
+                except Exception as tool_exc:  # noqa: BLE001
+                    # 工具执行异常（含 sqlite3.OperationalError 等）转为错误 JSON
+                    # 返回给 LLM，让 Agent 自行决策（而不是崩溃整个流）
+                    err_msg = f"工具执行异常: {tool_exc!r}"
+                    yield _emit("execute", {"type": "log", "message": err_msg})
+                    result = json.dumps({"ok": False, "error": err_msg}, ensure_ascii=False)
                 yield _emit(
                     "execute",
                     {
@@ -448,3 +461,212 @@ def run_agent_sse(
         return
 
     yield _emit("execute", {"type": "error", "message": "超过最大工具轮次"})
+
+
+# ─── Recovery Agent ──────────────────────────────────────────────────────────
+
+_RECOVERY_SYSTEM = """\
+【角色】你是 Numflow「修复 Agent」（Recovery Agent）。你的工作是分析一次失败的 pipeline 步骤，找出根本原因，并通过调用工具执行必要的修复操作，使该步骤能够在下次重试时成功。
+
+【工作流程】
+1. 分析：阅读失败上下文（失败步骤、错误信息、已完成的工具调用历史），诊断根本原因。
+2. 修复计划：列出需要执行的修复操作（可能包括：删除已部分创建的冲突表、清理脏数据、更新 README 等）。
+3. 执行修复：调用工具完成修复；调用顺序：先清理冲突→再补全遗漏→最后验证状态。
+4. 汇报：输出结构化修复报告，明确说明已修复内容、未能修复内容、建议的重试策略。
+
+【约束】
+- 只做清理/恢复性操作，不做超出失败步骤范围的新建工作（新建工作留给重试）。
+- 遇到无法自动修复的问题，必须明确在报告中说明，不要无限重试。
+- 修复报告末尾必须以 RECOVERY_DONE 或 RECOVERY_PARTIAL 或 RECOVERY_FAILED 结尾（机器可读信号）。
+"""
+
+
+def _run_recovery_sse(
+    user_message: str,
+    p: ProjectDB,
+    failure_context: Dict[str, Any],
+) -> Generator[bytes, None, None]:
+    """Recovery Agent SSE：分析失败上下文，调用工具修复，输出修复报告。"""
+    client = get_client()
+
+    step_id = failure_context.get("step_id", "unknown")
+    error_msg = failure_context.get("error", "")
+    tool_history = failure_context.get("tool_history", [])  # [{name, arguments, result}]
+    partial_design = failure_context.get("partial_design", "")
+
+    yield _emit("route", {"type": "log", "message": f"修复 Agent 启动（失败步骤: {step_id}）"})
+    yield _emit("route", {
+        "type": "prompt_route",
+        "hit": True,
+        "prompt": "recovery",
+        "rationale": f"失败步骤={step_id}，错误={error_msg[:200]}",
+        "step_id": step_id,
+    })
+
+    # ─── 构建上下文消息 ─────────────────────────────────────────
+    context_lines = [
+        f"## 失败步骤\n{step_id}",
+        f"## 错误信息\n```\n{error_msg}\n```",
+    ]
+    if partial_design:
+        context_lines.append(f"## 失败前 design 阶段输出（部分）\n{partial_design[:1500]}")
+    if tool_history:
+        context_lines.append("## 失败前工具调用历史")
+        for i, th in enumerate(tool_history[-10:]):  # 最多显示最近10条
+            context_lines.append(
+                f"### 工具 {i+1}: {th.get('name','?')}\n"
+                f"参数: {str(th.get('arguments', {}))[:300]}\n"
+                f"结果: {str(th.get('result', ''))[:300]}"
+            )
+
+    context_block = "\n\n".join(context_lines)
+
+    # ─── design 阶段：分析失败原因 ─────────────────────────────
+    design_messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": _RECOVERY_SYSTEM},
+        {
+            "role": "system",
+            "content": (
+                "【当前阶段=design（修复分析）】\n"
+                "仔细阅读下方失败上下文，输出两段式分析（禁止工具调用）：\n"
+                "## 根本原因分析\n（具体说明为何失败，涉及哪些表/工具/数据）\n"
+                "## 修复计划\n（按顺序列出每个修复操作，说明调用哪个工具、参数是什么）"
+            ),
+        },
+        {"role": "user", "content": f"以下是失败上下文：\n\n{context_block}\n\n原始失败消息：{user_message}"},
+    ]
+
+    yield _emit("design", {"type": "log", "message": "修复分析阶段开始…"})
+    design_text = ""
+    try:
+        stream = client.chat.completions.create(
+            model=QWEN_MODEL,
+            messages=design_messages,
+            temperature=0.1,
+            max_tokens=1000,
+            stream=True,
+        )
+        for chunk in stream:
+            try:
+                delta = chunk.choices[0].delta.content if chunk.choices else None
+            except Exception:
+                delta = None
+            if delta:
+                design_text += delta
+                yield _emit("design", {"type": "token", "text": delta})
+    except Exception as e:  # noqa: BLE001
+        yield _emit("design", {"type": "error", "message": f"修复分析失败: {e!r}"})
+        return
+    design_text = design_text.strip()
+    yield _emit("design", {"type": "log", "message": f"修复分析完成（{len(design_text)} chars）"})
+
+    # ─── execute 阶段：执行修复操作 ────────────────────────────
+    yield _emit("execute", {"type": "log", "message": "修复执行阶段开始…"})
+
+    execute_messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": _RECOVERY_SYSTEM},
+        {
+            "role": "system",
+            "content": (
+                "【当前阶段=execute（修复执行）】\n"
+                "按修复计划调用工具执行修复操作；完成后输出修复报告。\n"
+                "报告末尾必须有且仅有一个状态标记（单独一行）：\n"
+                "- RECOVERY_DONE：所有修复已完成，可以安全重试原步骤\n"
+                "- RECOVERY_PARTIAL：部分修复完成，重试原步骤可能成功\n"
+                "- RECOVERY_FAILED：无法自动修复，需要人工介入"
+            ),
+        },
+        {"role": "user", "content": f"失败上下文：\n{context_block}"},
+        {"role": "assistant", "content": design_text},
+        {"role": "user", "content": "请按照修复计划执行修复操作，完成后输出修复报告。"},
+    ]
+
+    MAX_RECOVERY_ROUNDS = 8
+    recovery_text = ""
+
+    for _round in range(MAX_RECOVERY_ROUNDS):
+        try:
+            resp = client.chat.completions.create(
+                model=QWEN_MODEL,
+                messages=execute_messages,
+                tools=TOOLS_OPENAI,
+                tool_choice="auto",
+                temperature=0.1,
+                max_tokens=1200,
+            )
+        except Exception as e:  # noqa: BLE001
+            yield _emit("execute", {"type": "error", "message": f"修复执行调用失败: {e!r}"})
+            return
+
+        msg = resp.choices[0].message if resp.choices else None
+        if msg is None:
+            break
+
+        execute_messages.append({"role": "assistant", "content": msg.content or "", "tool_calls": [
+            {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+            for tc in (msg.tool_calls or [])
+        ]})
+
+        if not msg.tool_calls:
+            recovery_text = msg.content or ""
+            for chunk in _chunk_text(recovery_text, 80):
+                yield _emit("execute", {"type": "token", "text": chunk})
+            # 判断修复结果
+            if "RECOVERY_DONE" in recovery_text:
+                status = "done"
+            elif "RECOVERY_PARTIAL" in recovery_text:
+                status = "partial"
+            else:
+                status = "failed"
+            yield _emit("execute", {
+                "type": "done",
+                "full_text": recovery_text,
+                "design": design_text,
+                "review": "",
+                "recovery_status": status,
+            })
+            return
+
+        # 执行工具调用
+        for tc in msg.tool_calls:
+            try:
+                name = tc.function.name
+                args: Dict[str, Any] = {}
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    pass
+                yield _emit("execute", {
+                    "type": "tool_call",
+                    "name": name,
+                    "arguments": tc.function.arguments or "{}",
+                })
+                try:
+                    result = dispatch_tool(name, args, p)
+                except Exception as tool_exc:  # noqa: BLE001
+                    err_msg = f"工具执行异常: {tool_exc!r}"
+                    yield _emit("execute", {"type": "log", "message": err_msg})
+                    result = json.dumps({"ok": False, "error": err_msg}, ensure_ascii=False)
+                yield _emit("execute", {
+                    "type": "tool_result",
+                    "name": name,
+                    "preview": result[:2000],
+                })
+                execute_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result,
+                })
+            except Exception as e:  # noqa: BLE001
+                yield _emit("execute", {"type": "log", "message": f"工具循环异常: {e!r}"})
+        continue
+
+    yield _emit("execute", {"type": "error", "message": "修复 Agent 超过最大工具轮次，放弃"})
+    yield _emit("execute", {
+        "type": "done",
+        "full_text": "RECOVERY_FAILED 超过最大轮次",
+        "design": design_text,
+        "review": "",
+        "recovery_status": "failed",
+    })
+

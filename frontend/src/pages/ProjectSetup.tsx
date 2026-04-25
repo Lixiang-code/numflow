@@ -204,6 +204,15 @@ export default function ProjectSetup() {
   const [busy, setBusy] = useState(false)
   const [autoMode, setAutoMode] = useState(true) // 是否自动推进每步
 
+  // ── Recovery Agent 状态 ──────────────────────────────────────────
+  const [recoveryMode, setRecoveryMode] = useState(false)
+  const [recoveryLivePhase, setRecoveryLivePhase] = useState('')
+  const [recoveryPhases, setRecoveryPhases] = useState<Record<string, PhaseState>>({})
+  const [recoveryTools, setRecoveryTools] = useState<ToolEntry[]>([])
+  const [recoveryStatus, setRecoveryStatus] = useState<'idle' | 'running' | 'done' | 'partial' | 'failed'>('idle')
+  const [recoveryMsg, setRecoveryMsg] = useState('')
+  const recoveryCountRef = useRef(0) // 每步最多3次自动修复
+
   // ── 当前正在运行的步骤 ────────────────────────────────────────────
   const [currentStep, setCurrentStep] = useState<string | null>(null)
   const [allDone, setAllDone] = useState(false)
@@ -260,6 +269,14 @@ export default function ProjectSetup() {
     setLivePhase('')
   }
 
+  function resetRecoveryState() {
+    setRecoveryPhases({})
+    setRecoveryTools([])
+    setRecoveryStatus('idle')
+    setRecoveryMsg('')
+    setRecoveryLivePhase('')
+  }
+
   // ── advance pipeline ─────────────────────────────────────────────
   async function advancePipeline(stepId: string) {
     try {
@@ -271,33 +288,200 @@ export default function ProjectSetup() {
     } catch (e) {
       console.warn('pipeline advance failed:', e)
     }
-    // reload pipeline status
     await loadPipeline()
   }
+
+  // ── 通用 SSE 读取：返回 { localPhases, localTools, toolCount, hasError, recoveryStatus }
+  type SseResult = {
+    localPhases: Record<string, PhaseState>
+    localTools: ToolEntry[]
+    toolCount: number
+    hasError: boolean
+    recoveryStatus?: string
+  }
+
+  async function readAgentStream(
+    res: Response,
+    startTime: string,
+    setLive: (p: string) => void,
+    setPs: (p: Record<string, PhaseState>) => void,
+    setTs: (t: ToolEntry[]) => void,
+    setMet: (m: Metrics) => void,
+    signal?: AbortSignal,
+  ): Promise<SseResult> {
+    const reader = res.body?.getReader()
+    if (!reader) throw new Error('无响应流')
+    const dec = new TextDecoder()
+    let buf = ''
+    let toolCount = 0
+    let hasError = false
+    let lastRecoveryStatus: string | undefined
+    const localPhases: Record<string, PhaseState> = {}
+    const localTools: ToolEntry[] = []
+    const phaseTimes: Record<string, string> = {}
+
+    function getOrInit(p: string): PhaseState {
+      if (!localPhases[p]) localPhases[p] = initPhase()
+      return localPhases[p]
+    }
+
+    for (;;) {
+      if (signal?.aborted) break
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += dec.decode(value, { stream: true })
+      const parts = buf.split('\n\n')
+      buf = parts.pop() ?? ''
+      for (const block of parts) {
+        if (!block.startsWith('data:')) continue
+        const line = block.replace(/^data:\s*/i, '').trim()
+        let raw: Record<string, unknown>
+        try { raw = JSON.parse(line) as Record<string, unknown> }
+        catch { continue }
+
+        const phase = String(raw.phase ?? '')
+        const type = String(raw.type ?? '')
+
+        if (phase && !phaseTimes[phase + '_start']) {
+          phaseTimes[phase + '_start'] = nowIso()
+          getOrInit(phase).started = phaseTimes[phase + '_start']
+          setLive(phase)
+        }
+
+        if (type === 'token') {
+          getOrInit(phase).text += String(raw.text ?? '')
+          getOrInit(phase).hasContent = true
+        } else if (type === 'log') {
+          getOrInit(phase).logs.push(String(raw.message ?? ''))
+        } else if (type === 'error') {
+          getOrInit(phase).error = String(raw.message ?? '')
+          hasError = true
+        } else if (type === 'tool_call') {
+          toolCount++
+          localTools.push({ idx: localTools.length, ts: nowIso(), kind: 'call', name: String(raw.name ?? ''), body: String(raw.arguments ?? '') })
+        } else if (type === 'tool_result') {
+          localTools.push({ idx: localTools.length, ts: nowIso(), kind: 'result', name: String(raw.name ?? ''), body: String(raw.preview ?? '') })
+        } else if (type === 'done') {
+          getOrInit(phase).finished = nowIso()
+          lastRecoveryStatus = raw.recovery_status as string | undefined
+          setMet({
+            startedAt: startTime, finishedAt: nowIso(),
+            totalMs: msDiff(startTime, nowIso()), toolCalls: toolCount, status: 'done',
+          })
+        }
+
+        setPs({ ...localPhases })
+        setTs([...localTools])
+        setMet({
+          startedAt: startTime, finishedAt: null,
+          totalMs: msDiff(startTime, nowIso()), toolCalls: toolCount, status: 'running',
+        })
+      }
+    }
+    return { localPhases, localTools, toolCount, hasError, recoveryStatus: lastRecoveryStatus }
+  }
+
+  // ── run recovery agent ───────────────────────────────────────────
+  const runRecovery = useCallback(async (
+    stepId: string,
+    failureContext: { step_id: string; error: string; tool_history: { name: string; arguments: string; result: string }[]; partial_design: string },
+    projInfo: ProjectInfo,
+    completedSteps: string[],
+  ) => {
+    recoveryCountRef.current++
+    setRecoveryMode(true)
+    setRecoveryStatus('running')
+    resetRecoveryState()
+    setRecoveryStatus('running')
+
+    const startTime = nowIso()
+    const recoveryMessage = (
+      `【修复 Agent】步骤 ${stepId} 执行失败，请分析根本原因并执行修复操作，使该步骤能够在下次重试时成功。\n` +
+      `项目：${projInfo.name}（${projInfo.game_type ?? '未知'}）`
+    )
+
+    const abort = new AbortController()
+    abortRef.current = abort
+
+    try {
+      const res = await fetch('/api/agent/chat', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: recoveryMessage,
+          mode: 'recovery',
+          failure_context: failureContext,
+        }),
+        signal: abort.signal,
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
+
+      const recMetSetter = (m: Metrics) => {
+        // unused but required by readAgentStream signature
+        void m
+      }
+
+      const result = await readAgentStream(
+        res, startTime,
+        setRecoveryLivePhase,
+        setRecoveryPhases,
+        setRecoveryTools,
+        recMetSetter,
+        abort.signal,
+      )
+
+      const rs = result.recoveryStatus ?? (result.hasError ? 'failed' : 'done')
+      setRecoveryStatus(rs as 'done' | 'partial' | 'failed')
+
+      // Extract last text from execute phase for message
+      const execText = result.localPhases['execute']?.text ?? ''
+      setRecoveryMsg(execText.slice(-600))
+
+      if ((rs === 'done' || rs === 'partial') && autoMode && recoveryCountRef.current <= 3) {
+        // 修复成功：延迟2秒后重试原步骤
+        setRecoveryMode(false)
+        setTimeout(() => {
+          if (busyRef.current) return
+          void runStep(stepId, projInfo, completedSteps)
+        }, 2000)
+      } else if (rs === 'failed') {
+        // 修复彻底失败：停止自动推进，等待手动介入
+        setRecoveryMode(false)
+        setAgentErr(`步骤 ${stepId} 修复失败（已尝试 ${recoveryCountRef.current} 次），需要手动检查并重试。`)
+        busyRef.current = false
+        setBusy(false)
+      }
+    } catch (e) {
+      if ((e as Error).name !== 'AbortError') {
+        setRecoveryStatus('failed')
+        setRecoveryMsg(e instanceof Error ? e.message : String(e))
+        setRecoveryMode(false)
+        setAgentErr(`修复 Agent 自身出错：${e instanceof Error ? e.message : String(e)}`)
+        busyRef.current = false
+        setBusy(false)
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [headers, autoMode])
 
   // ── run single step ──────────────────────────────────────────────
   const runStep = useCallback(async (stepId: string, projInfo: ProjectInfo, completedSteps: string[]) => {
     if (busyRef.current) return
     busyRef.current = true
+    recoveryCountRef.current = 0  // 重置修复计数（新步骤）
     resetAgentState()
+    resetRecoveryState()
     setBusy(true)
     setCurrentStep(stepId)
 
     const startTime = nowIso()
-    const phaseTimes: Record<string, string> = {}
-    let toolCount = 0
-    const localPhases: Record<string, PhaseState> = {}
-    const localTools: ToolEntry[] = []
-
-    function getOrInitPhase(p: string): PhaseState {
-      if (!localPhases[p]) localPhases[p] = initPhase()
-      return localPhases[p]
-    }
-
     const abort = new AbortController()
     abortRef.current = abort
-
     const message = buildInitMessage(stepId, projInfo, completedSteps)
+
+    let sseResult: SseResult | null = null
+    let catchErr: string | null = null
 
     try {
       const res = await fetch('/api/agent/chat', {
@@ -309,88 +493,61 @@ export default function ProjectSetup() {
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
 
-      const reader = res.body?.getReader()
-      if (!reader) throw new Error('无响应流')
-      const dec = new TextDecoder()
-      let buf = ''
-
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buf += dec.decode(value, { stream: true })
-        const parts = buf.split('\n\n')
-        buf = parts.pop() ?? ''
-
-        for (const block of parts) {
-          if (!block.startsWith('data:')) continue
-          const line = block.replace(/^data:\s*/i, '').trim()
-          let raw: Record<string, unknown>
-          try { raw = JSON.parse(line) as Record<string, unknown> }
-          catch { continue }
-
-          const phase = String(raw.phase ?? '')
-          const type = String(raw.type ?? '')
-
-          if (phase && !phaseTimes[phase + '_start']) {
-            phaseTimes[phase + '_start'] = nowIso()
-            getOrInitPhase(phase).started = phaseTimes[phase + '_start']
-            setLivePhase(phase)
-            setPhases(prev => ({ ...prev, [phase]: { ...getOrInitPhase(phase) } }))
-          }
-
-          if (type === 'token') {
-            getOrInitPhase(phase).text += String(raw.text ?? '')
-            getOrInitPhase(phase).hasContent = true
-          } else if (type === 'log') {
-            getOrInitPhase(phase).logs.push(String(raw.message ?? ''))
-          } else if (type === 'error') {
-            getOrInitPhase(phase).error = String(raw.message ?? '')
-          } else if (type === 'tool_call') {
-            toolCount++
-            localTools.push({ idx: localTools.length, ts: nowIso(), kind: 'call', name: String(raw.name ?? ''), body: String(raw.arguments ?? '') })
-          } else if (type === 'tool_result') {
-            localTools.push({ idx: localTools.length, ts: nowIso(), kind: 'result', name: String(raw.name ?? ''), body: String(raw.preview ?? '') })
-          } else if (type === 'done') {
-            const fin = nowIso()
-            getOrInitPhase(phase).finished = fin
-            setMetrics({
-              startedAt: startTime,
-              finishedAt: fin,
-              totalMs: msDiff(startTime, fin),
-              toolCalls: toolCount,
-              status: 'done',
-            })
-          }
-
-          // batch update all phases + tools every event
-          setPhases({ ...localPhases })
-          setTools([...localTools])
-          setMetrics({
-            startedAt: startTime,
-            finishedAt: null,
-            totalMs: msDiff(startTime, nowIso()),
-            toolCalls: toolCount,
-            status: 'running',
-          })
-        }
-      }
+      const metSetter = (m: Metrics) => setMetrics(m)
+      sseResult = await readAgentStream(
+        res, startTime,
+        setLivePhase, setPhases, setTools, metSetter,
+        abort.signal,
+      )
     } catch (e) {
-      if ((e as Error).name !== 'AbortError') {
-        const msg = e instanceof Error ? e.message : String(e)
-        setAgentErr(msg)
-        setMetrics({ startedAt: startTime, finishedAt: nowIso(), totalMs: msDiff(startTime, nowIso()), toolCalls: toolCount, status: 'error' })
+      if ((e as Error).name === 'AbortError') {
+        busyRef.current = false
         setBusy(false)
         return
       }
+      catchErr = e instanceof Error ? e.message : String(e)
     }
 
-    // save to history
+    const hasError = catchErr !== null || (sseResult?.hasError ?? false)
+    const localTools = sseResult?.localTools ?? []
+    const localPhases = sseResult?.localPhases ?? {}
+    const toolCount = sseResult?.toolCount ?? 0
+
+    if (hasError) {
+      const errorMsg = catchErr ?? Object.values(localPhases).map(p => p.error).filter(Boolean).join('; ')
+      setAgentErr(errorMsg)
+      setMetrics({
+        startedAt: startTime, finishedAt: nowIso(),
+        totalMs: msDiff(startTime, nowIso()), toolCalls: toolCount, status: 'error',
+      })
+      setLivePhase('')
+
+      // 自动触发修复 Agent（每步最多3次）
+      if (autoMode && recoveryCountRef.current < 3) {
+        const failCtx = {
+          step_id: stepId,
+          error: errorMsg,
+          tool_history: localTools.map(t => ({
+            name: t.name,
+            arguments: t.body,
+            result: '',
+          })),
+          partial_design: localPhases['design']?.text ?? '',
+        }
+        setTimeout(() => {
+          void runRecovery(stepId, failCtx, projInfo, completedSteps)
+        }, 1500)
+      } else {
+        busyRef.current = false
+        setBusy(false)
+      }
+      return
+    }
+
+    // 成功完成
     const finalMetrics: Metrics = {
-      startedAt: startTime,
-      finishedAt: nowIso(),
-      totalMs: msDiff(startTime, nowIso()),
-      toolCalls: toolCount,
-      status: 'done',
+      startedAt: startTime, finishedAt: nowIso(),
+      totalMs: msDiff(startTime, nowIso()), toolCalls: toolCount, status: 'done',
     }
     setStepHistory(prev => [{ stepId, phases: { ...localPhases }, tools: [...localTools], metrics: finalMetrics }, ...prev])
     setLivePhase('')
@@ -398,10 +555,9 @@ export default function ProjectSetup() {
     setBusy(false)
     abortRef.current = null
 
-    // advance pipeline
     await advancePipeline(stepId)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [headers])
+  }, [headers, autoMode, runRecovery])
 
   // ── auto-start: triggers when pipeline.next_expected_step changes (including initial load).
   // For brand-new projects, completed_steps is always [] so .length=0 wouldn't re-trigger;
@@ -424,8 +580,11 @@ export default function ProjectSetup() {
   function stop() {
     setAutoMode(false)
     abortRef.current?.abort()
+    busyRef.current = false
     setBusy(false)
     setLivePhase('')
+    setRecoveryMode(false)
+    setRecoveryStatus('idle')
   }
 
   // ── view history step ─────────────────────────────────────────────
@@ -573,19 +732,83 @@ export default function ProjectSetup() {
             </div>
           )}
 
-          {/* 错误提示 */}
-          {agentErr && !viewingHistory && (
+          {/* 错误提示（无修复进行中时显示） */}
+          {agentErr && !viewingHistory && !recoveryMode && (
             <div className="ps-agent-err">
-              <strong>Agent 出错：</strong>{agentErr}
-              <button type="button" className="btn ghost small" style={{ marginLeft: '1rem' }}
-                onClick={() => {
-                  setAgentErr(null)
-                  if (pipeline?.next_expected_step) {
-                    void runStep(pipeline.next_expected_step, projectInfo, pipeline.completed_steps ?? [])
-                  }
-                }}>
-                重试
-              </button>
+              <div className="ps-err-header">
+                <span>⚠ Agent 出错（已尝试修复 {recoveryCountRef.current} 次）</span>
+              </div>
+              <div className="ps-err-body">{agentErr}</div>
+              <div className="ps-err-actions">
+                <button type="button" className="btn ghost small"
+                  onClick={() => {
+                    setAgentErr(null)
+                    recoveryCountRef.current = 0
+                    if (pipeline?.next_expected_step) {
+                      void runStep(pipeline.next_expected_step, projectInfo, pipeline.completed_steps ?? [])
+                    }
+                  }}>
+                  🔄 手动重试步骤
+                </button>
+                {pipeline?.next_expected_step && (
+                  <button type="button" className="btn ghost small"
+                    onClick={() => {
+                      setAgentErr(null)
+                      recoveryCountRef.current = 0
+                      const failCtx = {
+                        step_id: pipeline.next_expected_step!,
+                        error: agentErr,
+                        tool_history: tools.map(t => ({ name: t.name, arguments: t.body, result: '' })),
+                        partial_design: phases['design']?.text ?? '',
+                      }
+                      void runRecovery(pipeline.next_expected_step!, failCtx, projectInfo, pipeline.completed_steps ?? [])
+                    }}>
+                    🔧 手动启动修复 Agent
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Recovery Agent 面板 */}
+          {recoveryMode && !viewingHistory && (
+            <div className="ps-recovery-panel">
+              <div className="ps-recovery-header">
+                <span className="ps-recovery-badge">
+                  {recoveryStatus === 'running' ? '⟳ 修复 Agent 运行中…' :
+                   recoveryStatus === 'done' ? '✓ 修复完成，即将重试' :
+                   recoveryStatus === 'partial' ? '⚠ 部分修复，即将重试' :
+                   '✗ 修复失败'}
+                </span>
+                <span className="muted small">第 {recoveryCountRef.current} 次修复尝试（最多 3 次）</span>
+              </div>
+              <div className="ps-recovery-phases">
+                {[
+                  { key: 'design', label: '修复分析' },
+                  { key: 'execute', label: '修复执行' },
+                ].map(({ key, label }) => {
+                  const ps = recoveryPhases[key]
+                  if (!ps && recoveryLivePhase !== key) return null
+                  const phaseTool = key === 'execute' ? recoveryTools : undefined
+                  const isLive = recoveryStatus === 'running' && recoveryLivePhase === key
+                  return (
+                    <PhasePanel
+                      key={key}
+                      phaseKey={key}
+                      label={label}
+                      state={ps ?? initPhase()}
+                      tools={phaseTool}
+                      live={isLive}
+                    />
+                  )
+                })}
+              </div>
+              {recoveryMsg && (
+                <div className="ps-recovery-summary">
+                  <strong>修复报告（摘要）：</strong>
+                  <pre>{recoveryMsg}</pre>
+                </div>
+              )}
             </div>
           )}
 
