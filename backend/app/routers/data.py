@@ -115,6 +115,7 @@ def describe_table(table_name: str, p: ProjectDB = Depends(get_project_read)):
         "validation_status": meta["validation_status"],
         "validation_rules": rules_parsed,
         "column_formulas": column_formulas,
+        "display_name": (json.loads(meta["schema_json"] or "{}") or {}).get("display_name", ""),
     }
 
 

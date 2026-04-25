@@ -176,26 +176,29 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "create_table",
-            "description": "创建动态业务表并写入 _table_registry；columns 每项含 name、sql_type(TEXT|REAL|INTEGER)",
+            "description": "创建动态业务表并写入 _table_registry；columns 每项含 name(英文标识)、sql_type(TEXT|REAL|INTEGER)、display_name(中文名)、dtype(语义类型如int/float/percent/str/bool/id/ref)。display_name(表中文名)必填",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "table_name": {"type": "string"},
+                    "table_name": {"type": "string", "description": "英文表名（snake_case）"},
+                    "display_name": {"type": "string", "description": "表的中文显示名，必填，如「基础属性表」"},
                     "columns": {
                         "type": "array",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "name": {"type": "string"},
-                                "sql_type": {"type": "string"},
+                                "name": {"type": "string", "description": "英文列名（snake_case）"},
+                                "sql_type": {"type": "string", "enum": ["TEXT", "REAL", "INTEGER"]},
+                                "display_name": {"type": "string", "description": "中文列名，必填"},
+                                "dtype": {"type": "string", "description": "语义类型: int/float/percent/str/bool/id/ref/enum/json"},
                             },
-                            "required": ["name", "sql_type"],
+                            "required": ["name", "sql_type", "display_name", "dtype"],
                         },
                     },
                     "readme": {"type": "string", "default": ""},
                     "purpose": {"type": "string", "default": ""},
                 },
-                "required": ["table_name", "columns"],
+                "required": ["table_name", "display_name", "columns"],
             },
         },
     },
@@ -949,17 +952,26 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
         else:
             raw_cols = args.get("columns") or []
             pairs: List[tuple[str, str]] = []
+            col_meta: List[Dict[str, str]] = []
             try:
                 for item in raw_cols:
                     if not isinstance(item, dict):
                         continue
-                    pairs.append((str(item.get("name", "")), str(item.get("sql_type", "TEXT"))))
+                    cn = str(item.get("name", ""))
+                    pairs.append((cn, str(item.get("sql_type", "TEXT"))))
+                    col_meta.append({
+                        "name": cn,
+                        "display_name": str(item.get("display_name", "")),
+                        "dtype": str(item.get("dtype", "")),
+                    })
                 out = create_dynamic_table(
                     conn,
                     table_name=str(args.get("table_name", "")),
                     columns=pairs,
                     readme=str(args.get("readme", "")),
                     purpose=str(args.get("purpose", "")),
+                    display_name=str(args.get("display_name", "")),
+                    column_meta=col_meta,
                 )
             except ValueError as e:
                 out = {"error": str(e)}

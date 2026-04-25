@@ -32,9 +32,19 @@ def get_project_config(p: ProjectDB = Depends(get_project_read)):
 @router.get("/tables")
 def get_table_list(p: ProjectDB = Depends(get_project_read)):
     cur = p.conn.execute(
-        "SELECT table_name, layer, purpose, validation_status FROM _table_registry ORDER BY table_name"
+        "SELECT table_name, layer, purpose, validation_status, schema_json FROM _table_registry ORDER BY table_name"
     )
-    return {"tables": [dict(r) for r in cur.fetchall()]}
+    rows = []
+    for r in cur.fetchall():
+        d = dict(r)
+        sj = d.pop("schema_json", None) or "{}"
+        try:
+            parsed = json.loads(sj) if isinstance(sj, str) else {}
+        except json.JSONDecodeError:
+            parsed = {}
+        d["display_name"] = (parsed.get("display_name") if isinstance(parsed, dict) else "") or ""
+        rows.append(d)
+    return {"tables": rows}
 
 
 @router.get("/tables/{table_name}/readme")

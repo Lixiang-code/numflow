@@ -27,40 +27,66 @@ def create_dynamic_table(
     columns: List[Tuple[str, str]],
     readme: str = "",
     purpose: str = "",
+    display_name: str = "",
+    column_meta: Union[List[Dict[str, str]], None] = None,
 ) -> Dict[str, Any]:
-    """columns: (列名, TEXT|REAL|INTEGER)，不含 row_id。"""
+    """columns: (列名, TEXT|REAL|INTEGER)，不含 row_id。
+
+    可选参数：
+    - display_name: 表的中文显示名（如「基础属性表」）
+    - column_meta: [{name, display_name, dtype}]，dtype 是语义类型（int/float/str/percent/...）
+                   按 name 与 columns 关联；列出现在 columns 但 column_meta 缺失则用空串。
+    """
     t = assert_ident(table_name)
-    # 禁止创建系统保留表
     if t in _SYSTEM_TABLES:
         raise ValueError(f"表名 {t!r} 是系统保留名，不允许通过工具创建")
-    # 检查 _table_registry（动态表注册）
     cur = conn.execute("SELECT 1 FROM _table_registry WHERE table_name = ?", (t,))
     if cur.fetchone():
         raise ValueError(f"表 {t!r} 已存在（已注册为动态表）")
-    # 检查 SQLite 实际表（防止与任何已有表冲突）
     cur2 = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,))
     if cur2.fetchone():
-        raise ValueError(f"表 {t!r} 已存在于数据库中（可能是系统表或先前创建的表）")
+        raise ValueError(f"表 {t!r} 已存在于数据库中")
+    meta_map: Dict[str, Dict[str, str]] = {}
+    if column_meta:
+        for it in column_meta:
+            nm = str(it.get("name") or "").strip()
+            if nm:
+                meta_map[nm] = {
+                    "display_name": str(it.get("display_name") or ""),
+                    "dtype": str(it.get("dtype") or ""),
+                }
     cols_sql = ["row_id TEXT PRIMARY KEY"]
-    schema_cols: List[Dict[str, str]] = [{"name": "row_id", "sql_type": "TEXT"}]
+    schema_cols: List[Dict[str, str]] = [{
+        "name": "row_id", "sql_type": "TEXT",
+        "display_name": "ID", "dtype": "id",
+    }]
     for name, sql_type in columns:
         st = str(sql_type).upper()
         if st not in ("TEXT", "REAL", "INTEGER"):
             raise ValueError(f"非法列类型: {sql_type}")
         cn = assert_ident(name)
         cols_sql.append(f'"{cn}" {st} NULL')
-        schema_cols.append({"name": cn, "sql_type": st})
+        m = meta_map.get(cn, {})
+        schema_cols.append({
+            "name": cn, "sql_type": st,
+            "display_name": m.get("display_name", ""),
+            "dtype": m.get("dtype", ""),
+        })
     ddl = f'CREATE TABLE "{t}" ({", ".join(cols_sql)})'
     conn.execute(ddl)
+    schema_payload = {
+        "columns": schema_cols,
+        "display_name": display_name or "",
+    }
     conn.execute(
         """
         INSERT INTO _table_registry (table_name, layer, purpose, readme, schema_json, validation_status)
         VALUES (?,?,?,?,?, 'unknown')
         """,
-        (t, "dynamic", purpose, readme, json.dumps({"columns": schema_cols}, ensure_ascii=False)),
+        (t, "dynamic", purpose, readme, json.dumps(schema_payload, ensure_ascii=False)),
     )
     conn.commit()
-    return {"ok": True, "table_name": t}
+    return {"ok": True, "table_name": t, "display_name": display_name}
 
 
 def delete_dynamic_table(conn: sqlite3.Connection, *, table_name: str, confirm: Union[bool, str, int]) -> Dict[str, Any]:

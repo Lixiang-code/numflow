@@ -663,7 +663,9 @@ label > input, label > select, label > textarea { color: var(--text); }
   color: #fff;
   flex-shrink: 0;
   position: relative;
-  z-index: 50;
+  /* 必须高于 Univer 弹层（max 1081）才不会被遮挡 */
+  z-index: 2000;
+  pointer-events: auto;
   box-shadow: 0 1px 3px rgba(0,0,0,.2);
 }
 .wb-top .link-btn {
@@ -695,6 +697,8 @@ label > input, label > select, label > textarea { color: var(--text); }
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
+  z-index: 100;
 }
 .wb-left h3 {
   padding: 0.55rem 0.75rem 0.35rem;
@@ -805,14 +809,71 @@ label > input, label > select, label > textarea { color: var(--text); }
 
 /* 右栏 */
 .wb-right {
-  width: 310px;
+  width: 320px;
   flex-shrink: 0;
   background: var(--surface);
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
+  z-index: 100;
 }
+.wb-right-pane {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.6rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.readme-mode-row {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  padding: 0.2rem 0;
+}
+.markdown-preview {
+  font-size: 0.82rem;
+  line-height: 1.55;
+  color: var(--text);
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.8rem;
+  min-height: 120px;
+  overflow-x: auto;
+}
+.markdown-preview h1 { font-size: 1.05rem; font-weight: 700; margin: 0.4rem 0 0.3rem; }
+.markdown-preview h2 { font-size: 0.95rem; font-weight: 700; margin: 0.4rem 0 0.3rem; }
+.markdown-preview h3 { font-size: 0.88rem; font-weight: 600; margin: 0.4rem 0 0.25rem; padding: 0; border: none; }
+.markdown-preview p { margin: 0.3rem 0; }
+.markdown-preview ul, .markdown-preview ol { padding-left: 1.2rem; margin: 0.3rem 0; }
+.markdown-preview code { background: rgba(0,0,0,.06); padding: 0 0.25rem; border-radius: 3px; font-family: var(--font-mono); font-size: 0.78rem; }
+.markdown-preview pre { background: rgba(0,0,0,.06); padding: 0.5rem; border-radius: var(--radius); overflow-x: auto; }
+.markdown-preview pre code { background: none; padding: 0; }
+.markdown-preview table { border-collapse: collapse; margin: 0.4rem 0; font-size: 0.78rem; }
+.markdown-preview th, .markdown-preview td { border: 1px solid var(--border); padding: 0.2rem 0.5rem; }
+.markdown-preview blockquote { border-left: 3px solid var(--green); padding-left: 0.7rem; color: var(--text-muted); margin: 0.4rem 0; }
+
+/* 高级折叠区 */
+.wb-adv-section {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-alt);
+  padding: 0.4rem 0.6rem;
+  margin-bottom: 0.5rem;
+}
+.wb-adv-section > summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text);
+  padding: 0.2rem 0;
+  user-select: none;
+}
+.wb-adv-section[open] > summary { margin-bottom: 0.4rem; border-bottom: 1px solid var(--border); }
+.wb-adv-section .wb-snap-list { max-height: 180px; overflow-y: auto; }
 
 /* 右栏 tab 按钮 */
 .readme-tab-btns {

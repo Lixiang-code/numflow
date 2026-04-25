@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import ReactMarkdown from 'react-markdown'
 import { apiFetch, projectHeaders } from '../api'
 import { getInitAgentPrompt, pipelineStepLabel } from '../data/pipelineSteps'
 import { createUniver, LocaleType, defaultTheme, type Univer } from '@univerjs/presets'
@@ -8,7 +9,8 @@ import { UniverSheetsCorePreset, type FWorkbook } from '@univerjs/preset-sheets-
 import UniverZhCN from '@univerjs/preset-sheets-core/locales/zh-CN'
 import '@univerjs/preset-sheets-core/lib/index.css'
 
-type TableInfo = { table_name: string; validation_status: string; layer: string; purpose?: string }
+type TableInfo = { table_name: string; validation_status: string; layer: string; purpose?: string; display_name?: string }
+type ColumnMeta = { name: string; sql_type?: string; display_name?: string; dtype?: string }
 
 type RuleSummary = {
   table?: string
@@ -42,7 +44,9 @@ export default function Workbench() {
   const [tableReadmeDraft, setTableReadmeDraft] = useState('')
   const [globalReadmeDraft, setGlobalReadmeDraft] = useState('')
   const [readmeTab, setReadmeTab] = useState<'table' | 'global'>('table')
-  const [sideTab, setSideTab] = useState<'readme' | 'validation' | 'snapshots'>('readme')
+  /** README 编辑/预览模式（每个 tab 独立） */
+  const [readmeViewMode, setReadmeViewMode] = useState<'preview' | 'edit'>('preview')
+  const [sideTab, setSideTab] = useState<'readme' | 'advanced'>('readme')
   const [canWrite, setCanWrite] = useState(false)
   const [validateReport, setValidateReport] = useState<ValidateReport | null>(null)
   const [validationRulesDraft, setValidationRulesDraft] = useState('')
@@ -64,6 +68,10 @@ export default function Workbench() {
   const [columnFormulas, setColumnFormulas] = useState<Record<string, string>>({})
   /** 当前活动表的列顺序（用于将 Univer 行/列索引映射回 row_id/列名） */
   const [activeCols, setActiveCols] = useState<string[]>([])
+  /** 当前活动表的列元信息（中文名/数据类型，用于 3 行表头） */
+  const [, setActiveColMeta] = useState<ColumnMeta[]>([])
+  /** 当前活动表的中文显示名 */
+  const [activeDisplayName, setActiveDisplayName] = useState<string>('')
 
   // -------- Univer 相关 --------
   const univerHostRef = useRef<HTMLDivElement | null>(null)
@@ -78,6 +86,8 @@ export default function Workbench() {
   const tableColsCacheRef = useRef<Map<string, string[]>>(new Map())
   /** 每张已加载表的列公式缓存 */
   const tableFormulasCacheRef = useRef<Map<string, Record<string, string>>>(new Map())
+  /** 每张已加载表的列元信息缓存（display_name/dtype） */
+  const tableColMetaCacheRef = useRef<Map<string, ColumnMeta[]>>(new Map())
   /** 当前活动 table_name（事件回调内引用最新值） */
   const activeTableRef = useRef<string | null>(null)
   /** 标记内部 setValues 写入，避免触发回写 API */
@@ -184,10 +194,10 @@ export default function Workbench() {
       if (!tname) return
       const cols = tableColsCacheRef.current.get(tname) || []
       const rowsArr = tableRowsCacheRef.current.get(tname) || []
-      // 行 0 = 列名表头, 行 1 = 公式备注（如有）；数据行从 dataRowOffset 开始
+      // 行 0/1/2 = 中文名/英文名/数据类型 表头；公式行（如有）在第 3 行；数据从 dataRowOffset 开始
       const formulas = tableFormulasCacheRef.current.get(tname) || {}
       const hasFormulaRow = Object.keys(formulas).length > 0
-      const dataRowOffset = hasFormulaRow ? 2 : 1
+      const dataRowOffset = hasFormulaRow ? 4 : 3
       const dataRowIdx = params.row - dataRowOffset
       const colName = cols[params.column]
       if (!colName || dataRowIdx < 0 || dataRowIdx >= rowsArr.length) return
@@ -248,21 +258,32 @@ export default function Workbench() {
 
   /** 把一张表的数据写入对应 Univer sheet（首次或刷新调用） */
   const populateSheet = useCallback(
-    (tableName: string, rowsArr: Record<string, unknown>[], cols: string[], formulas: Record<string, string>) => {
+    (tableName: string, rowsArr: Record<string, unknown>[], cols: string[], formulas: Record<string, string>, colMeta: ColumnMeta[] = [], displayName = '') => {
       const wb = workbookRef.current
       if (!wb) return
-      let sheet = wb.getSheetByName(tableName)
+      const sheetTitle = displayName ? `${displayName}（${tableName}）` : tableName
+      let sheet = wb.getSheetByName(sheetTitle) ?? wb.getSheetByName(tableName)
       if (!sheet) {
-        sheet = wb.insertSheet(tableName) ?? wb.getSheetByName(tableName)
+        sheet = wb.insertSheet(sheetTitle) ?? wb.getSheetByName(sheetTitle)
+        try {
+          const placeholder = wb.getSheetByName('加载中…')
+          if (placeholder) wb.deleteSheet(placeholder)
+        } catch { /* ignore */ }
       }
       if (!sheet) return
       tableRowsCacheRef.current.set(tableName, rowsArr)
       tableColsCacheRef.current.set(tableName, cols)
       tableFormulasCacheRef.current.set(tableName, formulas)
+      tableColMetaCacheRef.current.set(tableName, colMeta)
+
+      const metaByName = new Map(colMeta.map((m) => [m.name, m]))
+      const dispRow: (string | number)[] = cols.map((c) => metaByName.get(c)?.display_name || c)
+      const nameRow: (string | number)[] = cols.length === 0 ? ['(空表)'] : cols
+      const dtypeRow: (string | number)[] = cols.map((c) => metaByName.get(c)?.dtype || metaByName.get(c)?.sql_type || '')
       const formulaList = cols.map((c) => formulas[c] || '')
       const hasFormulaRow = formulaList.some((s) => s !== '')
-      const headerRow: (string | number)[] = cols.length === 0 ? ['(空表)'] : cols
-      const matrix: (string | number)[][] = [headerRow]
+
+      const matrix: (string | number)[][] = [dispRow, nameRow, dtypeRow]
       if (hasFormulaRow) matrix.push(formulaList)
       for (const r of rowsArr) {
         matrix.push(cols.map((c) => {
@@ -276,6 +297,10 @@ export default function Workbench() {
       const numCols = Math.max(1, cols.length)
       suppressEditRef.current = true
       try {
+        try {
+          const usedRange = sheet.getDataRange?.()
+          if (usedRange) usedRange.clearContent()
+        } catch { /* ignore */ }
         sheet.getRange(0, 0, matrix.length, numCols).setValues(matrix)
       } finally {
         suppressEditRef.current = false
@@ -289,6 +314,8 @@ export default function Workbench() {
     if (!selected) {
       setRows([])
       setActiveCols([])
+      setActiveColMeta([])
+      setActiveDisplayName('')
       setTableReadmeDraft('')
       setValidationRulesDraft('')
       setColumnFormulas({})
@@ -309,7 +336,8 @@ export default function Workbench() {
         })) as {
           validation_rules?: { rules?: unknown[] } | null
           column_formulas?: Record<string, string> | null
-          schema?: { columns?: { name?: string }[] }
+          schema?: { columns?: { name?: string; sql_type?: string; display_name?: string; dtype?: string }[] }
+          display_name?: string
         }
         if (cancelled) return
         const rawRows = Array.isArray(r.rows) ? r.rows : []
@@ -320,25 +348,35 @@ export default function Workbench() {
         const cf = desc.column_formulas && typeof desc.column_formulas === 'object' && !Array.isArray(desc.column_formulas)
           ? (desc.column_formulas as Record<string, string>)
           : {}
+        const schemaCols = Array.isArray(desc.schema?.columns) ? desc.schema!.columns! : []
+        const colMeta: ColumnMeta[] = schemaCols.map((c) => ({
+          name: String(c?.name ?? ''),
+          sql_type: c?.sql_type,
+          display_name: c?.display_name || '',
+          dtype: c?.dtype || '',
+        })).filter((m) => m.name)
         let cols: string[] = []
         if (normalized.length > 0) cols = Object.keys(normalized[0])
-        else if (Array.isArray(desc.schema?.columns)) {
-          cols = (desc.schema!.columns!).map((c) => String(c?.name ?? '')).filter(Boolean)
-        }
+        else if (colMeta.length) cols = colMeta.map((m) => m.name)
+        const displayName = desc.display_name || ''
         setRows(normalized)
         setActiveCols(cols)
+        setActiveColMeta(colMeta)
+        setActiveDisplayName(displayName)
         setTableReadmeDraft(m.readme || '')
         const vr = desc.validation_rules && typeof desc.validation_rules === 'object' ? desc.validation_rules : { rules: [] }
         setValidationRulesDraft(JSON.stringify(vr, null, 2))
         setColumnFormulas(cf)
 
         // 写入 Univer 并切换到该 sheet
-        populateSheet(selected, normalized, cols, cf)
+        populateSheet(selected, normalized, cols, cf, colMeta, displayName)
         activeTableRef.current = selected
         const wb = workbookRef.current
         if (wb) {
           try {
-            wb.setActiveSheet(selected)
+            const sheetTitle = displayName ? `${displayName}（${selected}）` : selected
+            const sh = wb.getSheetByName(sheetTitle) ?? wb.getSheetByName(selected)
+            if (sh) wb.setActiveSheet(sh)
           } catch {
             /* ignore */
           }
@@ -366,13 +404,14 @@ export default function Workbench() {
       )
       const cols = normalized.length > 0 ? Object.keys(normalized[0]) : tableColsCacheRef.current.get(selected) || []
       const formulas = tableFormulasCacheRef.current.get(selected) || {}
+      const colMeta = tableColMetaCacheRef.current.get(selected) || []
       setRows(normalized)
       setActiveCols(cols)
-      populateSheet(selected, normalized, cols, formulas)
+      populateSheet(selected, normalized, cols, formulas, colMeta, activeDisplayName)
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     }
-  }, [selected, headers, populateSheet])
+  }, [selected, headers, populateSheet, activeDisplayName])
 
   /** B2: 用户在 Univer 中编辑后回写后端（user_manual 标记） */
   const writeCellManual = useCallback(
@@ -582,6 +621,11 @@ export default function Workbench() {
         <Link to="/projects" className="link-btn">
           项目列表
         </Link>
+        {pipeline && !pipeline.finished && (
+          <Link to={`/project-setup/${pid}`} className="link-btn" style={{ background: 'rgba(255,180,0,.25)' }}>
+            ⚙ 初始化进度（未完成）
+          </Link>
+        )}
         <button
           type="button"
           className="link-btn"
@@ -640,7 +684,10 @@ export default function Workbench() {
               return (
                 <li key={t.table_name}>
                   <button type="button" className={cls || undefined} onClick={() => setSelected(t.table_name)}>
-                    <span className="tbl-name">{t.table_name}</span>
+                    <span className="tbl-name">{t.display_name || t.table_name}</span>
+                    {t.display_name ? (
+                      <small className="tbl-en" title={t.table_name}>{t.table_name}</small>
+                    ) : null}
                     {t.purpose ? (
                       <small className="tbl-purpose" title={t.purpose}>
                         {t.purpose}
@@ -692,24 +739,16 @@ export default function Workbench() {
             </button>
             <button
               type="button"
-              className={sideTab === 'validation' ? 'active' : ''}
-              onClick={() => setSideTab('validation')}
+              className={sideTab === 'advanced' ? 'active' : ''}
+              onClick={() => setSideTab('advanced')}
             >
-              校验规则
-            </button>
-            <button
-              type="button"
-              className={sideTab === 'snapshots' ? 'active' : ''}
-              onClick={() => setSideTab('snapshots')}
-            >
-              快照
+              高级（校验/快照）
             </button>
           </div>
 
           {sideTab === 'readme' && (
-            <>
-              <h3>README 内容</h3>
-              <div className="readme-tabs readme-tab-btns">
+            <div className="wb-right-pane">
+              <div className="readme-tabs readme-tab-btns" style={{ marginTop: '0.25rem' }}>
                 <button type="button" className={readmeTab === 'table' ? 'active' : ''} onClick={() => setReadmeTab('table')}>
                   当前表
                 </button>
@@ -721,15 +760,27 @@ export default function Workbench() {
                   全局
                 </button>
               </div>
-              {!canWrite && <p className="muted small">只读项目：无法保存 README。</p>}
+              <div className="readme-mode-row">
+                <button type="button"
+                  className={`btn tiny${readmeViewMode === 'preview' ? ' primary' : ''}`}
+                  onClick={() => setReadmeViewMode('preview')}>预览</button>
+                <button type="button"
+                  className={`btn tiny${readmeViewMode === 'edit' ? ' primary' : ''}`}
+                  onClick={() => setReadmeViewMode('edit')} disabled={!canWrite}>编辑</button>
+                {!canWrite && <span className="muted small">（只读项目）</span>}
+              </div>
               {readmeTab === 'table' && (
                 <>
                   {!selected && <p className="muted small">请在左侧选择一张表。</p>}
-                  {selected && (
+                  {selected && readmeViewMode === 'preview' && (
+                    <div className="markdown-preview">
+                      {tableReadmeDraft.trim()
+                        ? <ReactMarkdown>{tableReadmeDraft}</ReactMarkdown>
+                        : <p className="muted small">（此表暂无 README）</p>}
+                    </div>
+                  )}
+                  {selected && readmeViewMode === 'edit' && (
                     <>
-                      <p className="readme-tabs">
-                        <strong>表: {selected}</strong>
-                      </p>
                       <textarea
                         className="readme-textarea"
                         value={tableReadmeDraft}
@@ -740,7 +791,7 @@ export default function Workbench() {
                       {canWrite && (
                         <div className="readme-save-row">
                           <button type="button" className="btn tiny primary" onClick={() => void saveTableReadme()}>
-                            保存表 README
+                            保存
                           </button>
                         </div>
                       )}
@@ -750,92 +801,100 @@ export default function Workbench() {
               )}
               {readmeTab === 'global' && (
                 <>
-                  <textarea
-                    className="readme-textarea"
-                    value={globalReadmeDraft}
-                    onChange={(e) => setGlobalReadmeDraft(e.target.value)}
-                    disabled={!canWrite}
-                    spellCheck={false}
-                  />
-                  {canWrite && (
-                    <div className="readme-save-row">
-                      <button type="button" className="btn tiny primary" onClick={() => void saveGlobalReadme()}>
-                        保存全局 README
-                      </button>
+                  {readmeViewMode === 'preview' && (
+                    <div className="markdown-preview">
+                      {globalReadmeDraft.trim()
+                        ? <ReactMarkdown>{globalReadmeDraft}</ReactMarkdown>
+                        : <p className="muted small">（暂无全局 README）</p>}
                     </div>
+                  )}
+                  {readmeViewMode === 'edit' && (
+                    <>
+                      <textarea
+                        className="readme-textarea"
+                        value={globalReadmeDraft}
+                        onChange={(e) => setGlobalReadmeDraft(e.target.value)}
+                        disabled={!canWrite}
+                        spellCheck={false}
+                      />
+                      {canWrite && (
+                        <div className="readme-save-row">
+                          <button type="button" className="btn tiny primary" onClick={() => void saveGlobalReadme()}>
+                            保存
+                          </button>
+                        </div>
+                      )}
+                    </>
                   )}
                 </>
               )}
-            </>
+            </div>
           )}
 
-          {sideTab === 'validation' && (
-            <>
-              <h3>校验规则 JSON</h3>
-              {!selected && <p className="muted small">请选择表后编辑 rules。</p>}
-              {selected && (
-                <>
-                  <p className="muted small">
-                    支持 type: <code>not_null</code>、<code>min_max</code>（min/max）、<code>regex</code>（pattern，可选 full_match）。
-                  </p>
-                  <textarea
-                    className="readme-textarea"
-                    value={validationRulesDraft}
-                    onChange={(e) => setValidationRulesDraft(e.target.value)}
-                    disabled={!canWrite}
-                    spellCheck={false}
-                  />
-                  {canWrite && (
-                    <div className="readme-save-row">
-                      <button type="button" className="btn tiny primary" onClick={() => void saveValidationRules()}>
-                        保存到表
-                      </button>
-                    </div>
-                  )}
-                </>
-              )}
-            </>
-          )}
-
-          {sideTab === 'snapshots' && (
-            <>
-              <h3>快照列表</h3>
-              <button type="button" className="btn tiny" onClick={() => void loadSnapshots()}>
-                刷新列表
-              </button>
-              {snapshots.length === 0 ? (
-                <p className="muted small">暂无快照。</p>
-              ) : (
-                <ul className="wb-snap-list">
-                  {snapshots.map((s) => (
-                    <li key={s.id}>
-                      <label className="wb-snap-row">
-                        <input
-                          type="radio"
-                          name="snapPick"
-                          checked={compareSnapshotId === s.id}
-                          onChange={() => setCompareSnapshotId(s.id)}
-                        />
-                        <span>
-                          #{s.id} {s.label}
-                          <small className="muted"> {s.created_at}</small>
-                        </span>
-                      </label>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <div className="readme-save-row">
-                <button type="button" className="btn tiny" disabled={compareSnapshotId == null} onClick={() => void runSnapshotCompare()}>
-                  与当前库对比
+          {sideTab === 'advanced' && (
+            <div className="wb-right-pane">
+              <details open={false} className="wb-adv-section">
+                <summary>校验规则 JSON</summary>
+                {!selected && <p className="muted small">请选择表后编辑 rules。</p>}
+                {selected && (
+                  <>
+                    <p className="muted small">
+                      支持 type: <code>not_null</code>、<code>min_max</code>、<code>regex</code>。
+                    </p>
+                    <textarea
+                      className="readme-textarea"
+                      value={validationRulesDraft}
+                      onChange={(e) => setValidationRulesDraft(e.target.value)}
+                      disabled={!canWrite}
+                      spellCheck={false}
+                    />
+                    {canWrite && (
+                      <div className="readme-save-row">
+                        <button type="button" className="btn tiny primary" onClick={() => void saveValidationRules()}>
+                          保存
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )}
+              </details>
+              <details open={false} className="wb-adv-section">
+                <summary>快照</summary>
+                <button type="button" className="btn tiny" onClick={() => void loadSnapshots()}>
+                  刷新列表
                 </button>
-              </div>
-              {compareText && (
-                <pre className="wb-compare-pre" style={{ marginTop: '0.5rem', fontSize: '0.75rem', overflow: 'auto' }}>
-                  {compareText}
-                </pre>
-              )}
-            </>
+                {snapshots.length === 0 ? (
+                  <p className="muted small">暂无快照。</p>
+                ) : (
+                  <ul className="wb-snap-list">
+                    {snapshots.map((s) => (
+                      <li key={s.id}>
+                        <label className="wb-snap-row">
+                          <input
+                            type="radio"
+                            name="snapPick"
+                            checked={compareSnapshotId === s.id}
+                            onChange={() => setCompareSnapshotId(s.id)}
+                          />
+                          <span>
+                            #{s.id} {s.label}
+                            <small className="muted"> {s.created_at}</small>
+                          </span>
+                        </label>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <div className="readme-save-row">
+                  <button type="button" className="btn tiny" disabled={compareSnapshotId == null} onClick={() => void runSnapshotCompare()}>
+                    与当前库对比
+                  </button>
+                </div>
+                {compareText && (
+                  <pre className="wb-compare-pre">{compareText}</pre>
+                )}
+              </details>
+            </div>
           )}
         </aside>
       </div>
