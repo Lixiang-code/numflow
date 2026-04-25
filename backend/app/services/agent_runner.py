@@ -361,7 +361,7 @@ def run_agent_sse(
             model=_model,
             messages=design_messages,
             temperature=0.2,
-            max_tokens=1200,
+            max_tokens=3200,
             stream=True,
         )
         for chunk in stream:
@@ -400,7 +400,7 @@ def run_agent_sse(
             model=_model,
             messages=review_messages,
             temperature=0.2,
-            max_tokens=900,
+            max_tokens=2400,
             stream=True,
         )
         for chunk in stream:
