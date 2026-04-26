@@ -376,6 +376,9 @@ def run_agent_sse(
         "【5/4 路由提示词】" + routed_prompt if routed_prompt else ""
     )
 
+    # ---- 用户消息事件（供监控追踪）----
+    yield _emit("meta", {"type": "user_message", "content": user_message, "model": _model})
+
     # ---- 1) design ----
     design_messages: List[Dict[str, Any]] = [
         {"role": "system", "content": base_system},
@@ -386,6 +389,8 @@ def run_agent_sse(
     design_messages.append({"role": "user", "content": user_message})
 
     yield _emit("design", {"type": "log", "message": "design 阶段开始（无工具，三段式 CoT，流式）"})
+    # 发出完整消息快照供监控
+    yield _emit("design", {"type": "phase_messages", "phase": "design", "messages": design_messages})
     design_text = ""
     try:
         stream = client.chat.completions.create(
@@ -425,6 +430,8 @@ def run_agent_sse(
     )
 
     yield _emit("review", {"type": "log", "message": "review 阶段开始（无工具，自审，流式）"})
+    # 发出完整消息快照供监控
+    yield _emit("review", {"type": "phase_messages", "phase": "review", "messages": review_messages})
     review_text = ""
     try:
         stream = client.chat.completions.create(
@@ -470,6 +477,8 @@ def run_agent_sse(
     )
 
     yield _emit("execute", {"type": "log", "message": "execute 阶段开始（启用工具循环）"})
+    # 发出初始消息快照（后续每轮 LLM 调用前也会更新）
+    yield _emit("execute", {"type": "phase_messages", "phase": "execute", "messages": list(execute_messages)})
     final_text = ""
     round_i = 0
     consec_errors = 0   # 连续错误计数（重置于成功）
@@ -529,6 +538,9 @@ def run_agent_sse(
             "execute",
             {"type": "log", "message": f"模型推理轮次 {round_i}"},
         )
+        # 每轮 LLM 调用前发出完整消息快照（包含历史工具调用/结果）
+        if round_i > 1:
+            yield _emit("execute", {"type": "phase_messages", "phase": "execute", "round": round_i, "messages": list(execute_messages)})
         try:
             resp = client.chat.completions.create(
                 model=_model,

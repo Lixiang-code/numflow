@@ -15,6 +15,7 @@ from app.deps import ProjectDB, get_project_read, get_project_write
 from app.config import DASHSCOPE_API_KEY, QWEN_MODEL
 from app.db.project_schema import (
     create_agent_session,
+    get_agent_session_messages,
     list_agent_sessions,
     update_agent_session,
 )
@@ -56,9 +57,23 @@ def _session_tracking_wrapper(
     tools: list[dict] = []
     tool_map: dict[str, dict] = {}
 
+    # Full conversation tracking: list of {phase, round?, messages:[{role,content}]}
+    conversation_turns: list[dict] = []
+    _user_message_stored = False
+    _model_stored = ""
+
     def _flush_tools() -> None:
         try:
             update_agent_session(conn, session_id, tools_json=json.dumps(tools, ensure_ascii=False))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _flush_messages() -> None:
+        try:
+            update_agent_session(
+                conn, session_id,
+                messages_json=json.dumps(conversation_turns, ensure_ascii=False),
+            )
         except Exception:  # noqa: BLE001
             pass
 
@@ -71,7 +86,35 @@ def _session_tracking_wrapper(
                     phase = str(raw.get("phase", ""))
                     etype = str(raw.get("type", ""))
 
-                    if etype == "token":
+                    # ── 用户消息 & 模型元信息 ──
+                    if etype == "user_message":
+                        if not _user_message_stored:
+                            _user_message_stored = True
+                            _model_stored = str(raw.get("model", ""))
+                            try:
+                                update_agent_session(
+                                    conn, session_id,
+                                    user_message=str(raw.get("content", ""))[:4000],
+                                    model_used=_model_stored,
+                                )
+                            except Exception:  # noqa: BLE001
+                                pass
+
+                    # ── 完整消息快照 ──
+                    elif etype == "phase_messages":
+                        msgs = raw.get("messages", [])
+                        if msgs:
+                            turn = {
+                                "phase": str(raw.get("phase", phase)),
+                                "messages": msgs,
+                            }
+                            rnd = raw.get("round")
+                            if rnd is not None:
+                                turn["round"] = rnd
+                            conversation_turns.append(turn)
+                            _flush_messages()
+
+                    elif etype == "token":
                         text = str(raw.get("text", ""))
                         if phase == "design":
                             design_buf.append(text)
@@ -133,6 +176,7 @@ def _session_tracking_wrapper(
                                 review_text="".join(review_buf),
                                 execute_text=str(raw.get("full_text", "".join(execute_buf))),
                                 tools_json=json.dumps(tools, ensure_ascii=False),
+                                messages_json=json.dumps(conversation_turns, ensure_ascii=False),
                                 finished=True,
                             )
                         except Exception:  # noqa: BLE001
@@ -147,6 +191,7 @@ def _session_tracking_wrapper(
                                 review_text="".join(review_buf),
                                 execute_text="".join(execute_buf),
                                 tools_json=json.dumps(tools, ensure_ascii=False),
+                                messages_json=json.dumps(conversation_turns, ensure_ascii=False),
                                 error_text=str(raw.get("message", ""))[:2000],
                                 finished=True,
                             )
@@ -220,6 +265,21 @@ def agent_sessions(
     except Exception:  # noqa: BLE001
         sessions = []
     return {"sessions": sessions}
+
+
+@router.get("/sessions/{agent_session_id}")
+def agent_session_detail(
+    agent_session_id: int,
+    p: ProjectDB = Depends(get_project_read),
+) -> Dict[str, Any]:
+    """Return a single session with its complete messages trace (system/user/assistant/tool)."""
+    try:
+        session = get_agent_session_messages(p.conn, agent_session_id)
+    except Exception:  # noqa: BLE001
+        session = None
+    if not session:
+        raise HTTPException(status_code=404, detail="session not found")
+    return session
 
 
 class DiagnosticsRunBody(BaseModel):

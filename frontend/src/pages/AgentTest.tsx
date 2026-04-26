@@ -33,6 +33,21 @@ type ToolEntry = {
 
 type RouteInfo = { step: string | null; template_key: string | null; log: string | null }
 
+// ─── 完整对话类型 ──────────────────────────────────────────────────────────
+type LlmMessage = {
+  role: 'system' | 'user' | 'assistant' | 'tool'
+  content: string | null
+  tool_calls?: Array<{ id: string; type?: string; function: { name: string; arguments: string } }>
+  tool_call_id?: string
+  name?: string
+}
+
+type ConversationTurn = {
+  phase: string
+  round?: number
+  messages: LlmMessage[]
+}
+
 type Metrics = {
   startedAt: string
   finishedAt: string | null
@@ -231,6 +246,123 @@ function HistorySidebar({
   )
 }
 
+// ─── 完整对话视图 ──────────────────────────────────────────────────────────
+function CollapsibleText({ text, previewLen = 300 }: { text: string; previewLen?: number }) {
+  const [open, setOpen] = useState(false)
+  if (text.length <= previewLen) return <pre style={{ whiteSpace: 'pre-wrap', margin: 0, fontSize: '0.78rem' }}>{text}</pre>
+  return (
+    <div>
+      <pre style={{ whiteSpace: 'pre-wrap', margin: 0, fontSize: '0.78rem' }}>{open ? text : text.slice(0, previewLen) + '…'}</pre>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        style={{ marginTop: '4px', fontSize: '0.7rem', background: 'none', border: 'none', color: '#888', cursor: 'pointer', padding: 0 }}>
+        {open ? '▲ 折叠' : `▼ 展开全文（${text.length} 字符）`}
+      </button>
+    </div>
+  )
+}
+
+function LlmMessageBubble({ msg, index }: { msg: LlmMessage; index: number }) {
+  const [collapsed, setCollapsed] = useState(msg.role === 'system')
+  const content = msg.content ?? ''
+  const isLong = content.length > 400
+
+  const roleConfig: Record<string, { label: string; bg: string; color: string; border: string }> = {
+    system:    { label: '⚙ SYSTEM', bg: '#1e2233', color: '#a0b0d0', border: '#2d3a5a' },
+    user:      { label: '👤 USER',   bg: '#1a2f4a', color: '#7ec8e3', border: '#2a5080' },
+    assistant: { label: '🤖 AI',     bg: '#1e2820', color: '#90d498', border: '#2a4030' },
+    tool:      { label: '🔧 TOOL结果', bg: '#2a2010', color: '#d4b060', border: '#503a10' },
+  }
+  const rc = roleConfig[msg.role] ?? { label: msg.role, bg: '#222', color: '#ccc', border: '#444' }
+
+  return (
+    <div key={index} style={{ marginBottom: '8px', borderRadius: '6px', border: `1px solid ${rc.border}`, background: rc.bg, overflow: 'hidden' }}>
+      <div
+        style={{ padding: '5px 10px', display: 'flex', alignItems: 'center', gap: '8px', cursor: isLong || msg.role === 'system' ? 'pointer' : 'default', userSelect: 'none' }}
+        onClick={() => (isLong || msg.role === 'system') && setCollapsed(!collapsed)}
+      >
+        <span style={{ fontWeight: 700, fontSize: '0.7rem', color: rc.color, minWidth: '90px' }}>{rc.label}</span>
+        {msg.tool_call_id && <code style={{ fontSize: '0.65rem', color: '#888' }}>id:{msg.tool_call_id.slice(-8)}</code>}
+        {msg.name && <code style={{ fontSize: '0.65rem', color: '#aaa' }}>{msg.name}</code>}
+        {(isLong || msg.role === 'system') && (
+          <span style={{ marginLeft: 'auto', fontSize: '0.65rem', color: '#666' }}>
+            {collapsed ? `▼ 展开（${content.length}字）` : '▲ 折叠'}
+          </span>
+        )}
+      </div>
+      {!collapsed && (
+        <div style={{ padding: '6px 10px 8px', borderTop: `1px solid ${rc.border}` }}>
+          {content ? (
+            <CollapsibleText text={content} previewLen={2000} />
+          ) : (
+            <span style={{ color: '#666', fontSize: '0.75rem' }}>（无文本内容）</span>
+          )}
+          {msg.tool_calls && msg.tool_calls.length > 0 && (
+            <div style={{ marginTop: '6px' }}>
+              {msg.tool_calls.map((tc, tci) => (
+                <div key={tci} style={{ background: '#2a2010', border: '1px solid #504010', borderRadius: '4px', padding: '5px 8px', marginBottom: '4px', fontSize: '0.75rem' }}>
+                  <span style={{ color: '#f0a830', fontWeight: 600 }}>🔨 {tc.function.name}</span>
+                  <code style={{ color: '#888', marginLeft: '8px', fontSize: '0.65rem' }}>call_id:{tc.id.slice(-8)}</code>
+                  <CollapsibleText text={tc.function.arguments} previewLen={300} />
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ConversationView({ turns }: { turns: ConversationTurn[] }) {
+  if (turns.length === 0) {
+    return (
+      <div style={{ padding: '2rem', textAlign: 'center', color: '#666' }}>
+        <p>📭 暂无完整对话记录</p>
+        <p style={{ fontSize: '0.8rem', marginTop: '0.5rem' }}>新会话运行后会自动记录所有提示词和消息。历史会话需重新运行才能查看。</p>
+      </div>
+    )
+  }
+
+  // Deduplicate: for execute phase, only keep the last snapshot (most complete)
+  // For design/review, keep the one per phase
+  const phaseLastTurn: Record<string, ConversationTurn> = {}
+  const executeRounds: ConversationTurn[] = []
+  for (const t of turns) {
+    if (t.phase === 'execute') executeRounds.push(t)
+    else phaseLastTurn[t.phase] = t
+  }
+
+  const sections: Array<{ title: string; messages: LlmMessage[]; key: string }> = []
+  if (phaseLastTurn['design']) sections.push({ title: '📐 Design 阶段（发送给 AI 的完整消息）', messages: phaseLastTurn['design'].messages, key: 'design' })
+  if (phaseLastTurn['review']) sections.push({ title: '🔍 Review 阶段（发送给 AI 的完整消息）', messages: phaseLastTurn['review'].messages, key: 'review' })
+  if (executeRounds.length > 0) {
+    const lastRound = executeRounds[executeRounds.length - 1]
+    sections.push({
+      title: `⚙️ Execute 阶段完整对话（共 ${executeRounds.length} 轮，最终第 ${lastRound.round ?? executeRounds.length} 轮消息）`,
+      messages: lastRound.messages,
+      key: 'execute',
+    })
+  }
+
+  return (
+    <div style={{ padding: '0.5rem' }}>
+      <p style={{ fontSize: '0.75rem', color: '#666', marginBottom: '1rem' }}>
+        💡 系统提示词默认折叠，点击标题展开。所有内容均为实际发送给 AI 的原文。
+      </p>
+      {sections.map(sec => (
+        <div key={sec.key} style={{ marginBottom: '1.5rem' }}>
+          <h4 style={{ fontSize: '0.85rem', color: '#aaa', marginBottom: '0.5rem', padding: '6px 8px', background: '#1a1a2e', borderRadius: '4px' }}>
+            {sec.title}
+          </h4>
+          {sec.messages.map((msg, i) => <LlmMessageBubble key={i} msg={msg} index={i} />)}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // ─── 主组件 ────────────────────────────────────────────────────────────────
 export default function AgentTest() {
   const [search, setSearch] = useSearchParams()
@@ -251,6 +383,8 @@ export default function AgentTest() {
   const [tools, setTools] = useState<ToolEntry[]>([])
   const [routeInfo, setRouteInfo] = useState<RouteInfo | null>(null)
   const [metrics, setMetrics] = useState<Metrics | null>(null)
+  const [conversationTurns, setConversationTurns] = useState<ConversationTurn[]>([])
+  const [activeView, setActiveView] = useState<'phases' | 'conversation'>('phases')
 
   // 历史
   const [history, setHistory] = useState<Session[]>(() => {
@@ -400,6 +534,7 @@ export default function AgentTest() {
   const resetView = useCallback(() => {
     setLivePhase(''); setPhases({}); setTools([]); setRouteInfo(null)
     setMetrics(null); setErr(null); setCurSession(null); setViewSession(null)
+    setConversationTurns([])
   }, [])
 
   const runAgent = async (e: FormEvent) => {
@@ -482,6 +617,15 @@ export default function AgentTest() {
               ts: ev.ts, kind: 'result', name: String(raw.name ?? ''),
               body: String(raw.preview ?? ''),
             })
+          } else if (type === 'phase_messages') {
+            const msgs = raw.messages as LlmMessage[] | undefined
+            if (Array.isArray(msgs) && msgs.length > 0) {
+              setConversationTurns(prev => [...prev, {
+                phase: String(raw.phase ?? phase),
+                round: raw.round !== undefined ? Number(raw.round) : undefined,
+                messages: msgs,
+              }])
+            }
           } else if (type === 'done') {
             const fin = new Date().toISOString()
             setMetrics({
@@ -570,6 +714,20 @@ export default function AgentTest() {
     setPhases(ph)
     setTools(tl)
     setMetrics({ ...s.metrics, toolCalls: tc })
+
+    // 若是服务端会话，尝试拉取完整对话记录
+    if (s.id.startsWith('srv_')) {
+      const numId = s.id.replace('srv_', '')
+      void apiFetch(`/agent/sessions/${numId}`, { headers })
+        .then((d: unknown) => {
+          const data = d as { messages?: ConversationTurn[] }
+          const msgs = data?.messages
+          if (Array.isArray(msgs) && msgs.length > 0) {
+            setConversationTurns(msgs as ConversationTurn[])
+          }
+        })
+        .catch(() => {/* 静默失败 */})
+    }
   }
 
   // 当前展示：活跃会话 or 历史回看
@@ -705,8 +863,36 @@ export default function AgentTest() {
             </>
           )}
 
+          {/* 视图切换 Tab 栏 */}
+          {(displayMetrics || busy || conversationTurns.length > 0) && (
+            <div style={{ display: 'flex', gap: '4px', marginBottom: '0.5rem', borderBottom: '1px solid #2a2a3e', paddingBottom: '4px' }}>
+              <button
+                type="button"
+                onClick={() => setActiveView('phases')}
+                style={{
+                  padding: '5px 14px', fontSize: '0.8rem', border: 'none', borderRadius: '4px 4px 0 0', cursor: 'pointer',
+                  background: activeView === 'phases' ? '#2a3060' : 'transparent',
+                  color: activeView === 'phases' ? '#7ec8e3' : '#888',
+                  fontWeight: activeView === 'phases' ? 700 : 400,
+                }}>
+                📊 三阶段面板
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveView('conversation')}
+                style={{
+                  padding: '5px 14px', fontSize: '0.8rem', border: 'none', borderRadius: '4px 4px 0 0', cursor: 'pointer',
+                  background: activeView === 'conversation' ? '#2a3060' : 'transparent',
+                  color: activeView === 'conversation' ? '#7ec8e3' : '#888',
+                  fontWeight: activeView === 'conversation' ? 700 : 400,
+                }}>
+                💬 完整对话 {conversationTurns.length > 0 ? `(${conversationTurns.length}段)` : ''}
+              </button>
+            </div>
+          )}
+
           {/* 路由信息 */}
-          {routeInfo && (
+          {routeInfo && activeView === 'phases' && (
             <div className="am-route-block">
               <h4>🔀 提示词路由</h4>
               {routeInfo.step && <p>当前步骤：<code>{routeInfo.step}</code></p>}
@@ -716,7 +902,7 @@ export default function AgentTest() {
           )}
 
           {/* 三阶段面板 */}
-          {phaseOrder.map(({ key, label }) => {
+          {activeView === 'phases' && phaseOrder.map(({ key, label }) => {
             const ps = displayPhases[key]
             if (!ps && livePhase !== key) return null
             const phaseTool = key === 'execute' ? displayTools : undefined
@@ -730,6 +916,11 @@ export default function AgentTest() {
               />
             )
           })}
+
+          {/* 完整对话视图 */}
+          {activeView === 'conversation' && (
+            <ConversationView turns={conversationTurns} />
+          )}
 
           {/* 等待开始提示 */}
           {!busy && !displayMetrics && (

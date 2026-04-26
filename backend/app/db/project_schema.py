@@ -221,6 +221,9 @@ def update_agent_session(
     execute_text: Optional[str] = None,
     tools_json: Optional[str] = None,
     error_text: Optional[str] = None,
+    messages_json: Optional[str] = None,
+    user_message: Optional[str] = None,
+    model_used: Optional[str] = None,
     finished: bool = False,
 ) -> None:
     """Partial update of a session record (only non-None fields are updated)."""
@@ -238,6 +241,21 @@ def update_agent_session(
         fields.append("tools_json = ?"); params.append(tools_json)
     if error_text is not None:
         fields.append("error_text = ?"); params.append(error_text)
+    if messages_json is not None:
+        try:
+            fields.append("messages_json = ?"); params.append(messages_json)
+        except Exception:  # noqa: BLE001
+            pass
+    if user_message is not None:
+        try:
+            fields.append("user_message = ?"); params.append(user_message)
+        except Exception:  # noqa: BLE001
+            pass
+    if model_used is not None:
+        try:
+            fields.append("model_used = ?"); params.append(model_used)
+        except Exception:  # noqa: BLE001
+            pass
     if finished:
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         fields.append("finished_at = ?"); params.append(now)
@@ -255,19 +273,20 @@ def list_agent_sessions(
     step_id: Optional[str] = None,
 ) -> list:
     """Return all agent sessions (newest first), optionally filtered by step_id."""
+    cols = (
+        "id, step_id, status, started_at, finished_at, "
+        "design_text, review_text, execute_text, tools_json, error_text, "
+        "COALESCE(user_message,'') AS user_message, "
+        "COALESCE(model_used,'') AS model_used"
+    )
     if step_id:
         cur = conn.execute(
-            """SELECT id, step_id, status, started_at, finished_at,
-                      design_text, review_text, execute_text, tools_json, error_text
-               FROM _agent_sessions WHERE step_id = ?
-               ORDER BY id DESC LIMIT ?""",
+            f"SELECT {cols} FROM _agent_sessions WHERE step_id = ? ORDER BY id DESC LIMIT ?",
             (step_id, int(limit)),
         )
     else:
         cur = conn.execute(
-            """SELECT id, step_id, status, started_at, finished_at,
-                      design_text, review_text, execute_text, tools_json, error_text
-               FROM _agent_sessions ORDER BY id DESC LIMIT ?""",
+            f"SELECT {cols} FROM _agent_sessions ORDER BY id DESC LIMIT ?",
             (int(limit),),
         )
     out: list = []
@@ -287,8 +306,52 @@ def list_agent_sessions(
             "execute_text": row[7] or "",
             "tools": tools,
             "error_text": row[9],
+            "user_message": row[10] or "",
+            "model_used": row[11] or "",
         })
     return out
+
+
+def get_agent_session_messages(conn: sqlite3.Connection, session_id: int) -> Optional[Dict[str, Any]]:
+    """Return a single session with its full messages_json trace."""
+    try:
+        cur = conn.execute(
+            """SELECT id, step_id, status, started_at, finished_at,
+                      design_text, review_text, execute_text, tools_json, error_text,
+                      COALESCE(messages_json,'[]') AS messages_json,
+                      COALESCE(user_message,'') AS user_message,
+                      COALESCE(model_used,'') AS model_used
+               FROM _agent_sessions WHERE id = ?""",
+            (session_id,),
+        )
+        row = cur.fetchone()
+    except Exception:  # noqa: BLE001
+        return None
+    if not row:
+        return None
+    try:
+        tools = json.loads(row[8] or "[]")
+    except json.JSONDecodeError:
+        tools = []
+    try:
+        messages = json.loads(row[10] or "[]")
+    except json.JSONDecodeError:
+        messages = []
+    return {
+        "id": row[0],
+        "step_id": row[1],
+        "status": row[2],
+        "started_at": row[3],
+        "finished_at": row[4],
+        "design_text": row[5] or "",
+        "review_text": row[6] or "",
+        "execute_text": row[7] or "",
+        "tools": tools,
+        "error_text": row[9],
+        "messages": messages,
+        "user_message": row[11] or "",
+        "model_used": row[12] or "",
+    }
 
 
 def get_latest_agent_session(conn: sqlite3.Connection, step_id: str) -> Optional[Dict[str, Any]]:

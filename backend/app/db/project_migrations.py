@@ -71,4 +71,9 @@ def ensure_project_migrations(conn: sqlite3.Connection) -> None:
     # column_meta 增加 display_lang（@cn=/@en=/@= 渲染模式）
     _add_column_if_missing(conn, "_table_registry", "display_lang_default", "TEXT NOT NULL DEFAULT ''")
 
+    # Agent 全链路对话追踪：存储完整的消息序列（system/user/assistant/tool）
+    _add_column_if_missing(conn, "_agent_sessions", "messages_json", "TEXT NOT NULL DEFAULT '[]'")
+    _add_column_if_missing(conn, "_agent_sessions", "user_message", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "_agent_sessions", "model_used", "TEXT NOT NULL DEFAULT ''")
+
     conn.commit()
