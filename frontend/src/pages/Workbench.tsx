@@ -9,7 +9,7 @@ import { UniverSheetsCorePreset, type FWorkbook } from '@univerjs/preset-sheets-
 import UniverZhCN from '@univerjs/preset-sheets-core/locales/zh-CN'
 import '@univerjs/preset-sheets-core/lib/index.css'
 
-type TableInfo = { table_name: string; validation_status: string; layer: string; purpose?: string; display_name?: string }
+type TableInfo = { table_name: string; validation_status: string; layer: string; purpose?: string; display_name?: string; directory?: string; is_matrix?: boolean }
 type ColumnMeta = { name: string; sql_type?: string; display_name?: string; dtype?: string; number_format?: string }
 /** 列公式信息（含类型：sql / row / row_template） */
 type FormulaInfo = { formula: string; type: string }
@@ -1164,26 +1164,42 @@ export default function Workbench() {
                 <small className="tbl-purpose">全局/分表常数清单</small>
               </button>
             </li>
-            {tables.map((t) => {
-              const warn = validateReport?.per_table?.[t.table_name] === 'warn'
-              const cls = [selected === t.table_name ? 'sel' : '', warn ? 'row-warn' : ''].filter(Boolean).join(' ')
-              return (
-                <li key={t.table_name}>
-                  <button type="button" className={cls || undefined} onClick={() => setSelected(t.table_name)}>
-                    <span className="tbl-name">{t.display_name || t.table_name}</span>
-                    {t.display_name ? (
-                      <small className="tbl-en" title={t.table_name}>{t.table_name}</small>
-                    ) : null}
-                    {t.purpose ? (
-                      <small className="tbl-purpose" title={t.purpose}>
-                        {t.purpose}
-                      </small>
-                    ) : null}
-                    <small>{t.validation_status}</small>
-                  </button>
+            {(() => {
+              const groups: Record<string, TableInfo[]> = {}
+              tables.forEach((t) => {
+                const dir = t.directory || '（未分组）'
+                ;(groups[dir] ||= []).push(t)
+              })
+              const dirNames = Object.keys(groups).sort()
+              return dirNames.map((dir) => (
+                <li key={`__dir__${dir}`} className="dir-group">
+                  <div className="dir-name">{dir}</div>
+                  <ul className="dir-children">
+                    {groups[dir].map((t) => {
+                      const warn = validateReport?.per_table?.[t.table_name] === 'warn'
+                      const cls = [selected === t.table_name ? 'sel' : '', warn ? 'row-warn' : ''].filter(Boolean).join(' ')
+                      const tag = t.is_matrix ? '⇆ ' : ''
+                      return (
+                        <li key={t.table_name}>
+                          <button type="button" className={cls || undefined} onClick={() => setSelected(t.table_name)}>
+                            <span className="tbl-name">{tag}{t.display_name || t.table_name}</span>
+                            {t.display_name ? (
+                              <small className="tbl-en" title={t.table_name}>{t.table_name}</small>
+                            ) : null}
+                            {t.purpose ? (
+                              <small className="tbl-purpose" title={t.purpose}>
+                                {t.purpose}
+                              </small>
+                            ) : null}
+                            <small>{t.validation_status}</small>
+                          </button>
+                        </li>
+                      )
+                    })}
+                  </ul>
                 </li>
-              )
-            })}
+              ))
+            })()}
           </ul>
           {pipeline && (
             <div className="pipe-box">
