@@ -111,6 +111,31 @@ def describe_table(table_name: str, p: ProjectDB = Depends(get_project_read)):
         for r in curf.fetchall()
     }
 
+    # 相关常数：scope_table=t 或 全局
+    related_constants: List[Dict[str, Any]] = []
+    try:
+        cur_c = conn.execute(
+            "SELECT name_en, name_zh, value_json, brief, scope_table FROM _constants "
+            "WHERE scope_table IS NULL OR scope_table = '' OR scope_table = ? ORDER BY name_en",
+            (t,),
+        )
+        for r in cur_c.fetchall():
+            try:
+                v = json.loads(r["value_json"])
+            except Exception:  # noqa: BLE001
+                v = None
+            related_constants.append(
+                {
+                    "name_en": r["name_en"],
+                    "name_zh": r["name_zh"],
+                    "value": v,
+                    "brief": r["brief"],
+                    "scope_table": r["scope_table"],
+                }
+            )
+    except Exception:  # noqa: BLE001
+        related_constants = []
+
     return {
         "table_name": t,
         "readme": meta["readme"],
@@ -119,7 +144,16 @@ def describe_table(table_name: str, p: ProjectDB = Depends(get_project_read)):
         "validation_rules": rules_parsed,
         "column_formulas": column_formulas,
         "display_name": (json.loads(meta["schema_json"] or "{}") or {}).get("display_name", ""),
+        "related_constants": related_constants,
     }
+
+
+def _glossary_map(conn) -> Dict[str, str]:
+    try:
+        cur = conn.execute("SELECT term_en, term_zh FROM _glossary")
+        return {str(r["term_en"]): str(r["term_zh"]) for r in cur.fetchall()}
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 @router.get("/tables/{table_name}/rows")
@@ -128,6 +162,7 @@ def read_rows(
     p: ProjectDB = Depends(get_project_read),
     limit: int = Query(500, ge=1, le=5000),
     offset: int = Query(0, ge=0),
+    display: Literal["cn", "en", "raw"] = Query("raw"),
 ):
     t = _assert_table_name(table_name)
     conn = p.conn
@@ -139,7 +174,24 @@ def read_rows(
         raise HTTPException(status_code=404, detail="未知表")
     cur = conn.execute(f'SELECT * FROM "{t}" LIMIT ? OFFSET ?', (limit, offset))
     rows = [dict(r) for r in cur.fetchall()]
-    return {"rows": rows, "limit": limit, "offset": offset}
+    if display in ("cn", "en") and rows:
+        gmap = _glossary_map(conn)
+        if display == "en":
+            # raw 即英文 snake_case 存储；display=en 等价 raw
+            pass
+        else:
+            # cn：把列值（字符串型）按术语表映射；列名保持原样（前端使用 column_meta.display_name）
+            mapped: List[Dict[str, Any]] = []
+            for r in rows:
+                nr: Dict[str, Any] = {}
+                for k, v in r.items():
+                    if isinstance(v, str) and v in gmap:
+                        nr[k] = gmap[v]
+                    else:
+                        nr[k] = v
+                mapped.append(nr)
+            rows = mapped
+    return {"rows": rows, "limit": limit, "offset": offset, "display": display}
 
 
 class WriteCellItem(BaseModel):

@@ -91,6 +91,14 @@ export default function Workbench() {
   const [snapshots, setSnapshots] = useState<SnapshotRow[]>([])
   const [compareSnapshotId, setCompareSnapshotId] = useState<number | null>(null)
   const [compareText, setCompareText] = useState('')
+  /** 当前表关联的常数（来自 _constants） */
+  const [relatedConstants, setRelatedConstants] = useState<Array<{
+    name_en: string
+    name_zh: string
+    value: unknown
+    brief?: string
+    scope_table?: string | null
+  }>>([])
   const [pipeline, setPipeline] = useState<{
     next_expected_step: string | null
     completed_steps: string[]
@@ -495,6 +503,7 @@ export default function Workbench() {
           column_formulas?: Record<string, FormulaInfo | string> | null
           schema?: { columns?: { name?: string; sql_type?: string; display_name?: string; dtype?: string; number_format?: string }[] }
           display_name?: string
+          related_constants?: Array<{ name_en: string; name_zh: string; value: unknown; brief?: string; scope_table?: string | null }>
         }
         if (cancelled) return
         const rawRows = Array.isArray(r.rows) ? r.rows : []
@@ -532,6 +541,7 @@ export default function Workbench() {
         const vr = desc.validation_rules && typeof desc.validation_rules === 'object' ? desc.validation_rules : { rules: [] }
         setValidationRulesDraft(JSON.stringify(vr, null, 2))
         setColumnFormulas(cf)
+        setRelatedConstants(Array.isArray(desc.related_constants) ? desc.related_constants : [])
 
         // 写入 Univer 并切换到该 sheet
         populateSheet(selected, normalized, cols, cf, colMeta, displayName)
@@ -1176,6 +1186,34 @@ export default function Workbench() {
                   )}
                 </>
               )}
+            </details>
+            <details className="wb-adv-section">
+              <summary>相关常数（{relatedConstants.length}）</summary>
+              {relatedConstants.length === 0 ? (
+                <p className="muted small">暂无项目级 / 本表常数。可在 Agent 会话中通过 const_register 注册，或从 README 中识别 ${'${name}'} 引用。</p>
+              ) : (
+                <table className="wb-const-table small">
+                  <thead>
+                    <tr>
+                      <th>name_en</th>
+                      <th>中文</th>
+                      <th>value</th>
+                      <th>scope</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {relatedConstants.map((c) => (
+                      <tr key={c.name_en}>
+                        <td><code>{c.name_en}</code></td>
+                        <td>{c.name_zh || '—'}</td>
+                        <td>{typeof c.value === 'object' ? JSON.stringify(c.value) : String(c.value)}</td>
+                        <td className="muted small">{c.scope_table || '全局'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              <p className="muted small">公式中可用 <code>${'${name_en}'}</code> 引用；执行时自动替换为数值。</p>
             </details>
             <details className="wb-adv-section">
               <summary>快照（{snapshots.length}）</summary>

@@ -310,6 +310,142 @@ def _evaluate_rules_for_table(conn: sqlite3.Connection, table_name: str) -> Dict
             )
             continue
 
+        if rtype == "percent_bounds" and col:
+            try:
+                cq = assert_col_or_table(col)
+            except ValueError:
+                violations.append({"table": t, "rule_id": rid, "message": f"非法列 {col}"})
+                summaries.append({"rule_id": rid, "type": rtype, "column": col, "passed": False, "violation_count": 1})
+                continue
+            lo = float(rule.get("min", 0.0))
+            hi = float(rule.get("max", 0.95))
+            cur = conn.execute(f'SELECT row_id, "{cq}" FROM "{t}"')
+            local = []
+            for rr in cur.fetchall():
+                val = rr[cq]
+                if val is None:
+                    continue
+                try:
+                    fv = float(val)
+                except (TypeError, ValueError):
+                    continue
+                if fv < lo or fv > hi:
+                    local.append({"table": t, "rule_id": rid, "row_id": rr["row_id"], "column": cq, "message": f"percent_bounds: {fv} 不在 [{lo}, {hi}]"})
+            violations.extend(local)
+            summaries.append({"rule_id": rid, "type": rtype, "column": cq, "passed": len(local) == 0, "violation_count": len(local)})
+            continue
+
+        if rtype == "format_consistency" and col:
+            try:
+                cq = assert_col_or_table(col)
+            except ValueError:
+                violations.append({"table": t, "rule_id": rid, "message": f"非法列 {col}"})
+                summaries.append({"rule_id": rid, "type": rtype, "column": col, "passed": False, "violation_count": 1})
+                continue
+            cur = conn.execute('SELECT number_format FROM _column_meta WHERE table_name = ? AND column_name = ?', (t, cq))
+            row_meta = cur.fetchone()
+            nf = (row_meta["number_format"] if row_meta else "") or ""
+            local = []
+            if nf == "0.00%":
+                cur2 = conn.execute(f'SELECT row_id, "{cq}" FROM "{t}"')
+                for rr in cur2.fetchall():
+                    val = rr[cq]
+                    if val is None:
+                        continue
+                    try:
+                        fv = float(val)
+                    except (TypeError, ValueError):
+                        continue
+                    if fv > 10.0:
+                        local.append({"table": t, "rule_id": rid, "row_id": rr["row_id"], "column": cq, "message": f"format_consistency: number_format=0.00% 但值 {fv} > 10，疑似整数百分比写法"})
+            violations.extend(local)
+            summaries.append({"rule_id": rid, "type": rtype, "column": cq, "passed": len(local) == 0, "violation_count": len(local)})
+            continue
+
+        if rtype == "monotone_warning" and col:
+            try:
+                cq = assert_col_or_table(col)
+            except ValueError:
+                violations.append({"table": t, "rule_id": rid, "message": f"非法列 {col}"})
+                summaries.append({"rule_id": rid, "type": rtype, "column": col, "passed": False, "violation_count": 1})
+                continue
+            order_col = str(rule.get("order_by", "row_id"))
+            try:
+                ocq = assert_col_or_table(order_col)
+            except ValueError:
+                ocq = "row_id"
+            cur = conn.execute(f'SELECT "{ocq}" AS o, "{cq}" AS v FROM "{t}" ORDER BY CAST("{ocq}" AS REAL) ASC')
+            vals: List[float] = []
+            for rr in cur.fetchall():
+                if rr["v"] is None:
+                    continue
+                try:
+                    vals.append(float(rr["v"]))
+                except (TypeError, ValueError):
+                    continue
+            local = []
+            if len(vals) >= 3 and all(vals[i] < vals[i + 1] for i in range(len(vals) - 1)):
+                local.append({"table": t, "rule_id": rid, "column": cq, "message": "monotone_warning: 性价比类列严格单调递增，缺少阶段性拐点"})
+            violations.extend(local)
+            summaries.append({"rule_id": rid, "type": rtype, "column": cq, "passed": len(local) == 0, "violation_count": len(local)})
+            continue
+
+        if rtype == "formula_has_value" and col:
+            try:
+                cq = assert_col_or_table(col)
+            except ValueError:
+                violations.append({"table": t, "rule_id": rid, "message": f"非法列 {col}"})
+                summaries.append({"rule_id": rid, "type": rtype, "column": col, "passed": False, "violation_count": 1})
+                continue
+            cur = conn.execute('SELECT 1 FROM _formula_registry WHERE table_name = ? AND column_name = ?', (t, cq))
+            local = []
+            if cur.fetchone():
+                cur2 = conn.execute(f'SELECT row_id FROM "{t}" WHERE "{cq}" IS NULL')
+                for rr in cur2.fetchall():
+                    local.append({"table": t, "rule_id": rid, "row_id": rr["row_id"], "column": cq, "message": "formula_has_value: 公式列存在空值"})
+            violations.extend(local)
+            summaries.append({"rule_id": rid, "type": rtype, "column": cq, "passed": len(local) == 0, "violation_count": len(local)})
+            continue
+
+        if rtype == "not_empty_id" and col:
+            try:
+                cq = assert_col_or_table(col)
+            except ValueError:
+                violations.append({"table": t, "rule_id": rid, "message": f"非法列 {col}"})
+                summaries.append({"rule_id": rid, "type": rtype, "column": col, "passed": False, "violation_count": 1})
+                continue
+            cur = conn.execute(f"SELECT row_id FROM \"{t}\" WHERE \"{cq}\" IS NULL OR TRIM(CAST(\"{cq}\" AS TEXT))=''")
+            local = []
+            for rr in cur.fetchall():
+                local.append({"table": t, "rule_id": rid, "row_id": rr["row_id"], "column": cq, "message": "not_empty_id: ID/等级列不允许空"})
+            violations.extend(local)
+            summaries.append({"rule_id": rid, "type": rtype, "column": cq, "passed": len(local) == 0, "violation_count": len(local)})
+            continue
+
+        if rtype == "resource_hourly" and col:
+            try:
+                cq = assert_col_or_table(col)
+            except ValueError:
+                violations.append({"table": t, "rule_id": rid, "message": f"非法列 {col}"})
+                summaries.append({"rule_id": rid, "type": rtype, "column": col, "passed": False, "violation_count": 1})
+                continue
+            min_hourly = float(rule.get("min_hourly", 1.0))
+            cur = conn.execute(f'SELECT row_id, "{cq}" FROM "{t}"')
+            local = []
+            for rr in cur.fetchall():
+                val = rr[cq]
+                if val is None:
+                    continue
+                try:
+                    fv = float(val)
+                except (TypeError, ValueError):
+                    continue
+                if fv < min_hourly:
+                    local.append({"table": t, "rule_id": rid, "row_id": rr["row_id"], "column": cq, "message": f"resource_hourly: 小时产量 {fv} < 阈值 {min_hourly}"})
+            violations.extend(local)
+            summaries.append({"rule_id": rid, "type": rtype, "column": cq, "passed": len(local) == 0, "violation_count": len(local)})
+            continue
+
     return {"violations": violations, "rule_summaries": summaries}
 
 

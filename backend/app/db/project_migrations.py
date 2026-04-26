@@ -29,4 +29,46 @@ def ensure_project_migrations(conn: sqlite3.Connection) -> None:
         )
         """
     )
+
+    # 优化文档：术语映射表 + 常数注册表（中英名词混淆 / 常数裸塞修复）
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS _glossary (
+            term_en TEXT PRIMARY KEY,
+            term_zh TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'noun',
+            brief TEXT,
+            scope_table TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS _glossary_usage (
+            term_en TEXT NOT NULL,
+            table_name TEXT NOT NULL,
+            column_name TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (term_en, table_name, column_name)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS _constants (
+            name_en TEXT PRIMARY KEY,
+            name_zh TEXT NOT NULL DEFAULT '',
+            value_json TEXT NOT NULL,
+            brief TEXT,
+            scope_table TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+    # column_meta 增加 display_lang（@cn=/@en=/@= 渲染模式）
+    _add_column_if_missing(conn, "_table_registry", "display_lang_default", "TEXT NOT NULL DEFAULT ''")
+
     conn.commit()

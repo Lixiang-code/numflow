@@ -9,7 +9,14 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
-from app.services.formula_engine import eval_row_formula, eval_series, parse_formula_refs, parse_row_refs
+from app.services.formula_engine import (
+    eval_row_formula,
+    eval_series,
+    parse_constant_refs,
+    parse_formula_refs,
+    parse_row_refs,
+    substitute_constants,
+)
 
 Node = Tuple[str, str]
 
@@ -94,6 +101,35 @@ def _upsert_formula_provenance(
     )
 
 
+def _load_constants(conn: sqlite3.Connection, names: Set[str]) -> Tuple[Dict[str, Any], List[str]]:
+    """从 _constants 表批量取值；不存在的常量记入 missing。"""
+    if not names:
+        return {}, []
+    out: Dict[str, Any] = {}
+    missing: List[str] = []
+    try:
+        cur = conn.execute(
+            f"SELECT name_en, value_json FROM _constants WHERE name_en IN ({','.join(['?'] * len(names))})",
+            tuple(names),
+        )
+        rows = cur.fetchall()
+    except sqlite3.OperationalError:
+        return {}, list(names)
+    found = set()
+    for r in rows:
+        try:
+            import json as _json
+
+            out[r["name_en"]] = _json.loads(r["value_json"])
+        except Exception:  # noqa: BLE001
+            continue
+        found.add(r["name_en"])
+    for n in names:
+        if n not in found:
+            missing.append(n)
+    return out, missing
+
+
 def execute_formula_on_column(
     conn: sqlite3.Connection,
     table_name: str,
@@ -111,6 +147,13 @@ def execute_formula_on_column(
     if not row:
         raise ValueError("未注册公式")
     formula = row["formula"]
+    # ${name} 常量预替换
+    const_names = parse_constant_refs(formula)
+    if const_names:
+        consts, missing = _load_constants(conn, const_names)
+        if missing:
+            raise ValueError(f"公式引用未注册常量：{', '.join(missing)}")
+        formula, _miss = substitute_constants(formula, consts)
     refs = parse_formula_refs(formula)
     frames: Dict[str, pd.DataFrame] = {table_name: load_table_df(conn, table_name)}
     for rt, _rc in refs:
@@ -149,7 +192,14 @@ def execute_formula_on_column(
     return {"ok": True, "rows_updated": updated, "rows_total": len(df)}
 
 
-def register_formula(conn: sqlite3.Connection, table_name: str, column_name: str, formula: str) -> Dict[str, Any]:
+def register_formula(
+    conn: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    formula: str,
+    *,
+    defer: bool = False,
+) -> Dict[str, Any]:
     refs: Set[Tuple[str, str]] = parse_formula_refs(formula)
     cur = conn.execute(
         "SELECT 1 FROM _table_registry WHERE table_name = ?",
@@ -179,13 +229,14 @@ def register_formula(conn: sqlite3.Connection, table_name: str, column_name: str
             (table_name, column_name, rt, rc),
         )
     conn.commit()
-    # 注册成功后尝试自动执行一次（行存在的情况下立即填值）。失败不影响注册结果。
+    # 注册成功后尝试自动执行一次（除非 defer=True）。失败不影响注册结果。
     auto_executed: Optional[Dict[str, Any]] = None
     auto_error: Optional[str] = None
-    try:
-        auto_executed = execute_formula_on_column(conn, table_name, column_name)
-    except Exception as e:  # noqa: BLE001
-        auto_error = str(e)
+    if not defer:
+        try:
+            auto_executed = execute_formula_on_column(conn, table_name, column_name)
+        except Exception as e:  # noqa: BLE001
+            auto_error = str(e)
     out: Dict[str, Any] = {"ok": True, "refs": [{"table": t, "column": c} for t, c in sorted(refs)]}
     if auto_executed is not None:
         out["auto_executed"] = auto_executed

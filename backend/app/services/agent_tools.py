@@ -512,6 +512,112 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "glossary_register",
+            "description": "注册或更新一个术语（中英对照）。term_en 必须 snake_case；term_zh 必须中文；scope_table 可空表示全局。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "term_en": {"type": "string", "description": "英文 snake_case 名"},
+                    "term_zh": {"type": "string", "description": "中文展示名"},
+                    "kind": {"type": "string", "enum": ["noun", "metric", "system", "resource", "stat"], "default": "noun"},
+                    "brief": {"type": "string"},
+                    "scope_table": {"type": "string", "description": "可选，限定该术语只用于某张表"},
+                },
+                "required": ["term_en", "term_zh"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "glossary_lookup",
+            "description": "按 term_en 或 term_zh 查询术语（任一条件即可，term_en 优先）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "term_en": {"type": "string"},
+                    "term_zh": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "glossary_list",
+            "description": "列出所有术语（可按 scope_table 过滤）",
+            "parameters": {
+                "type": "object",
+                "properties": {"scope_table": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "const_register",
+            "description": "注册项目常数（用于公式中的 ${name} 替换；同名 upsert）。value 必须为 number 或可转 number 的字符串。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name_en": {"type": "string"},
+                    "name_zh": {"type": "string"},
+                    "value": {"type": ["number", "string"]},
+                    "brief": {"type": "string"},
+                    "scope_table": {"type": "string"},
+                },
+                "required": ["name_en", "value"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "const_set",
+            "description": "更新已存在常数的 value（不存在则报 error）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name_en": {"type": "string"},
+                    "value": {"type": ["number", "string"]},
+                },
+                "required": ["name_en", "value"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "const_list",
+            "description": "列出所有常数（可按 scope_table 过滤）",
+            "parameters": {
+                "type": "object",
+                "properties": {"scope_table": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "const_delete",
+            "description": "删除常数（按 name_en）",
+            "parameters": {
+                "type": "object",
+                "properties": {"name_en": {"type": "string"}},
+                "required": ["name_en"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 
@@ -1204,6 +1310,182 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
             )
     elif name == "get_default_system_rules":
         out = get_default_rules_payload()
+    elif name == "glossary_register":
+        out = _glossary_register(conn, args, p.can_write)
+    elif name == "glossary_lookup":
+        out = _glossary_lookup(conn, args)
+    elif name == "glossary_list":
+        out = _glossary_list(conn, args)
+    elif name == "const_register":
+        out = _const_register(conn, args, p.can_write)
+    elif name == "const_set":
+        out = _const_set(conn, args, p.can_write)
+    elif name == "const_list":
+        out = _const_list(conn, args)
+    elif name == "const_delete":
+        out = _const_delete(conn, args, p.can_write)
     else:
         out = {"error": f"未知工具 {name}"}
     return json.dumps(wrap_tool_payload(out), ensure_ascii=False)
+
+
+# ─── 术语 / 常数：实现 ───────────────────────────────────────────────
+
+
+def _now_iso() -> str:
+    import time as _t
+
+    return _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime())
+
+
+def _require_write(can_write: bool, op: str) -> Optional[Dict[str, Any]]:
+    if not can_write:
+        return {"error": f"{op} 需要写权限（execute 阶段）", "status": "error"}
+    return None
+
+
+def _glossary_register(conn: sqlite3.Connection, args: Dict[str, Any], can_write: bool) -> Dict[str, Any]:
+    err = _require_write(can_write, "glossary_register")
+    if err:
+        return err
+    term_en = str(args.get("term_en", "")).strip()
+    term_zh = str(args.get("term_zh", "")).strip()
+    if not term_en or not term_zh:
+        return {"error": "term_en 与 term_zh 必填"}
+    if not __import__("re").match(r"^[a-z][a-z0-9_]*$", term_en):
+        return {"error": f"term_en 必须 snake_case 英文：{term_en}"}
+    kind = str(args.get("kind", "noun"))
+    brief = str(args.get("brief", ""))
+    scope_table = args.get("scope_table") or None
+    now = _now_iso()
+    conn.execute(
+        """
+        INSERT INTO _glossary (term_en, term_zh, kind, brief, scope_table, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(term_en) DO UPDATE SET
+            term_zh = excluded.term_zh,
+            kind = excluded.kind,
+            brief = excluded.brief,
+            scope_table = excluded.scope_table,
+            updated_at = excluded.updated_at
+        """,
+        (term_en, term_zh, kind, brief, scope_table, now, now),
+    )
+    conn.commit()
+    return {"ok": True, "term_en": term_en, "term_zh": term_zh}
+
+
+def _glossary_lookup(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any]:
+    term_en = (args.get("term_en") or "").strip()
+    term_zh = (args.get("term_zh") or "").strip()
+    if not term_en and not term_zh:
+        return {"error": "需要 term_en 或 term_zh"}
+    if term_en:
+        cur = conn.execute("SELECT * FROM _glossary WHERE term_en = ?", (term_en,))
+    else:
+        cur = conn.execute("SELECT * FROM _glossary WHERE term_zh = ?", (term_zh,))
+    rows = [dict(r) for r in cur.fetchall()]
+    return {"ok": True, "matches": rows, "count": len(rows)}
+
+
+def _glossary_list(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any]:
+    scope = args.get("scope_table")
+    if scope:
+        cur = conn.execute(
+            "SELECT * FROM _glossary WHERE scope_table IS NULL OR scope_table = ? ORDER BY term_en",
+            (scope,),
+        )
+    else:
+        cur = conn.execute("SELECT * FROM _glossary ORDER BY term_en")
+    return {"ok": True, "items": [dict(r) for r in cur.fetchall()]}
+
+
+def _coerce_value_json(v: Any) -> str:
+    """常数值统一存为 JSON 串；优先解析为数值。"""
+    if isinstance(v, (int, float)):
+        return json.dumps(v)
+    if isinstance(v, str):
+        s = v.strip()
+        try:
+            return json.dumps(float(s))
+        except (TypeError, ValueError):
+            return json.dumps(s)
+    return json.dumps(v)
+
+
+def _const_register(conn: sqlite3.Connection, args: Dict[str, Any], can_write: bool) -> Dict[str, Any]:
+    err = _require_write(can_write, "const_register")
+    if err:
+        return err
+    name_en = str(args.get("name_en", "")).strip()
+    if not __import__("re").match(r"^[A-Za-z_][A-Za-z0-9_]*$", name_en):
+        return {"error": f"name_en 不合法：{name_en}"}
+    if "value" not in args:
+        return {"error": "value 必填"}
+    name_zh = str(args.get("name_zh", ""))
+    brief = str(args.get("brief", ""))
+    scope_table = args.get("scope_table") or None
+    value_json = _coerce_value_json(args["value"])
+    now = _now_iso()
+    conn.execute(
+        """
+        INSERT INTO _constants (name_en, name_zh, value_json, brief, scope_table, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(name_en) DO UPDATE SET
+            name_zh = excluded.name_zh,
+            value_json = excluded.value_json,
+            brief = excluded.brief,
+            scope_table = excluded.scope_table,
+            updated_at = excluded.updated_at
+        """,
+        (name_en, name_zh, value_json, brief, scope_table, now, now),
+    )
+    conn.commit()
+    return {"ok": True, "name_en": name_en, "value": json.loads(value_json)}
+
+
+def _const_set(conn: sqlite3.Connection, args: Dict[str, Any], can_write: bool) -> Dict[str, Any]:
+    err = _require_write(can_write, "const_set")
+    if err:
+        return err
+    name_en = str(args.get("name_en", "")).strip()
+    cur = conn.execute("SELECT 1 FROM _constants WHERE name_en = ?", (name_en,))
+    if not cur.fetchone():
+        return {"error": f"常数 {name_en} 不存在；请先 const_register"}
+    value_json = _coerce_value_json(args["value"])
+    conn.execute(
+        "UPDATE _constants SET value_json = ?, updated_at = ? WHERE name_en = ?",
+        (value_json, _now_iso(), name_en),
+    )
+    conn.commit()
+    return {"ok": True, "name_en": name_en, "value": json.loads(value_json)}
+
+
+def _const_list(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any]:
+    scope = args.get("scope_table")
+    if scope:
+        cur = conn.execute(
+            "SELECT * FROM _constants WHERE scope_table IS NULL OR scope_table = ? ORDER BY name_en",
+            (scope,),
+        )
+    else:
+        cur = conn.execute("SELECT * FROM _constants ORDER BY name_en")
+    items = []
+    for r in cur.fetchall():
+        d = dict(r)
+        try:
+            d["value"] = json.loads(d.pop("value_json"))
+        except Exception:  # noqa: BLE001
+            d["value"] = None
+        items.append(d)
+    return {"ok": True, "items": items}
+
+
+def _const_delete(conn: sqlite3.Connection, args: Dict[str, Any], can_write: bool) -> Dict[str, Any]:
+    err = _require_write(can_write, "const_delete")
+    if err:
+        return err
+    name_en = str(args.get("name_en", "")).strip()
+    conn.execute("DELETE FROM _constants WHERE name_en = ?", (name_en,))
+    conn.commit()
+    return {"ok": True, "name_en": name_en}

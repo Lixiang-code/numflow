@@ -505,8 +505,64 @@ PIPELINE_STEP_SPECS: List[StepSpec] = [
 _BY_ID: Dict[str, StepSpec] = {s.step_id: s for s in PIPELINE_STEP_SPECS}
 
 
+_LANDING_SUB_TITLES: Dict[str, str] = {
+    "equip": "装备落地表",
+    "gem": "宝石落地表",
+    "mount": "坐骑落地表",
+    "wing": "翅膀落地表",
+    "fashion": "时装落地表",
+    "dungeon": "副本落地表",
+    "skill": "技能落地表",
+}
+
+
+def _build_landing_sub_spec(sub: str) -> StepSpec:
+    base = _BY_ID.get("gameplay_landing_tables")
+    title = _LANDING_SUB_TITLES.get(sub, f"{sub} 落地表")
+    extra_acceptance: List[str] = []
+    if sub == "dungeon":
+        extra_acceptance = [
+            "副本_落地 必含列：dungeon_id / open_level / ticket_cost / daily_max_count / cumulative_ticket / 性价比",
+            "cumulative_ticket = CUMSUM_TO_HERE(@@同表[ticket_cost])，注册公式后必须 execute（无空值）",
+            "性价比禁严格单调递增；通关门槛由 IFS 条件公式批量生成",
+        ]
+    elif sub == "equip":
+        extra_acceptance = [
+            "暴击/闪避/命中/抗性等百分比列存为 [0, 0.95] 小数，number_format='0.00%'",
+            "暴伤存小数（150% → 1.5），上限 ≤10，number_format='0.00%'",
+            "主属性覆盖比若为常量请用 const_register('equip_main_attr_ratio', 0.6) 后用 ${equip_main_attr_ratio} 引用",
+        ]
+    elif sub == "gem":
+        extra_acceptance = [
+            "宝石按品阶/合成轴（3 同阶→1 高 1 品），不要按 1..N 标准等级拉行",
+            "颜色/属性绑定与解锁门槛在 README 写清",
+        ]
+    elif sub == "mount":
+        extra_acceptance = ["开放等级 30 默认；进阶曲线非线性；列必须有玩法含义"]
+    return StepSpec(
+        step_id=f"gameplay_landing_tables.{sub}",
+        title_zh=title,
+        goal=(base.goal if base else "") + f"\n（本子步只产出 {sub} 子系统的落地表）",
+        inputs=list(base.inputs) if base else [],
+        outputs=list(base.outputs) if base else [],
+        required_tables=list(base.required_tables) if base else [],
+        required_columns=dict(base.required_columns) if base else {},
+        acceptance=list(base.acceptance) + extra_acceptance if base else extra_acceptance,
+        agent_hint=(base.agent_hint if base else "")
+        + f"\n本子步范围={sub}：禁止越界产出其他系统的表。",
+        common_pitfalls=list(base.common_pitfalls) if base else [],
+        upstream_steps=list(base.upstream_steps) if base else [],
+    )
+
+
 def get_step_spec(step_id: str) -> Optional[StepSpec]:
-    return _BY_ID.get(step_id)
+    if step_id in _BY_ID:
+        return _BY_ID[step_id]
+    if step_id.startswith("gameplay_landing_tables."):
+        sub = step_id.split(".", 1)[1]
+        if sub in _LANDING_SUB_TITLES:
+            return _build_landing_sub_spec(sub)
+    return None
 
 
 def list_step_specs() -> List[StepSpec]:

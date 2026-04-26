@@ -11,11 +11,25 @@ export const PIPELINE_STEP_LABELS: Record<string, string> = {
   cultivation_allocation_tables: '养成资源分配表',
   cultivation_quant_tables: '养成资源定量表',
   gameplay_landing_tables: '玩法系统落地表',
+  // step 11 per-system 子步
+  'gameplay_landing_tables.equip': '11.装备 落地表',
+  'gameplay_landing_tables.gem': '11.宝石 落地表',
+  'gameplay_landing_tables.mount': '11.坐骑 落地表',
+  'gameplay_landing_tables.wing': '11.翅膀 落地表',
+  'gameplay_landing_tables.fashion': '11.时装 落地表',
+  'gameplay_landing_tables.dungeon': '11.副本 落地表',
+  'gameplay_landing_tables.skill': '11.技能 落地表',
 }
 
 export function pipelineStepLabel(stepId: string | null | undefined): string {
   if (!stepId) return '—'
-  return PIPELINE_STEP_LABELS[stepId] || stepId
+  if (PIPELINE_STEP_LABELS[stepId]) return PIPELINE_STEP_LABELS[stepId]
+  // 未注册的子步：根据 ID 推导
+  if (stepId.startsWith('gameplay_landing_tables.')) {
+    const sub = stepId.slice('gameplay_landing_tables.'.length)
+    return `11.${sub} 落地表`
+  }
+  return stepId
 }
 
 /** 初始化 Agent 与「下一步」流水线步骤绑定的预填说明（可一键插入输入框） */

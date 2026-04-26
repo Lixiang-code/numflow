@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import ast
+import contextvars
 import math
 import operator
 import re
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import pandas as pd
+
+# 当前行索引（仅在 safe_eval_vector 中设置；用于 CUMSUM_TO_HERE / CUMSUM_PREV）
+_CURRENT_ROW_INDEX: "contextvars.ContextVar[int]" = contextvars.ContextVar(
+    "_current_row_index", default=0
+)
 
 # 逐行引用：@T[col]（注意先匹配 @@ 再匹配 @，避免混淆）
 _REF = re.compile(
@@ -289,6 +295,37 @@ def _counta_arr(arr: Any) -> float:
     return 1.0
 
 
+def _arr_to_floats(arr: Any) -> List[float]:
+    if isinstance(arr, pd.Series):
+        return [float(x) if pd.notna(x) else 0.0 for x in arr.tolist()]
+    if isinstance(arr, (list, tuple)):
+        out: List[float] = []
+        for x in arr:
+            try:
+                out.append(float(x) if x is not None else 0.0)
+            except (TypeError, ValueError):
+                out.append(0.0)
+        return out
+    try:
+        return [float(arr)]
+    except (TypeError, ValueError):
+        return [0.0]
+
+
+def _cumsum_to_here(arr: Any) -> float:
+    """CUMSUM_TO_HERE(@@T[col])：累计求和（含本行）。仅在逐行求值时返回正确值。"""
+    i = _CURRENT_ROW_INDEX.get()
+    vals = _arr_to_floats(arr)
+    return float(sum(vals[: i + 1]))
+
+
+def _cumsum_prev(arr: Any) -> float:
+    """CUMSUM_PREV(@@T[col])：截止上一行的累计求和（第 1 行 = 0）。"""
+    i = _CURRENT_ROW_INDEX.get()
+    vals = _arr_to_floats(arr)
+    return float(sum(vals[:i]))
+
+
 # 函数表（key 全部小写）
 _FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "round": _round,
@@ -333,6 +370,9 @@ _FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "avg": _average_arr,
     "count": _count_arr,
     "counta": _counta_arr,
+    # 累计求和（用于副本/养成累计门票/累计消耗等场景）
+    "cumsum_to_here": _cumsum_to_here,
+    "cumsum_prev": _cumsum_prev,
 }
 
 
@@ -477,6 +517,8 @@ def eval_series(formula: str, frames: Dict[str, pd.DataFrame]) -> pd.Series:
     if not scalar_map and not array_map:
         v = safe_eval_scalar(expr, {})
         return pd.Series([v] * max(len(df) for df in frames.values()))
+    # 累计求和需要逐行求值（即便没有 scalar_map）
+    needs_rowwise = bool(re.search(r"\bcumsum_(to_here|prev)\b", expr.lower()))
     if scalar_map:
         first = next(iter(scalar_map.values()))
         n = len(first)
@@ -484,9 +526,20 @@ def eval_series(formula: str, frames: Dict[str, pd.DataFrame]) -> pd.Series:
             if len(s) != n:
                 raise ValueError("引用列长度不一致")
         return pd.Series(safe_eval_vector(expr, scalar_map, array_map))
+    if needs_rowwise:
+        n = max(len(df) for df in frames.values())
+        static_env: Dict[str, Any] = {k: v for k, v in array_map.items()}
+        out: List[Any] = []
+        for i in range(n):
+            token = _CURRENT_ROW_INDEX.set(i)
+            try:
+                out.append(safe_eval_scalar(expr, static_env))
+            finally:
+                _CURRENT_ROW_INDEX.reset(token)
+        return pd.Series(out)
     # 只有 array_map（纯聚合公式），返回全表相同值
     n = max(len(df) for df in frames.values())
-    static_env: Dict[str, Any] = {k: v for k, v in array_map.items()}
+    static_env = {k: v for k, v in array_map.items()}
     v = safe_eval_scalar(expr, static_env)
     return pd.Series([float(v)] * n)
 
@@ -505,6 +558,39 @@ def preprocess_formula(formula: str) -> str:
     formula = re.sub(r"\bTRUE\b", "True", formula)
     formula = re.sub(r"\bFALSE\b", "False", formula)
     return formula
+
+
+# ${name} 常数引用（与 $name$ 术语占位区分）
+_CONST_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def parse_constant_refs(formula: str) -> Set[str]:
+    """返回公式串中所有 ${name} 常量引用的名字集合。"""
+    return set(_CONST_REF.findall(formula))
+
+
+def substitute_constants(formula: str, constants: Dict[str, Any]) -> Tuple[str, List[str]]:
+    """把 ${name} 替换为 constants[name] 的字面量；返回 (新公式, 未解析名列表)。"""
+    missing: List[str] = []
+
+    def _rep(m: "re.Match[str]") -> str:
+        nm = m.group(1)
+        if nm not in constants:
+            missing.append(nm)
+            return m.group(0)
+        v = constants[nm]
+        # 数值直接转字符串；其他类型回退为 0
+        try:
+            return repr(float(v))
+        except (TypeError, ValueError):
+            try:
+                return repr(int(v))
+            except (TypeError, ValueError):
+                missing.append(nm)
+                return m.group(0)
+
+    out = _CONST_REF.sub(_rep, formula)
+    return out, missing
 
 
 def parse_row_refs(formula: str) -> Set[str]:
@@ -562,5 +648,9 @@ def safe_eval_vector(
     for i in range(n):
         env: Dict[str, Any] = {k: float(v.iloc[i]) for k, v in scalar_map.items()}
         env.update(static)
-        out.append(safe_eval_scalar(expr, env))
+        token = _CURRENT_ROW_INDEX.set(i)
+        try:
+            out.append(safe_eval_scalar(expr, env))
+        finally:
+            _CURRENT_ROW_INDEX.reset(token)
     return out

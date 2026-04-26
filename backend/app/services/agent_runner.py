@@ -148,6 +148,24 @@ _REVIEW_SYSTEM_TAIL = (
 _EXECUTE_SYSTEM_TAIL = (
     "【当前阶段=execute】按 review 最终方案执行工具调用。\n\n"
 
+    "═══ ★ 操作前自诉协议（每次工具调用前必出三行）★ ═══\n"
+    "在每个写工具调用之前，**必须先输出三行自诉**（用于自我校准；写完三行再调工具）：\n"
+    "  目标项: <表名/列名 或子系统名>\n"
+    "  功能: <这张表/这一列在玩法中起什么作用，<=20字>\n"
+    "  数值设计注意点: <2-3条；含值域/格式/单调性/产量量级/累计一致性等>\n"
+    "缺三行视为低质量，需在下一回合自我纠正。\n\n"
+
+    "═══ ★ 数值设计原则（违反=校验失败）★ ═══\n"
+    "① 概率/百分比类（暴击率/闪避/命中/抗性/各种 *_rate）：值域 [0, 0.95]，存储为小数，"
+    "  number_format='0.00%'；禁止把 35% 写成 35 或 350。\n"
+    "② 暴伤/伤害倍率：存储为小数（150% → 1.5），number_format='0.00%'；上限 ≤10。\n"
+    "③ 性价比/单位收益类列：必须存在阶段性拐点或饱和，**禁止严格单调递增**。\n"
+    "④ 产量/消耗：以「小时产量」衡量；普通资源量大、高级资源量小；"
+    "  日产量 × 天数 ≈ 累计消耗（用 CUMSUM_TO_HERE/CUMSUM_PREV 校验一致）。\n"
+    "⑤ 等级行覆盖：数值表行数必须等于该项目的 max_level（从 fixed_layer_config 读取），"
+    "  禁止只覆盖 1..60；批量整数列**必须用 IFS / setup_level_table / bulk_register_and_compute**。\n"
+    "⑥ ID 列、等级列、注册了公式的列**不允许任何空值**；写入后调 run_validation 自检。\n\n"
+
     "═══ ★ 每回合固定格式（违反=低质量）★ ═══\n"
     "每次生成工具调用时，**必须先输出以下两行，再调工具**：\n"
     "  第1行: `当前: [x]已完成项目 | [ ]本轮目标`（用你的 TODO 状态）\n"
@@ -450,6 +468,7 @@ def run_agent_sse(
     total_errors = 0    # 累计错误（不重置）
     total_success = 0   # 累计成功
     MAX_CONSEC_ERRORS = 4  # 连续失败4次强制注入分析提示
+    MAX_EXECUTE_ROUNDS = 24  # execute 阶段总轮次硬上限（兜底防失控）
     # ---- 反循环计数器 ----
     _snapshot_count = 0        # create_snapshot 调用次数
     _validation_count = 0      # run_validation 调用次数
@@ -457,6 +476,17 @@ def run_agent_sse(
     _recent_tools: List[str] = []  # 最近20次工具名（用于检测重复模式）
     while True:
         round_i += 1
+
+        # ---- 总轮次硬上限：超过则强制收尾 ----
+        if round_i > MAX_EXECUTE_ROUNDS:
+            yield _emit(
+                "execute",
+                {
+                    "type": "log",
+                    "message": f"⛔ 总轮次硬上限 {MAX_EXECUTE_ROUNDS} 已触发，强制结束 execute 阶段。",
+                },
+            )
+            break
 
         # ---- 每20轮发出一次进度警告（不强制终止）----
         if round_i > 1 and round_i % 20 == 0:

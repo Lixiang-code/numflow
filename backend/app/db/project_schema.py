@@ -67,6 +67,33 @@ def init_project_db(conn: sqlite3.Connection, *, seed_readme: bool = True) -> No
             PRIMARY KEY (table_name, row_id, column_name)
         );
 
+        CREATE TABLE IF NOT EXISTS _glossary (
+            term_en TEXT PRIMARY KEY,
+            term_zh TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'noun',
+            brief TEXT,
+            scope_table TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS _glossary_usage (
+            term_en TEXT NOT NULL,
+            table_name TEXT NOT NULL,
+            column_name TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (term_en, table_name, column_name)
+        );
+
+        CREATE TABLE IF NOT EXISTS _constants (
+            name_en TEXT PRIMARY KEY,
+            name_zh TEXT NOT NULL DEFAULT '',
+            value_json TEXT NOT NULL,
+            brief TEXT,
+            scope_table TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS _agent_sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             step_id TEXT NOT NULL,

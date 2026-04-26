@@ -29,7 +29,7 @@ def _readme_setting_key(step_id: str) -> str:
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
 # 与 03 文档章节对齐的稳定 ID（可随产品细化）
-PIPELINE_STEPS: List[str] = [
+PIPELINE_STEPS_BASE: List[str] = [
     "environment_global_readme",
     "base_attribute_framework",
     "gameplay_attribute_scheme",
@@ -42,17 +42,71 @@ PIPELINE_STEPS: List[str] = [
     "cultivation_quant_tables",
     "gameplay_landing_tables",
 ]
+# Backward compat alias（部分老代码引用 PIPELINE_STEPS）
+PIPELINE_STEPS: List[str] = PIPELINE_STEPS_BASE
+
+# step 11 默认子系统集合（可被项目 game_systems 覆盖）
+LANDING_SUBSYSTEMS_DEFAULT: List[str] = [
+    "equip", "gem", "mount", "wing", "fashion", "dungeon", "skill",
+]
+
+
+def _enabled_landing_subsystems(conn) -> List[str]:
+    """从 fixed_layer_config.game_systems 推导启用的子系统列表。"""
+    try:
+        flc = get_setting(conn, "fixed_layer_config") or {}
+        gs = (flc or {}).get("game_systems") or {}
+    except Exception:  # noqa: BLE001
+        gs = {}
+    enabled: List[str] = []
+    # gs 形如 {"equip": True, "gem": True, "ai_design_subsystems": True}
+    if isinstance(gs, dict):
+        for k, v in gs.items():
+            if k in ("ai_design_subsystems", "subsystemsByPath"):
+                continue
+            if v in (True, "true", 1, "1"):
+                enabled.append(str(k))
+    if not enabled:
+        return list(LANDING_SUBSYSTEMS_DEFAULT)
+    # 仅保留已知子系统（避免乱入）
+    out = [s for s in enabled if s in LANDING_SUBSYSTEMS_DEFAULT]
+    return out or list(LANDING_SUBSYSTEMS_DEFAULT)
+
+
+def _expand_pipeline_steps(conn) -> List[str]:
+    """把 step 11 展开为 per-system 子步。"""
+    base = list(PIPELINE_STEPS_BASE[:-1])
+    subs = _enabled_landing_subsystems(conn)
+    return base + [f"gameplay_landing_tables.{s}" for s in subs]
+
+
+def _normalize_completed(done: List[str], expanded: List[str]) -> List[str]:
+    """兼容旧库：若 'gameplay_landing_tables' 在 done 中，则视为所有子步均已完成。"""
+    out: List[str] = []
+    has_legacy = "gameplay_landing_tables" in done
+    sub_done = {s for s in done if s.startswith("gameplay_landing_tables.")}
+    for s in expanded:
+        if s in done:
+            out.append(s)
+        elif s.startswith("gameplay_landing_tables.") and (has_legacy or s in sub_done):
+            out.append(s)
+        elif s in done:
+            out.append(s)
+    return out
 
 
 @router.get("/status")
 def pipeline_status(p: ProjectDB = Depends(get_project_read)):
     st = get_pipeline_state(p.conn)
-    n = len(st.get("completed_steps") or [])
-    next_step = PIPELINE_STEPS[n] if n < len(PIPELINE_STEPS) else None
-    finished = n >= len(PIPELINE_STEPS)
+    raw_done = list(st.get("completed_steps") or [])
+    expanded = _expand_pipeline_steps(p.conn)
+    done = _normalize_completed(raw_done, expanded)
+    n = len(done)
+    next_step = expanded[n] if n < len(expanded) else None
+    finished = n >= len(expanded)
     return {
-        "steps_order": PIPELINE_STEPS,
-        "completed_steps": st.get("completed_steps") or [],
+        "steps_order": expanded,
+        "completed_steps": done,
         "current_step": st.get("current_step") or "",
         "next_expected_step": None if finished else next_step,
         "finished": finished,
@@ -66,13 +120,18 @@ class AdvanceBody(BaseModel):
 @router.post("/advance")
 def pipeline_advance(body: AdvanceBody, p: ProjectDB = Depends(get_project_write)):
     st = get_pipeline_state(p.conn)
-    done: List[str] = list(st.get("completed_steps") or [])
+    raw_done: List[str] = list(st.get("completed_steps") or [])
+    expanded = _expand_pipeline_steps(p.conn)
+    done = _normalize_completed(raw_done, expanded)
     n = len(done)
-    if n >= len(PIPELINE_STEPS):
+    if n >= len(expanded):
         raise HTTPException(status_code=400, detail="流水线已完成")
-    expected = PIPELINE_STEPS[n]
+    expected = expanded[n]
     if body.step != expected:
-        expected_spec = get_step_spec(expected)
+        # 兼容客户端用旧 step 名 'gameplay_landing_tables' 推进的情况：
+        # 若 expected 是 gameplay_landing_tables.* 子步，且客户端送的是基名，提示错误。
+        expected_id = expected.split(".")[0]
+        expected_spec = get_step_spec(expected) or get_step_spec(expected_id)
         raise HTTPException(
             status_code=400,
             detail={
@@ -83,11 +142,11 @@ def pipeline_advance(body: AdvanceBody, p: ProjectDB = Depends(get_project_write
             },
         )
     done.append(expected)
-    nxt = PIPELINE_STEPS[n + 1] if n + 1 < len(PIPELINE_STEPS) else ""
+    nxt = expanded[n + 1] if n + 1 < len(expanded) else ""
     set_pipeline_state(p.conn, current_step=nxt, completed_steps=done)
 
     # 自动落 spec 模板：仅在没有人写过 step README 时回填
-    spec = get_step_spec(expected)
+    spec = get_step_spec(expected) or get_step_spec(expected.split(".")[0])
     readme_seeded = False
     if spec is not None:
         existing = get_setting(p.conn, _readme_setting_key(expected))
