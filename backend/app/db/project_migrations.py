@@ -89,4 +89,38 @@ def ensure_project_migrations(conn: sqlite3.Connection) -> None:
         """
     )
 
+    # 第三轮优化：表目录管理 / Matrix 表 / Calculator 注册
+    _add_column_if_missing(conn, "_table_registry", "directory", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "_table_registry", "matrix_meta_json", "TEXT NOT NULL DEFAULT ''")
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS _calculators (
+            name TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,                  -- 'matrix_attr' / 'matrix_resource' / 'lookup'
+            table_name TEXT NOT NULL,
+            axes_json TEXT NOT NULL,             -- 维度声明 [{name, source}]
+            value_column TEXT NOT NULL DEFAULT 'value',
+            brief TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+    # 子系统暴露参数（父系统 → 子系统设计提示词）
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS _step_exposed_params (
+            owner_step TEXT NOT NULL,            -- 暴露源（父系统步骤 ID）
+            target_step TEXT NOT NULL,           -- 接收方（子系统步骤 ID 或 'subsystems:<owner>'）
+            key TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            brief TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (owner_step, target_step, key)
+        )
+        """
+    )
+
     conn.commit()

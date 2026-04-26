@@ -60,107 +60,83 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
     ),
     "base_attribute_framework": (
         _NAMING_HEADER
-        + "【步骤 2/11 基础属性框架】\n"
+        + "【步骤 2/6 基础属性框架（第3轮新规则）】\n"
         "目标：定义角色基础属性骨架，输出 1..max_level 行的标准等级基础属性表。\n"
-        "先 `get_project_config` → 读 fixed_layer_config.core.game_type 与 attribute_systems.selectedAttrs："
-        "  · rpg_turn 通常用 hp_max/atk/def/hit/dodge/crit_rate/crit_dmg；\n"
-        "  · rpg_realtime 额外含 atk_spd/move_spd/base_atk_interval；\n"
-        "  · 实际属性键以项目 stat_keys 为准。\n"
-        "必产出表：`base_attr_table`（display_name=「基础属性·标准等级」）；列由 stat_keys 推导。\n"
-        "★ 强制效率方式：用 `setup_level_table` 一次完成（建表+max_level 行+所有列公式注册执行）。\n"
-        "★ 公式必须使用常数引用，不允许字面量。先 `const_register` 起止值与曲线指数，再写公式：\n"
-        "  hp_max  : ROUND(${hp_lv1} + (${hp_max_cap}-${hp_lv1})*POWER((@T[level]-1)/(${max_level}-1), ${growth_exp}), 0)\n"
-        "  atk     : ROUND(${atk_lv1}+ (${atk_max_cap}-${atk_lv1})*POWER((@T[level]-1)/(${max_level}-1), ${growth_exp}), 0)\n"
-        "  atk_spd : ROUND(${atk_spd_lv1}+(${atk_spd_max}-${atk_spd_lv1})*POWER((@T[level]-1)/(${max_level}-1),${atk_spd_exp}), 2)\n"
-        "建表完成后调 `update_table_readme` 写完整 6 字段 README。"
+        "新规则：\n"
+        "  · 攻击力按膨胀速率单一公式贯穿全等级（禁止分段）；\n"
+        "  · 用户勾选的所有属性都必须在表中且必须有膨胀（高级属性如暴击率/闪避/抗性给合理曲线，但仍单调）；\n"
+        "  · 单调线性或单调指数膨胀，禁止分段；\n"
+        "  · HP 必须由 (atk, def, expected_survive_seconds) 反推得到，**禁止拍脑袋写线性数列**。\n"
+        "先 `get_project_config` → 读 fixed_layer_config.core.game_type 与 attribute_systems.selectedAttrs。\n"
+        "必产出表：`base_attr_table`（display_name=「基础属性·标准等级」），列至少含 level/atk/def/hp 与所有勾选属性。\n"
+        "★ 强制效率方式：用 `setup_level_table` 一次完成。常数先 `const_register`，再以 `${name}` 引用。\n"
+        "★ HP 公式必须依赖 atk/def/${expected_survive_seconds}，先 `const_register('expected_survive_seconds', N)` 再写公式。\n"
+        "★ 战斗节奏假设需在 `update_table_readme` 显式记录。"
     ),
-    "gameplay_attribute_scheme": (
+    "gameplay_allocation": (
         _NAMING_HEADER
-        + "【步骤 3/11 玩法属性方案】\n"
-        "目标：列出各玩法系统拟提供的属性维度与占比策略。\n"
-        "必产出表：`gameplay_attr_scheme`（display_name=「玩法属性方案」），"
-        "列：system / provided_stats / share_strategy / cap_note / acquire_rhythm。\n"
-        "约束：每个 02 文档约定的核心系统都有一行；`provided_stats` 的属性键必须来自 stat_keys。"
-    ),
-    "gameplay_allocation_tables": (
-        _NAMING_HEADER
-        + "【步骤 4/11 玩法属性分配表】\n"
-        "目标：把方案细化为「按系统×标准等级」的属性占比表。\n"
-        "必产出：每个核心系统一张 `<system>_alloc`（如 `equip_alloc`、`mount_alloc`），"
-        "display_name=「<系统中文>·属性分配」；行=标准等级 1..max_level（坐骑等可独立子上限），"
-        "列=该系统提供的各属性的占比（小数 0..1，number_format='0.00%'）。\n"
-        "★ 强制效率方式：每张分配表用 `setup_level_table` 一次建好；占比固定时常量列公式 `${equip_hp_share}`；"
-        "随等级渐变 `${equip_hp_share_lv1} + (${equip_hp_share_max}-${equip_hp_share_lv1})*((@T[level]-1)/(${max_level}-1))`。\n"
-        "★ 行数 = `system_level_caps[<system>]` 若存在否则 `max_level`；**严禁** 硬编码 30/60/100，"
-        "**严禁** 逐行 `write_cells`。\n"
-        "★ kind=alloc，建表时建议显式传 `kind: 'alloc'` 让系统自动挂 percent_bounds 校验。\n"
-        "验收：横向加总 ≤ 1.0；空缺列在 README 注明理由。"
-    ),
-    "second_order_framework": (
-        _NAMING_HEADER
-        + "【步骤 5/11 二阶属性框架】\n"
-        "目标：派生战力、伤害公式相关二阶属性。\n"
-        "必产出：`second_order_formula`（列：metric / formula / depends_on / lower / upper）。"
-        "如已 const_register 暴击率上限/暴伤上限，公式中以 `${crit_rate_cap}` 等引用。\n"
-        "验收：与 02 默认细则一致；`recalculate_downstream` 能跑通。"
-    ),
-    "gameplay_attribute_tables": (
-        _NAMING_HEADER
-        + "【步骤 6/11 玩法属性表】\n"
-        "目标：分配比例 × 标准等级基础属性 → 各系统每级实际属性。\n"
-        "必产出：每个系统一张 `<system>_attr`（如 `equip_attr`、`mount_attr`），"
-        "display_name=「<系统中文>·属性表」；行 = 该系统等级/品阶/阶段，列 = 具体属性数值。\n"
-        "★ 注意：宝石使用品阶/合成体系（3 同阶=1 高 1 品）→ 表名 `gem_attr`，行=品阶（rank/tier），不是 1..N 等级。\n"
-        "★ 坐骑等子系统的开放等级行数 = `system_level_caps.mount`（缺省 = max_level），**不要写 30**。\n"
-        "★ 强制效率方式：用 `setup_level_table` 或 `bulk_register_and_compute`，公式直接引用上游表："
-        "  hp_max : ROUND(@base_attr_table[hp_max] * @<system>_alloc[hp_share], 0)。\n"
-        "**严禁** 逐行写。"
-    ),
-    "cultivation_resource_design": (
-        _NAMING_HEADER
-        + "【步骤 7/11 养成资源设计】\n"
-        "目标：列出每个系统的养成资源（材料、消耗道具、产出节奏）。\n"
-        "必产出：`cultivation_resource_list`（列：resource_id / resource_name / source / sink / "
-        "rarity / typical_daily_yield）。\n"
-        "约束：覆盖全部需要养成的系统；resource_id 必须存在于 `_project_settings.resource_keys` 中。"
+        + "【步骤 3/6 玩法属性分配（matrix 表）】\n"
+        "目标：把第2轮的『方案』+『分配表』合并为一张行=玩法子系统、列=属性的 matrix 表。\n"
+        "操作：\n"
+        "  1. 列出所有玩法子系统（必须把父系统拆为子系统：equip_base / equip_enhance / equip_amplify / "
+        "gem_synth / gem_unlock / mount_advance / mount_talent ...），先 `glossary_register` 每个；\n"
+        "  2. `create_matrix_table(name='gameplay_attr_alloc', kind='matrix_attr', "
+        "rows=[<子系统列表>], cols=[<属性列表>], directory='分配/玩法属性')`；\n"
+        "  3. `write_matrix_cells` 填投放占比（0..1，允许 0 表示该子系统不投放该属性）；\n"
+        "  4. `register_calculator(name='gameplay_attr_alloc_lookup', kind='matrix_lookup', "
+        "table='gameplay_attr_alloc', axes=[{name:'gameplay',source:'row'},{name:'attr',source:'col'}], "
+        "brief='查询玩法子系统在指定属性上的投放占比，返回 0~1 小数')`；\n"
+        "  5. `update_table_readme`：写每行子系统选这些属性的设计意图、留 0 的原因。\n"
+        "★ 行覆盖所有子系统；列覆盖所有勾选属性；≥80% 属性出现在 ≥2 个子系统中。\n"
+        "★ register_calculator 的 brief 必须 ≥8 字符。"
     ),
     "cultivation_resource_framework": (
         _NAMING_HEADER
-        + "【步骤 8/11 养成资源框架】\n"
-        "目标：搭建资源在系统间的流转框架（产出→背包→消耗→升级→属性）。\n"
-        "必产出：每个系统一张骨架表 `<system>_cultivation_node`（升级节点 / 消耗资源 / 产出属性档），"
-        "并在 README 标注瓶颈点与产出口径。"
+        + "【步骤 4/6 养成资源框架（第3轮合并）】\n"
+        "目标：把第2轮的『资源设计』+『资源框架表』合并为一步。\n"
+        "操作：\n"
+        "  1. 设计阶段先列出所有资源（≥2 货币 + 各父玩法的专属道具；RPG 类型必须含 experience），"
+        "先 `glossary_register` 每个资源；\n"
+        "  2. 创建 `num_resource_framework`（display_name=「养成资源·框架」, directory='基础/资源'），"
+        "行=level（1..max_level），列至少含：\n"
+        "     `level / time_weight / stay_hours_per_level / stay_hours_cumulative` "
+        "+ 每个资源三档：`<res>_per_hour / <res>_per_level / <res>_cumulative`；\n"
+        "  3. `time_weight` 必须单调递增（先 const_register 起止与曲线指数）；\n"
+        "  4. `stay_hours_per_level = (time_weight / SUM(@@T[time_weight])) * ${lifecycle_days} * "
+        "${daily_play_hours}`，公式登记到 _formula_registry；\n"
+        "  5. `stay_hours_cumulative = CUMSUM_TO_HERE(@@T[stay_hours_per_level])`；\n"
+        "  6. 对每个资源 res：`<res>_per_hour` 自行设计单调曲线；`<res>_per_level = @T[<res>_per_hour] * @T[stay_hours_per_level]`；"
+        "`<res>_cumulative = CUMSUM_TO_HERE(@@T[<res>_per_level])`。\n"
+        "★ 单位统一为小时；带小数精度；末行 stay_hours_cumulative ≈ 生命周期总时长。\n"
+        "★ 所有资源名先 glossary_register，README 用 $name$ 引用。"
     ),
-    "cultivation_allocation_tables": (
+    "cultivation_allocation": (
         _NAMING_HEADER
-        + "【步骤 9/11 养成分配表】\n"
-        "目标：把资源在各系统、各等级上的消耗量初稿铺开。\n"
-        "必产出：每个系统一张 `<system>_cultivation_alloc`（行=系统等级，列=各资源消耗量）。\n"
-        "★ 强制效率方式：用 `setup_level_table`，公式样例（先 const_register 起步/缩放系数）：\n"
-        "  ROUND(${cost_base} + ${cost_growth}*POWER(@T[level], ${cost_exp}), 0)\n"
-        "  或分段：IFS(@T[level]<=${tier1_cap}, ${cost_t1}, @T[level]<=${tier2_cap}, ${cost_t2}, ${cost_tn})\n"
-        "★ 行数 = `system_level_caps[<system>]` 否则 `max_level`；纵向递增合理；不出现 0 消耗跳级。"
-    ),
-    "cultivation_quant_tables": (
-        _NAMING_HEADER
-        + "【步骤 10/11 养成量化表】\n"
-        "目标：在分配表基础上做量化（具体数值定稿），可注册公式自动推导。\n"
-        "必产出：每个系统一张 `<system>_cultivation_quant`（列：单级消耗 / 累计消耗 / 对应属性 / 性价比）。\n"
-        "★ 强制效率方式：`bulk_register_and_compute` 一次注册多个跨表公式；累计列 = `CUMSUM_TO_HERE(@@T[cost])`；"
-        "性价比 = `@T[stat_gain] / @T[cum_cost]`。\n"
-        "★ 性价比/单位收益类列必须存在阶段性拐点或饱和（system 自带 monotone_warning 校验）。"
+        + "【步骤 5/6 养成资源分配（matrix 表）】\n"
+        "目标：行=玩法子系统（与 gameplay_attr_alloc 一致），列=资源，单元格=该子系统对该资源的投放比例。\n"
+        "操作：\n"
+        "  1. `create_matrix_table(name='gameplay_res_alloc', kind='matrix_resource', "
+        "rows=[<同 gameplay_attr_alloc 的子系统>], cols=[<资源列表>], directory='分配/玩法资源')`；\n"
+        "  2. `write_matrix_cells` 填比例（允许 0 表示不投放）；\n"
+        "  3. `register_calculator(name='gameplay_res_alloc_lookup', kind='matrix_lookup', "
+        "table='gameplay_res_alloc', axes=[{name:'gameplay',source:'row'},{name:'res',source:'col'},"
+        "{name:'grain',source:'param',values:['per_hour','per_level','cumulative']}], "
+        "brief='查询玩法子系统在指定资源上的投放量；grain 选 per_hour/per_level/cumulative，"
+        "内部从 num_resource_framework 取对应列再乘以分配比例')`；\n"
+        "  4. README 列出 (玩法×资源) 切片示例。\n"
+        "★ register_calculator 必须含 grain 形参；brief ≥8 字符。\n"
+        "★ 留 0 的单元格在 README 注明设计原因（scope 隔离）。"
     ),
     "gameplay_landing_tables": (
         _NAMING_HEADER
-        + "【步骤 11/11 玩法落地表（汇总入口）】\n"
-        "目标：本步骤已被拆为 per-system 子步（11.equip / 11.gem / 11.dungeon ...）。\n"
+        + "【步骤 6/6 玩法落地表（按子系统拆分）】\n"
+        "目标：本步骤已被拆为 per-subsystem 子步（如 11.equip / 11.gem / 11.dungeon ...）。\n"
         "通用要求：\n"
-        "（1）禁止「仅标准等级+两列消耗」的偷懒模板；列必须有玩法含义。\n"
-        "（2）数值列若可由公式生成 → 必须 `setup_level_table` / `bulk_register_and_compute` 注册公式并执行；不留空。\n"
-        "（3）行数 = `system_level_caps[<system>]` 否则 `max_level`；行数缺失=验收失败。\n"
-        "（4）暴击/闪避/命中/抗性等百分比列存为 [0, 0.95] 小数，number_format='0.00%'；"
-        "暴伤存为小数（150% → 1.5），number_format='0.00%'。\n"
-        "（5）资源/材料消耗以「日产量×天数 ≈ 累计消耗」自检（CUMSUM_TO_HERE）。"
+        "（1）所有数值通过 `call_calculator(name=gameplay_attr_alloc_lookup|gameplay_res_alloc_lookup, ...)` 取，禁止硬编码。\n"
+        "（2）需要累计差值时（如 L→L+1 实际消耗）创建辅助列：`@T[<res>_cumulative_at_level] - @T[<res>_cumulative_at_prev_level]`。\n"
+        "（3）行数 = `system_level_caps[<system>]` 否则 `max_level`；不留空。\n"
+        "（4）暴击/闪避/命中/抗性等百分比列存为 [0, 0.95] 小数，number_format='0.00%'；暴伤存小数（150% → 1.5）。\n"
+        "（5）若本子系统需要向兄弟子系统暴露设计参数，调用 `expose_param_to_subsystems(owner_step=本步, target_step='subsystems:gameplay_landing_tables', key, value, brief)`。"
     ),
     "gameplay_landing_tables.equip": (
         _NAMING_HEADER

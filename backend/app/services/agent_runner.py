@@ -170,6 +170,21 @@ def _common_system(mode_norm: str) -> str:
     return "\n".join(
         [
             role_block,
+            "【中英文命名强制规则】"
+            "①所有名词（表名、列名、玩法名、资源名、子系统名、属性名）首次出现必须先调用 "
+            "glossary_register(term_en, term_zh, brief, ...)；"
+            "②正文/README/cell 中引用任何已注册名词必须使用 $term_en$ 引用符号，"
+            "禁止裸中文专名或裸英文专名；"
+            "③英文 term_en 必须为 snake_case 全小写（例：equip_base, gem_synth）；"
+            "④客户端会按列的 display_lang 自动渲染 $name$，禁止手工硬编码语言混用。",
+            "【matrix 表使用规则】"
+            "①创建 matrix 表用 create_matrix_table（kind=attr_alloc 或 res_alloc）；"
+            "②写入用 write_matrix_cells（行=玩法子系统，列=属性或资源）；"
+            "③创建后必须调用 register_calculator 注册 fun(level, gameplay, attr|res[, grain])，"
+            "brief 必须 ≥8 字符；下游一律用 call_calculator 取值，避免硬编码。",
+            "【表目录管理】调用 create_table / create_matrix_table 时必须传 directory 参数（"
+            "如 '基础/属性'、'分配/玩法属性'、'落地/装备'）以便目录化管理；"
+            "可用 list_directories / set_table_directory 查询和移动。",
             "【2/4 项目上下文】信息收集（gather）阶段已主动读取了项目配置与现有表结构；"
             "design/review 阶段直接引用已收集信息，**无需**再重复调用读取工具。"
             "新建或修改「*系统_落地」、各子系统**行轴**、消耗与属性投放时，**须先** "
@@ -384,6 +399,31 @@ def _current_step_id(p: ProjectDB) -> str:
         return ""
 
 
+def _build_exposed_params_block(p: ProjectDB, step_id: str) -> str:
+    """读取 _step_exposed_params 中针对当前步骤（含父步通配）的暴露参数，渲染为 system 提示。"""
+    if not step_id:
+        return ""
+    try:
+        from app.services.agent_tools import _list_exposed_params
+        items = (_list_exposed_params(p.conn, step_id) or {}).get("items") or []
+    except Exception:
+        return ""
+    if not items:
+        return ""
+    lines = [
+        "【父系统暴露参数】以下参数由上游步骤通过 expose_param_to_subsystems 主动暴露，"
+        "本步设计时必须考虑（不要忽视）：",
+    ]
+    for it in items:
+        key = it.get("key", "")
+        val = it.get("value")
+        brief = it.get("brief", "") or ""
+        owner = it.get("owner_step", "")
+        lines.append(f"- ${key}$ = {val!r}  (来自 {owner})  // {brief}")
+    return "\n".join(lines)
+
+
+
 def _reviewer_check(client, tool_name: str, tool_args: str, *, model: Optional[str] = None) -> Dict[str, Any]:
     """轻量 reviewer：返回 {'verdict': 'approve'|'reject', 'reason': str}。"""
     try:
@@ -581,6 +621,10 @@ def run_agent_sse(
         "【5/4 路由提示词】" + routed_prompt if routed_prompt else ""
     )
 
+    exposed_block = _build_exposed_params_block(p, step_id)
+    if exposed_block:
+        yield _emit("route", {"type": "log", "message": "已注入父系统暴露参数到 prompt"})
+
     # ---- 用户消息事件（供监控追踪）----
     yield _emit("meta", {"type": "user_message", "content": user_message, "model": _model})
 
@@ -599,6 +643,8 @@ def run_agent_sse(
     ]
     if routed_block:
         design_messages.append({"role": "system", "content": routed_block})
+    if exposed_block:
+        design_messages.append({"role": "system", "content": exposed_block})
     design_messages.append({"role": "system", "content": _DESIGN_SYSTEM_TAIL})
     design_messages.append({"role": "user", "content": user_message})
     # Inject gather phase context so design sees real project data
@@ -640,6 +686,8 @@ def run_agent_sse(
     ]
     if routed_block:
         review_messages.append({"role": "system", "content": routed_block})
+    if exposed_block:
+        review_messages.append({"role": "system", "content": exposed_block})
     review_messages.append({"role": "system", "content": _REVIEW_SYSTEM_TAIL})
     review_messages.append({"role": "user", "content": user_message})
     review_messages.append(
@@ -681,6 +729,8 @@ def run_agent_sse(
     ]
     if routed_block:
         execute_messages.append({"role": "system", "content": routed_block})
+    if exposed_block:
+        execute_messages.append({"role": "system", "content": exposed_block})
     execute_messages.append({"role": "system", "content": _EXECUTE_SYSTEM_TAIL})
     execute_messages.append({"role": "user", "content": user_message})
     execute_messages.append(

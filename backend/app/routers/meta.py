@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from app.data.default_rules_02 import get_default_rules_payload
 from app.deps import ProjectDB, get_project_read, get_project_write
 from app.services.snapshot_ops import compare_snapshot, create_snapshot, list_snapshots
+from app.services.matrix_table_ops import read_matrix as _read_matrix, list_matrix_tables as _list_matrix_tables
 
 router = APIRouter(prefix="/meta", tags=["meta"])
 
@@ -88,19 +89,37 @@ def get_constants(p: ProjectDB = Depends(get_project_read)):
 @router.get("/tables")
 def get_table_list(p: ProjectDB = Depends(get_project_read)):
     cur = p.conn.execute(
-        "SELECT table_name, layer, purpose, validation_status, schema_json FROM _table_registry ORDER BY table_name"
+        "SELECT table_name, layer, purpose, validation_status, schema_json, directory, matrix_meta_json "
+        "FROM _table_registry ORDER BY directory, table_name"
     )
     rows = []
     for r in cur.fetchall():
         d = dict(r)
         sj = d.pop("schema_json", None) or "{}"
+        mm = d.pop("matrix_meta_json", None) or ""
         try:
             parsed = json.loads(sj) if isinstance(sj, str) else {}
         except json.JSONDecodeError:
             parsed = {}
         d["display_name"] = (parsed.get("display_name") if isinstance(parsed, dict) else "") or ""
+        d["directory"] = d.get("directory") or ""
+        d["is_matrix"] = bool(mm) and d.get("layer") == "matrix"
         rows.append(d)
     return {"tables": rows}
+
+
+@router.get("/matrix/{table_name}")
+def get_matrix_snapshot(table_name: str, p: ProjectDB = Depends(get_project_read)):
+    """以宽表 JSON 形式读取 matrix 表内容（前端只读视图）。"""
+    try:
+        return _read_matrix(p.conn, table_name=table_name)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/matrix")
+def list_matrix(p: ProjectDB = Depends(get_project_read)):
+    return {"tables": _list_matrix_tables(p.conn)}
 
 
 @router.get("/tables/{table_name}/readme")

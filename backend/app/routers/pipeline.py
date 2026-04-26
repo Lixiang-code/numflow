@@ -29,18 +29,13 @@ def _readme_setting_key(step_id: str) -> str:
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
-# 与 03 文档章节对齐的稳定 ID（可随产品细化）
+# 与第3轮优化文档对齐的稳定 ID（顺序约束）
 PIPELINE_STEPS_BASE: List[str] = [
     "environment_global_readme",
     "base_attribute_framework",
-    "gameplay_attribute_scheme",
-    "gameplay_allocation_tables",
-    "second_order_framework",
-    "gameplay_attribute_tables",
-    "cultivation_resource_design",
+    "gameplay_allocation",
     "cultivation_resource_framework",
-    "cultivation_allocation_tables",
-    "cultivation_quant_tables",
+    "cultivation_allocation",
     "gameplay_landing_tables",
 ]
 # Backward compat alias（部分老代码引用 PIPELINE_STEPS）

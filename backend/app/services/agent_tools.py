@@ -232,6 +232,10 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                             "若不传则按表名启发式推断。"
                         ),
                     },
+                    "directory": {
+                        "type": "string",
+                        "description": "目录路径（强烈建议填写，'/' 分隔），如 '基础属性' / '落地表/装备' / '养成资源'。便于工作台目录树管理。",
+                    },
                 },
                 "required": ["table_name", "display_name", "columns"],
             },
@@ -718,6 +722,224 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
             },
         },
     },
+    # ─── 第3轮新增：表目录管理 ────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "list_directories",
+            "description": "按目录列出所有表（目录树视图）。每个表都应该归属一个 directory（如 '落地表/装备'、'养成资源'）。",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_table_directory",
+            "description": "为已存在的表设置目录路径（如 '落地表/装备'）。新建表时也应在 create_table/create_matrix_table 时直接传 directory。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string"},
+                    "directory": {"type": "string", "description": "目录路径，'/' 分隔，如 '落地表/装备'"},
+                },
+                "required": ["table_name", "directory"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    # ─── 第3轮新增：Matrix（行/列双向语义）表 ──────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "create_matrix_table",
+            "description": (
+                "创建『行/列双向语义』分配表。\n"
+                "用途：分配方案表（行=玩法/子系统，列=属性 或 资源，交叉=投放比例/权重）。\n"
+                "kind=matrix_attr：玩法×属性 投放比例；kind=matrix_resource：玩法×资源 分配比例。\n"
+                "rows/cols 每项为 {key:'装备_基础', display_name:'装备·基础', brief:''}；\n"
+                "levels 可空（表示该 matrix 无等级维），否则给出完整等级列表 [1..max_level]。\n"
+                "建表后会自动注册一个名为 <table>_lookup 的 calculator，供后续 call_calculator 查询。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "英文 snake_case"},
+                    "display_name": {"type": "string", "description": "中文表名"},
+                    "kind": {"type": "string", "enum": ["matrix_attr", "matrix_resource"]},
+                    "directory": {"type": "string", "description": "目录路径（必填，如 '分配表'）"},
+                    "rows": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "key": {"type": "string"},
+                                "display_name": {"type": "string"},
+                                "brief": {"type": "string"},
+                            },
+                            "required": ["key", "display_name"],
+                        },
+                    },
+                    "cols": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "key": {"type": "string"},
+                                "display_name": {"type": "string"},
+                                "brief": {"type": "string"},
+                            },
+                            "required": ["key", "display_name"],
+                        },
+                    },
+                    "levels": {"type": "array", "items": {"type": "integer"}},
+                    "value_dtype": {"type": "string", "enum": ["float", "percent", "int"], "default": "float"},
+                    "value_format": {"type": "string", "default": "0.00%"},
+                    "readme": {"type": "string", "default": ""},
+                    "purpose": {"type": "string", "default": ""},
+                },
+                "required": ["table_name", "display_name", "kind", "directory", "rows", "cols"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_matrix_cells",
+            "description": "向 matrix 表批量写入交叉点值。每项 {row, col, level (可空), value, note}。一次 ≤200 条。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string"},
+                    "cells": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "row": {"type": "string"},
+                                "col": {"type": "string"},
+                                "level": {"type": "integer"},
+                                "value": {"type": "number"},
+                                "note": {"type": "string"},
+                            },
+                            "required": ["row", "col", "value"],
+                        },
+                    },
+                },
+                "required": ["table_name", "cells"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_matrix",
+            "description": "以宽表形式读取 matrix。可按 level / 行子集 / 列子集 切片。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string"},
+                    "level": {"type": "integer"},
+                    "rows": {"type": "array", "items": {"type": "string"}},
+                    "cols": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["table_name"],
+            },
+        },
+    },
+    # ─── 第3轮新增：Calculator 注册（fun(level, gameplay, attr) 风格查询）────
+    {
+        "type": "function",
+        "function": {
+            "name": "register_calculator",
+            "description": (
+                "把一张 matrix 表（或普通表）注册为可被查询的 calculator。"
+                "axes 描述形参 → 数据库列的映射。brief 必填，至少 8 字符，必须说明用途与入参语义。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "calculator 名称（snake_case）"},
+                    "kind": {"type": "string", "enum": ["matrix_attr", "matrix_resource", "lookup"]},
+                    "table_name": {"type": "string"},
+                    "axes": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "description": "形参名（call 时用）"},
+                                "source": {"type": "string", "description": "对应数据库列名"},
+                            },
+                            "required": ["name", "source"],
+                        },
+                    },
+                    "value_column": {"type": "string", "default": "value"},
+                    "brief": {"type": "string", "description": "用途说明，必填，≥8 字符"},
+                    "grain": {"type": "string", "description": "可选：matrix_resource 时的粒度（hourly/per_level/cumulative）"},
+                },
+                "required": ["name", "kind", "table_name", "axes", "brief"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_calculators",
+            "description": "列出所有已注册 calculator（含 brief 说明，便于 AI 自检与下游引用）",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "call_calculator",
+            "description": "调用已注册的 calculator。kwargs 为入参字典（与 axes.name 对应）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "kwargs": {"type": "object"},
+                },
+                "required": ["name", "kwargs"],
+            },
+        },
+    },
+    # ─── 第3轮新增：子系统参数暴露 ──────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "expose_param_to_subsystems",
+            "description": (
+                "在父系统步骤里把关键参数暴露给所有子系统步骤。\n"
+                "示例：装备_基础步骤暴露 `equip_base_to_upgrade_ratio=0.6`，"
+                "装备_升级 / 装备_增幅 步骤的 prompt 会自动看到此参数。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "owner_step": {"type": "string", "description": "暴露源的步骤 ID"},
+                    "target_step": {"type": "string", "description": "目标步骤 ID 或 'subsystems:<owner_step>'（广播）"},
+                    "key": {"type": "string"},
+                    "value": {},
+                    "brief": {"type": "string"},
+                },
+                "required": ["owner_step", "target_step", "key", "value", "brief"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_exposed_params",
+            "description": "列出针对某个步骤的所有 exposed params（子步骤启动 prompt 自动注入）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_step": {"type": "string"},
+                },
+                "required": ["target_step"],
+            },
+        },
+    },
 ]
 
 
@@ -749,9 +971,36 @@ def _get_project_config(conn: sqlite3.Connection) -> Dict[str, Any]:
 
 def _get_table_list(conn: sqlite3.Connection) -> Dict[str, Any]:
     cur = conn.execute(
-        "SELECT table_name, layer, purpose, validation_status FROM _table_registry ORDER BY table_name"
+        "SELECT table_name, layer, purpose, validation_status, "
+        "COALESCE(directory,'') AS directory FROM _table_registry ORDER BY directory, table_name"
     )
     return {"tables": [dict(r) for r in cur.fetchall()]}
+
+
+def _list_directories(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """目录树聚合视图：按 directory 字段分组所有表。"""
+    cur = conn.execute(
+        "SELECT COALESCE(directory,'') AS directory, table_name, layer, validation_status "
+        "FROM _table_registry ORDER BY directory, table_name"
+    )
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for r in cur.fetchall():
+        d = r["directory"] or "(根目录)"
+        groups.setdefault(d, []).append({
+            "table_name": r["table_name"],
+            "layer": r["layer"],
+            "validation_status": r["validation_status"],
+        })
+    return {"directories": [{"path": k, "tables": v} for k, v in groups.items()]}
+
+
+def _set_table_directory(conn: sqlite3.Connection, table_name: str, directory: str) -> Dict[str, Any]:
+    cur = conn.execute("SELECT 1 FROM _table_registry WHERE table_name=?", (table_name,))
+    if not cur.fetchone():
+        return {"ok": False, "error": f"未知表 {table_name}"}
+    conn.execute("UPDATE _table_registry SET directory=? WHERE table_name=?", (directory or "", table_name))
+    conn.commit()
+    return {"ok": True, "table_name": table_name, "directory": directory or ""}
 
 
 def _provenance_stats(
@@ -1247,6 +1496,7 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                     display_name=str(args.get("display_name", "")),
                     column_meta=col_meta,
                     kind=str(args.get("kind", "")),
+                    directory=str(args.get("directory", "")),
                 )
             except ValueError as e:
                 tname = str(args.get("table_name", ""))
@@ -1430,9 +1680,146 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
         out = _const_tag_register(conn, args, p.can_write)
     elif name == "const_tag_list":
         out = _const_tag_list(conn, args)
+    # ─── 第3轮新增：表目录 / matrix / calculator / 暴露参数 ──────────────
+    elif name == "list_directories":
+        out = _list_directories(conn)
+    elif name == "set_table_directory":
+        if not p.can_write:
+            out = {"error": "无写权限"}
+        else:
+            out = _set_table_directory(conn, str(args.get("table_name", "")), str(args.get("directory", "")))
+    elif name == "create_matrix_table":
+        if not p.can_write:
+            out = {"error": "无写权限"}
+        else:
+            try:
+                from app.services.matrix_table_ops import create_matrix_table as _create_mtx
+                out = _create_mtx(
+                    conn,
+                    table_name=str(args.get("table_name", "")),
+                    display_name=str(args.get("display_name", "")),
+                    kind=str(args.get("kind", "")),
+                    rows=args.get("rows") or [],
+                    cols=args.get("cols") or [],
+                    levels=args.get("levels"),
+                    directory=str(args.get("directory", "")),
+                    readme=str(args.get("readme", "")),
+                    purpose=str(args.get("purpose", "")),
+                    value_dtype=str(args.get("value_dtype", "float")),
+                    value_format=str(args.get("value_format", "0.00%")),
+                )
+            except ValueError as e:
+                out = {"error": str(e)}
+    elif name == "write_matrix_cells":
+        if not p.can_write:
+            out = {"error": "无写权限"}
+        else:
+            try:
+                from app.services.matrix_table_ops import write_matrix_cells as _wmc
+                out = _wmc(
+                    conn,
+                    table_name=str(args.get("table_name", "")),
+                    cells=args.get("cells") or [],
+                )
+            except ValueError as e:
+                out = {"error": str(e)}
+    elif name == "read_matrix":
+        try:
+            from app.services.matrix_table_ops import read_matrix as _rm
+            out = _rm(
+                conn,
+                table_name=str(args.get("table_name", "")),
+                level=args.get("level"),
+                rows=args.get("rows"),
+                cols=args.get("cols"),
+            )
+        except ValueError as e:
+            out = {"error": str(e)}
+    elif name == "register_calculator":
+        if not p.can_write:
+            out = {"error": "无写权限"}
+        else:
+            try:
+                from app.services.calculator_ops import register_calculator as _rc
+                out = _rc(
+                    conn,
+                    name=str(args.get("name", "")),
+                    kind=str(args.get("kind", "")),
+                    table_name=str(args.get("table_name", "")),
+                    axes=args.get("axes") or [],
+                    value_column=str(args.get("value_column", "value")),
+                    brief=str(args.get("brief", "")),
+                    grain=args.get("grain"),
+                )
+            except ValueError as e:
+                out = {"error": str(e)}
+    elif name == "list_calculators":
+        from app.services.calculator_ops import list_calculators as _lc
+        out = {"items": _lc(conn)}
+    elif name == "call_calculator":
+        from app.services.calculator_ops import call_calculator as _cc
+        out = _cc(conn, name=str(args.get("name", "")), kwargs=args.get("kwargs") or {})
+    elif name == "expose_param_to_subsystems":
+        if not p.can_write:
+            out = {"error": "无写权限"}
+        else:
+            out = _expose_param(conn, args)
+    elif name == "list_exposed_params":
+        out = _list_exposed_params(conn, str(args.get("target_step", "")))
     else:
         out = {"error": f"未知工具 {name}"}
     return json.dumps(wrap_tool_payload(out), ensure_ascii=False)
+
+
+def _expose_param(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any]:
+    owner = str(args.get("owner_step", "")).strip()
+    target = str(args.get("target_step", "")).strip()
+    key = str(args.get("key", "")).strip()
+    brief = str(args.get("brief", "")).strip()
+    if not owner or not target or not key:
+        return {"error": "owner_step / target_step / key 均必填"}
+    if not brief:
+        return {"error": "brief 必填，用于子系统步骤上下文中向 AI 解释参数含义"}
+    val_json = json.dumps(args.get("value"), ensure_ascii=False)
+    import time
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    conn.execute(
+        """
+        INSERT INTO _step_exposed_params (owner_step, target_step, key, value_json, brief, created_at)
+        VALUES (?,?,?,?,?,?)
+        ON CONFLICT(owner_step, target_step, key) DO UPDATE SET
+            value_json = excluded.value_json,
+            brief = excluded.brief
+        """,
+        (owner, target, key, val_json, brief, now),
+    )
+    conn.commit()
+    return {"ok": True, "owner_step": owner, "target_step": target, "key": key}
+
+
+def _list_exposed_params(conn: sqlite3.Connection, target_step: str) -> Dict[str, Any]:
+    if not target_step:
+        return {"items": []}
+    # 直接命中 + 通配（subsystems:<owner>，调用方自行解析 owner）
+    cur = conn.execute(
+        "SELECT owner_step, target_step, key, value_json, brief FROM _step_exposed_params "
+        "WHERE target_step = ? OR target_step = ?",
+        (target_step, "subsystems:" + target_step.split(".")[0]),
+    )
+    items: List[Dict[str, Any]] = []
+    for r in cur.fetchall():
+        try:
+            val = json.loads(r[3])
+        except Exception:  # noqa: BLE001
+            val = r[3]
+        items.append({
+            "owner_step": r[0],
+            "target_step": r[1],
+            "key": r[2],
+            "value": val,
+            "brief": r[4],
+        })
+    return {"items": items}
 
 
 # ─── 术语 / 常数：实现 ───────────────────────────────────────────────
