@@ -10,7 +10,7 @@ from app.db.project_schema import get_pipeline_state
 from app.deps import ProjectDB
 from app.services.agent_tools import TOOLS_OPENAI, dispatch_tool, _get_project_config
 from app.services.prompt_router import route_prompt
-from app.services.qwen_client import get_client
+from app.services.qwen_client import get_client_for_model
 
 
 WRITE_TOOLS = {
@@ -28,6 +28,29 @@ WRITE_TOOLS = {
     "setup_level_table",
     "create_snapshot",
 }
+
+# 只读工具白名单（gather 阶段只允许调用这些）
+READ_TOOLS = {
+    "get_project_config",
+    "get_table_list",
+    "read_table",
+    "read_cell",
+    "get_protected_cells",
+    "get_dependency_graph",
+    "get_table_readme",
+    "get_algorithm_api_list",
+    "run_validation",
+    "list_snapshots",
+    "compare_snapshot",
+    "run_balance_check",
+    "get_validation_history",
+    "get_default_system_rules",
+    "glossary_lookup",
+    "glossary_list",
+    "const_list",
+}
+
+READ_TOOLS_OPENAI = [t for t in TOOLS_OPENAI if t["function"]["name"] in READ_TOOLS]
 
 # 工具名称 → 中文标签（用于前端监控显示）
 _TOOL_LABELS: Dict[str, str] = {
@@ -76,6 +99,21 @@ def _chunk_text(text: str, size: int) -> Iterable[str]:
         yield text[i : i + size]
 
 
+def _build_assistant_msg(msg: Any, *, tool_calls: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Build an assistant message dict, preserving reasoning_content when present.
+
+    DeepSeek thinking models include `reasoning_content` in responses and require
+    it to be echoed back in subsequent turns; omitting it causes a 400 error.
+    """
+    d: Dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
+    rc = getattr(msg, "reasoning_content", None)
+    if rc:
+        d["reasoning_content"] = rc
+    if tool_calls is not None:
+        d["tool_calls"] = tool_calls
+    return d
+
+
 # ---------- system prompts ----------
 
 def _role_block(mode_norm: str) -> str:
@@ -96,12 +134,13 @@ def _common_system(mode_norm: str) -> str:
     return "\n".join(
         [
             role_block,
-            "【2/4 项目上下文】每次任务先 get_project_config，再按需 get_dependency_graph、get_table_readme；"
-            "勿假设未读到的表结构。新建或修改「*系统_落地」、各子系统**行轴**、消耗与属性投放时，**须先** "
+            "【2/4 项目上下文】信息收集（gather）阶段已主动读取了项目配置与现有表结构；"
+            "design/review 阶段直接引用已收集信息，**无需**再重复调用读取工具。"
+            "新建或修改「*系统_落地」、各子系统**行轴**、消耗与属性投放时，**须先** "
             "get_default_system_rules 对照 02 机读默认；禁止各系统无差别复用同一张仅「标准等级+两列消耗」的落地模板。 "
             "宝石的默认数据轴是**品阶/合成**（3 同阶→1 高 1 品）与**解锁门槛/属性池/分配**列，**不是**把标准等级 1..N 逐行 1:1 当成「宝石 N 级表」。"
             "坐骑/副本须体现开放等级与 02 约定（如坐骑 30 级、副本默认门槛等），列里要有玩法含义而非只有金币+掉率。\n"
-            "【游戏类型适配】game_type 字段在 fixed_layer_config.core 中，必须读取后适配设计：\n"
+            "【游戏类型适配】game_type 字段在 fixed_layer_config.core 中，已在 gather 阶段读取；设计时必须适配：\n"
             "  · rpg_turn（回合制）：战斗以回合为单位，速度影响行动顺序，无攻击间隔概念；\n"
             "  · rpg_realtime（即时制 Action RPG）：战斗实时进行，核心差异属性为 atk_spd/move_spd/base_atk_interval；\n"
             "  两种类型在 HP/ATK/DEF/暴击/暴伤等属性上无本质差异，但即时制需额外处理速度类属性公式与上下限。\n"
@@ -115,8 +154,9 @@ def _common_system(mode_norm: str) -> str:
             "公式引用语法：@表名[列名]=逐行取同行值（数学计算用）；@@表名[列名]=整列数组（VLOOKUP/INDEX/MATCH/SUM/AVERAGE 等查找聚合用）。\n"
             "工具 JSON 固定含字段：status（success|error|partial）、data、warnings、blocked_cells；"
             "遇 partial/error 须阅读 warnings/blocked_cells 再决定是否继续。",
-            "【4/4 输出与流程】本次会话严格按三阶段执行：design → review → execute。\n"
-            "  · design 阶段：必须用以下三段式 CoT 输出，禁止任何工具调用：\n"
+            "【4/4 输出与流程】本次会话严格按四阶段执行：gather → design → review → execute。\n"
+            "  · gather 阶段：主动调用只读工具收集项目信息，完成后输出收集总结。\n"
+            "  · design 阶段：基于 gather 已收集的信息，输出三段式 CoT，禁止任何工具调用：\n"
             "      ## 1. 我对用户需求的理解\n"
             "      ## 2. 我对游戏性的设计理解（结合 02-系统与子系统默认细则与项目核心定义）\n"
             "      ## 3. 我的最终设计\n"
@@ -127,13 +167,33 @@ def _common_system(mode_norm: str) -> str:
     )
 
 
+_GATHER_SYSTEM = (
+    "【当前阶段=gather（信息收集）】你的唯一目标是主动读取足够的项目信息，为后续设计做准备。\n\n"
+    "首轮必须并行调用（一次请求同时发出）：\n"
+    "  · get_project_config — 核心定义（game_type/level_cap/游戏系统等）\n"
+    "  · get_default_system_rules — 02 机读设计约束\n"
+    "  · get_table_list — 已有表清单\n\n"
+    "根据上述结果，按需追加调用（可并行）：\n"
+    "  · get_table_readme / read_table — 查看关键表的结构与数据\n"
+    "  · get_dependency_graph — 了解表间依赖\n"
+    "  · glossary_list / const_list — 已注册术语和常数\n\n"
+    "收集完毕后，输出纯文字的「收集总结」，**禁止输出任何设计内容**：\n"
+    "## 收集完毕\n"
+    "- 项目类型与核心配置：...\n"
+    "- 现有表及关键结构：...\n"
+    "- 与本次任务相关的 02 设计约束：...\n\n"
+    "**严禁调用任何写入工具。**"
+)
+
+
 _DESIGN_SYSTEM_TAIL = (
-    "【当前阶段=design】只输出三段式 CoT，**严禁**任何工具调用。"
+    "【当前阶段=design】你已在 gather 阶段读取了项目信息，现在基于这些信息进行设计分析。"
+    "只输出三段式 CoT，**严禁**任何工具调用。"
     "格式必须严格使用三个二级标题：\n"
     "## 1. 我对用户需求的理解\n"
     "## 2. 我对游戏性的设计理解\n"
     "## 3. 我的最终设计\n"
-    "在第 2 段中显式引用 02 默认细则与项目核心定义；第 3 段必须给出可执行的表/列/公式清单。"
+    "在第 2 段中显式引用 gather 阶段读取到的 02 默认细则与项目核心定义；第 3 段必须给出可执行的表/列/公式清单。"
 )
 
 _REVIEW_SYSTEM_TAIL = (
@@ -324,6 +384,99 @@ def _make_state_anchor(
     )
 
 
+# ---------- gather phase ----------
+
+def _run_gather_phase(
+    client: Any,
+    user_message: str,
+    p: ProjectDB,
+    *,
+    model: str,
+    routed_block: str = "",
+) -> Generator[bytes, None, List[Dict[str, Any]]]:
+    """信息收集阶段：AI 主动调用只读工具获取项目信息。
+
+    yields: SSE events (phase="gather")
+    returns: 本阶段产生的消息列表（assistant+tool exchanges），供 design 阶段注入上下文。
+    """
+    gather_messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": _GATHER_SYSTEM},
+    ]
+    if routed_block:
+        gather_messages.append({"role": "system", "content": routed_block})
+    gather_messages.append({"role": "user", "content": user_message})
+
+    exchange_messages: List[Dict[str, Any]] = []
+    MAX_GATHER_ROUNDS = 6
+
+    for round_i in range(1, MAX_GATHER_ROUNDS + 1):
+        yield _emit("gather", {"type": "log", "message": f"信息收集轮次 {round_i}"})
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=gather_messages,
+                tools=READ_TOOLS_OPENAI,
+                tool_choice="auto",
+                parallel_tool_calls=True,
+                temperature=0.1,
+                max_tokens=4096,
+            )
+        except Exception as e:  # noqa: BLE001
+            yield _emit("gather", {"type": "error", "message": f"信息收集调用失败: {e!r}"})
+            return exchange_messages
+
+        msg = resp.choices[0].message
+        tool_calls = getattr(msg, "tool_calls", None) or []
+
+        if tool_calls:
+            tc_dicts = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments or "{}"},
+                }
+                for tc in tool_calls
+            ]
+            assistant_msg = _build_assistant_msg(msg, tool_calls=tc_dicts)
+            gather_messages.append(assistant_msg)
+            exchange_messages.append(assistant_msg)
+
+            for tc in tool_calls:
+                name = tc.function.name
+                args = tc.function.arguments or "{}"
+                label = _TOOL_LABELS.get(name, name)
+                yield _emit("gather", {
+                    "type": "tool_call", "call_id": tc.id,
+                    "name": name, "label": label, "arguments": args,
+                })
+                try:
+                    result = dispatch_tool(name, args, p)
+                except Exception as tool_exc:  # noqa: BLE001
+                    result = json.dumps(
+                        {"ok": False, "error": f"工具执行异常: {tool_exc!r}"},
+                        ensure_ascii=False,
+                    )
+                tool_msg: Dict[str, Any] = {"role": "tool", "tool_call_id": tc.id, "content": result}
+                gather_messages.append(tool_msg)
+                exchange_messages.append(tool_msg)
+                yield _emit("gather", {
+                    "type": "tool_result", "call_id": tc.id,
+                    "name": name, "status": "done", "preview": result[:500],
+                })
+        else:
+            # AI produced the gather summary — done
+            summary_text = (msg.content or "").strip()
+            for chunk in _chunk_text(summary_text, 80):
+                yield _emit("gather", {"type": "token", "text": chunk})
+            summary_msg = _build_assistant_msg(msg)
+            exchange_messages.append(summary_msg)
+            yield _emit("gather", {"type": "done", "summary": summary_text[:800]})
+            return exchange_messages
+
+    yield _emit("gather", {"type": "log", "message": f"⚠ 信息收集达到最大轮次 {MAX_GATHER_ROUNDS}，继续推进"})
+    return exchange_messages
+
+
 # ---------- main entry ----------
 
 def run_agent_sse(
@@ -345,7 +498,7 @@ def run_agent_sse(
     role_label = "初始化 Agent" if mode_norm == "init" else "维护 Agent"
     yield _emit("route", {"type": "log", "message": f"开始调度 Agent（{role_label}）"})
 
-    client = get_client()
+    client = get_client_for_model(_model)
 
     # ---- prompt 路由 ----
     step_id = _current_step_id(p)
@@ -379,7 +532,16 @@ def run_agent_sse(
     # ---- 用户消息事件（供监控追踪）----
     yield _emit("meta", {"type": "user_message", "content": user_message, "model": _model})
 
-    # ---- 1) design ----
+    # ---- 0) gather: AI reads project info before designing ----
+    yield _emit("gather", {"type": "log", "message": "gather 阶段开始（只读工具，AI 主动收集项目信息）"})
+    gather_gen = _run_gather_phase(
+        client, user_message, p,
+        model=_model, routed_block=routed_block,
+    )
+    gather_context: List[Dict[str, Any]] = yield from gather_gen
+    yield _emit("gather", {"type": "log", "message": f"gather 阶段结束（收集 {len(gather_context)} 条上下文消息）"})
+
+    # ---- 1) design: CoT with gathered context ----
     design_messages: List[Dict[str, Any]] = [
         {"role": "system", "content": base_system},
     ]
@@ -387,6 +549,12 @@ def run_agent_sse(
         design_messages.append({"role": "system", "content": routed_block})
     design_messages.append({"role": "system", "content": _DESIGN_SYSTEM_TAIL})
     design_messages.append({"role": "user", "content": user_message})
+    # Inject gather phase context so design sees real project data
+    design_messages.extend(gather_context)
+    design_messages.append({
+        "role": "user",
+        "content": "以上是你在信息收集阶段主动读取的项目信息。请基于这些信息，开始 design 阶段（三段式 CoT，严禁工具调用）。",
+    })
 
     yield _emit("design", {"type": "log", "message": "design 阶段开始（无工具，三段式 CoT，流式）"})
     # 发出完整消息快照供监控
@@ -562,7 +730,7 @@ def run_agent_sse(
         # ---- 输出被 token 限制截断：注入修复提示让模型重新分批 ----
         if finish_reason == "length":
             yield _emit("execute", {"type": "log", "message": "⚠ 模型输出被 max_tokens 截断，注入重试提示"})
-            execute_messages.append({"role": "assistant", "content": msg.content or ""})
+            execute_messages.append(_build_assistant_msg(msg))
             execute_messages.append({
                 "role": "user",
                 "content": (
@@ -589,21 +757,17 @@ def run_agent_sse(
                     return json.dumps({"_truncated": True, "_raw_prefix": raw[:120]}, ensure_ascii=False)
 
             execute_messages.append(
-                {
-                    "role": "assistant",
-                    "content": msg.content or "",
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": _safe_args(tc.function.arguments),
-                            },
-                        }
-                        for tc in tool_calls
-                    ],
-                }
+                _build_assistant_msg(msg, tool_calls=[
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": _safe_args(tc.function.arguments),
+                        },
+                    }
+                    for tc in tool_calls
+                ])
             )
 
             for tc in tool_calls:
@@ -762,7 +926,7 @@ def _run_recovery_sse(
 ) -> Generator[bytes, None, None]:
     """Recovery Agent SSE：分析失败上下文，调用工具修复，输出修复报告。"""
     _model = model or QWEN_MODEL
-    client = get_client()
+    client = get_client_for_model(_model)
 
     step_id = failure_context.get("step_id", "unknown")
     error_msg = failure_context.get("error", "")
@@ -879,10 +1043,10 @@ def _run_recovery_sse(
         if msg is None:
             break
 
-        execute_messages.append({"role": "assistant", "content": msg.content or "", "tool_calls": [
+        execute_messages.append(_build_assistant_msg(msg, tool_calls=[
             {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
             for tc in (msg.tool_calls or [])
-        ]})
+        ]))
 
         if not msg.tool_calls:
             recovery_text = msg.content or ""

@@ -14,7 +14,7 @@ import json
 from typing import Any, Dict
 
 from app.config import QWEN_MODEL
-from app.services.qwen_client import get_client
+from app.services.qwen_client import get_client_for_model
 
 
 # === 全部步骤通用前缀（命名 + 术语 + 常数纪律），插在每段提示词最前 ===
@@ -252,7 +252,7 @@ def route_prompt(
       - hit=False：让千问现编一段提示词
     """
     default_prompt = DEFAULT_STEP_PROMPTS.get(step_id, "")
-    client = get_client()
+    client = get_client_for_model(model or QWEN_MODEL)
 
     judge_user = (
         f"当前 pipeline 步骤 ID: {step_id or '(未知)'}\n"

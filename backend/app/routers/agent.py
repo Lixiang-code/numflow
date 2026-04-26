@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.deps import ProjectDB, get_project_read, get_project_write
 
-from app.config import DASHSCOPE_API_KEY, QWEN_MODEL
+from app.config import DASHSCOPE_API_KEY, DEEPSEEK_API_KEY, QWEN_MODEL
 from app.db.project_schema import (
     create_agent_session,
     get_agent_session_messages,
@@ -210,10 +210,10 @@ def _session_tracking_wrapper(
 
 @router.post("/chat")
 def agent_chat(body: ChatBody, p: ProjectDB = Depends(get_project_write)):
-    if not DASHSCOPE_API_KEY:
+    if not DASHSCOPE_API_KEY and not DEEPSEEK_API_KEY:
         raise HTTPException(
             status_code=503,
-            detail="未配置 DASHSCOPE_API_KEY",
+            detail="未配置任何 AI API Key（DASHSCOPE_API_KEY 或 DEEPSEEK_API_KEY）",
         )
 
     # 读取项目绑定的 AI 模型（未设置则 None，由 run_agent_sse 回退到全局默认）
@@ -296,6 +296,7 @@ def diagnostics_config() -> Dict[str, Any]:
     """不发起外呼：仅看密钥是否已加载、当前模型名。"""
     return {
         "dashscope_api_key_configured": bool(DASHSCOPE_API_KEY),
+        "deepseek_api_key_configured": bool(DEEPSEEK_API_KEY),
         "model": QWEN_MODEL,
         "hint": "POST /api/agent/diagnostics/run 执行真实调用与缓存对比",
     }
@@ -309,10 +310,10 @@ def diagnostics_run(
     1) 短对话验证 OpenAI 兼容 Chat Completions 可用。
     2) 连续两次带显式 ephemeral 缓存的长 system，比较 usage 里缓存相关字段。
     """
-    if not DASHSCOPE_API_KEY:
+    if not DASHSCOPE_API_KEY and not DEEPSEEK_API_KEY:
         raise HTTPException(
             status_code=503,
-            detail="未配置 DASHSCOPE_API_KEY，请在 backend/.env 或 systemd EnvironmentFile 中设置",
+            detail="未配置任何 AI API Key，请在 backend/.env 中设置 DASHSCOPE_API_KEY 或 DEEPSEEK_API_KEY",
         )
 
     out: Dict[str, Any] = {

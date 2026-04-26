@@ -217,34 +217,48 @@ FALLBACK_MODELS = [
     "qwen-max",
     "qwen3-coder-flash",
     "deepseek-v4-flash",
+    "deepseek-v4-pro",
 ]
+
+# DeepSeek 固定可用模型（不通过 API 枚举，直接提供）
+_DEEPSEEK_STATIC_MODELS = ["deepseek-v4-flash", "deepseek-v4-pro"]
 
 
 @router.get("/ai-models")
 def list_ai_models():
-    """返回可用于 Agent 的文本生成模型列表，优先从 DashScope 拉取，失败则返回内置列表。"""
+    """返回可用于 Agent 的文本生成模型列表，优先从 DashScope 拉取，失败则返回内置列表；DeepSeek 模型静态附加。"""
     from app.config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL
     from openai import OpenAI
+    qwen_models = []
+    source = "fallback"
+    error_msg = None
     try:
         client = OpenAI(api_key=DASHSCOPE_API_KEY, base_url=DASHSCOPE_BASE_URL)
         raw = list(client.models.list())
-        models = []
         for m in raw:
             mid = m.id
             if any(ex in mid for ex in _TEXT_MODEL_EXCLUDES):
                 continue
             if any(mid.startswith(p) for p in _TEXT_MODEL_PREFIXES):
-                models.append(mid)
+                qwen_models.append(mid)
         # 排序：qwen3.6 系列优先
-        models.sort(key=lambda x: (
+        qwen_models.sort(key=lambda x: (
             0 if x.startswith("qwen3.6") else
             1 if x.startswith("qwen3.5") else
             2 if x.startswith("qwen3-") else
             3 if x.startswith("qwen-") else 4
         ))
-        return {"models": models, "source": "dashscope"}
+        source = "dashscope"
     except Exception as e:  # noqa: BLE001
-        return {"models": FALLBACK_MODELS, "source": "fallback", "error": str(e)}
+        qwen_models = [m for m in FALLBACK_MODELS if not m.startswith("deepseek-")]
+        error_msg = str(e)
+
+    # 合并 DeepSeek 静态模型（去重）
+    models = qwen_models + [m for m in _DEEPSEEK_STATIC_MODELS if m not in qwen_models]
+    result: dict = {"models": models, "source": source}
+    if error_msg:
+        result["error"] = error_msg
+    return result
 
 
 class AiModelBody(BaseModel):

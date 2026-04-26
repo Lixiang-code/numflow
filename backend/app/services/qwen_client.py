@@ -1,4 +1,4 @@
-"""DashScope Qwen via OpenAI-compatible Chat Completions."""
+"""DashScope Qwen / DeepSeek via OpenAI-compatible Chat Completions."""
 
 from __future__ import annotations
 
@@ -6,13 +6,34 @@ from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
 
-from app.config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, QWEN_MODEL
+from app.config import (
+    DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, QWEN_MODEL,
+    DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODELS,
+)
+
+
+def _is_deepseek_model(model: str) -> bool:
+    """Only v4 models route to DeepSeek's own API; older deepseek-* models are served by DashScope."""
+    return model in DEEPSEEK_MODELS
 
 
 def get_client() -> OpenAI:
     if not DASHSCOPE_API_KEY:
         raise RuntimeError("DASHSCOPE_API_KEY 未配置（backend/.env 或环境变量）")
     return OpenAI(api_key=DASHSCOPE_API_KEY, base_url=DASHSCOPE_BASE_URL)
+
+
+def get_deepseek_client() -> OpenAI:
+    if not DEEPSEEK_API_KEY:
+        raise RuntimeError("DEEPSEEK_API_KEY 未配置（backend/.env 或环境变量）")
+    return OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+
+
+def get_client_for_model(model: str) -> OpenAI:
+    """Return the appropriate OpenAI-compatible client based on model name."""
+    if _is_deepseek_model(model):
+        return get_deepseek_client()
+    return get_client()
 
 
 def usage_to_dict(usage: Any) -> Optional[Dict[str, Any]]:
@@ -80,10 +101,12 @@ def chat_once(
     *,
     temperature: float = 0.2,
     max_tokens: int = 256,
+    model: Optional[str] = None,
 ) -> tuple[str, Dict[str, Any]]:
-    client = get_client()
+    _model = model or QWEN_MODEL
+    client = get_client_for_model(_model)
     completion = client.chat.completions.create(
-        model=QWEN_MODEL,
+        model=_model,
         messages=messages,
         temperature=temperature,
         max_tokens=max_tokens,

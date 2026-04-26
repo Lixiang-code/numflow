@@ -24,6 +24,10 @@ DASHSCOPE_BASE_URL = os.getenv(
 ).strip()
 QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen3.6-plus").strip()
 
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
+DEEPSEEK_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro"}
+
 # CORS: comma-separated origins; required when frontend uses credentials
 FRONTEND_ORIGINS = [
     o.strip()
