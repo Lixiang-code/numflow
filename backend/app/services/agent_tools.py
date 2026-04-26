@@ -443,13 +443,15 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "可选 register_only=true 只注册不执行。"
                 "公式语法：\n"
                 "  逐行引用：@表名[列名]（同行取值，用于数学运算）\n"
-                "  整列引用：@@表名[列名]（整列 list，用于 VLOOKUP/INDEX/MATCH/SUM/AVERAGE）\n"
+                "  整列引用：@@表名[列名]（整列 list，用于 VLOOKUP/INDEX/MATCH/SUM/AVERAGE 及逐元素比较）\n"
                 "  运算：+ - * / ** %、ROUND/FLOOR/CEIL/ABS/SQRT/EXP/LOG/POW/POWER/MIN/MAX/CLAMP/"
                 "IF/IFS/PIECEWISE/AND/OR/NOT/MOD（大小写不敏感）\n"
-                "  比较：< <= > >= == !=\n"
+                "  比较：< <= > >= == !=（支持 @@col 与标量/@@col2 逐元素广播，返回 bool 列表）\n"
                 "  查找：VLOOKUP(val,@@lkup,@@ret,[exact]) / XLOOKUP(val,@@lkup,@@ret,[ifna]) / "
                 "INDEX(@@col,row) / MATCH(val,@@col) / LOOKUP(val,@@lkup,@@ret)\n"
                 "  聚合：SUM(@@col) / AVERAGE(@@col) / COUNT(@@col)\n"
+                "  条件聚合：SUM(IF(@@col < @表[col], @@val, 0))（典型：累计经验 / 前缀和）\n"
+                "  累计求和：CUMSUM_TO_HERE(@@col)（含本行）/ CUMSUM_PREV(@@col)（截至上一行）\n"
                 "一个公式即可填满整列（200 行/8 列只需 8 次调用，请优先使用，禁止逐行 write_cells）。"
             ),
             "parameters": {

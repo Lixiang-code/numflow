@@ -91,6 +91,17 @@ def _piecewise(*args: Any) -> Any:
 
 
 def _if(cond: Any, a: Any, b: Any) -> Any:
+    # Element-wise IF when condition is a list (e.g. from array comparison)
+    if isinstance(cond, (list, pd.Series)):
+        cond_list = list(cond)
+        a_list = list(a) if isinstance(a, (list, pd.Series)) else None
+        b_list = list(b) if isinstance(b, (list, pd.Series)) else None
+        result = []
+        for i, c in enumerate(cond_list):
+            av = a_list[i] if a_list is not None else a
+            bv = b_list[i] if b_list is not None else b
+            result.append(av if _to_bool(c) else bv)
+        return result
     return a if _to_bool(cond) else b
 
 
@@ -436,10 +447,25 @@ def _eval_ast(node: ast.AST, names: Dict[str, Any]) -> Any:
             cmp = _CMP_OPS.get(type(op))
             if cmp is None:
                 raise ValueError("不支持的比较运算")
-            if not cmp(left, right):
-                return False
-            left = right
-        return True
+            # Element-wise broadcast: list vs scalar, scalar vs list, or list vs list
+            left_is_arr = isinstance(left, (list, pd.Series))
+            right_is_arr = isinstance(right, (list, pd.Series))
+            if left_is_arr or right_is_arr:
+                lv = _arr_to_floats(left) if left_is_arr else None
+                rv = _arr_to_floats(right) if right_is_arr else None
+                if lv is not None and rv is not None:
+                    left = [cmp(a, b) for a, b in zip(lv, rv)]
+                elif lv is not None:
+                    r = float(right)
+                    left = [cmp(a, r) for a in lv]
+                else:
+                    l = float(left)
+                    left = [cmp(l, b) for b in rv]
+            else:
+                if not cmp(left, right):
+                    return False
+                left = right
+        return left
     if isinstance(node, ast.IfExp):
         cond = _eval_ast(node.test, names)
         return _eval_ast(node.body if _to_bool(cond) else node.orelse, names)

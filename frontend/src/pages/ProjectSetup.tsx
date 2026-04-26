@@ -324,6 +324,7 @@ export default function ProjectSetup() {
   const [recoveryStatus, setRecoveryStatus] = useState<'idle' | 'running' | 'done' | 'partial' | 'failed'>('idle')
   const [recoveryMsg, setRecoveryMsg] = useState('')
   const recoveryCountRef = useRef(0) // 每步最多3次自动修复
+  const networkRetryRef = useRef(0)  // 网络错误直接重试计数（最多2次）
 
   // ── 当前正在运行的步骤 ────────────────────────────────────────────
   const [currentStep, setCurrentStep] = useState<string | null>(null)
@@ -642,8 +643,8 @@ export default function ProjectSetup() {
       const execText = result.localPhases['execute']?.text ?? ''
       setRecoveryMsg(execText.slice(-600))
 
-      if ((rs === 'done' || rs === 'partial') && autoMode && recoveryCountRef.current <= 3) {
-        // 修复成功：延迟2秒后重试原步骤
+      // retry / done / partial → 重试原步骤
+      if ((rs === 'retry' || rs === 'done' || rs === 'partial') && autoMode && recoveryCountRef.current <= 3) {
         setRecoveryMode(false)
         setTimeout(() => {
           if (busyRef.current) return
@@ -674,6 +675,7 @@ export default function ProjectSetup() {
     if (busyRef.current) return
     busyRef.current = true
     recoveryCountRef.current = 0  // 重置修复计数（新步骤）
+    networkRetryRef.current = 0   // 重置网络重试计数（新步骤）
     resetAgentState()
     resetRecoveryState()
     setBusy(true)
@@ -718,6 +720,21 @@ export default function ProjectSetup() {
     const localPhases = sseResult?.localPhases ?? {}
     const toolCount = sseResult?.toolCount ?? 0
 
+    // 网络错误判断：fetch 失败 / SSE 连接中断 → 不需要 recovery，直接重试
+    const isNetworkError = (msg: string): boolean => {
+      const low = msg.toLowerCase()
+      return (
+        low.includes('failed to fetch') ||
+        low.includes('networkerror') ||
+        low.includes('network error') ||
+        low.includes('fetch') ||
+        low.includes('econnreset') ||
+        low.includes('econnrefused') ||
+        low.includes('connection') ||
+        low.startsWith('http 5') // 5xx 服务端临时错误也直接重试
+      )
+    }
+
     if (hasError) {
       const errorMsg = catchErr ?? Object.values(localPhases).map(p => p.error).filter(Boolean).join('; ')
       setAgentErr(errorMsg)
@@ -727,7 +744,40 @@ export default function ProjectSetup() {
       })
       setLivePhase('')
 
-      // 自动触发修复 Agent（每步最多3次）
+      // 网络错误：直接重试，不触发 recovery agent
+      if (autoMode && isNetworkError(errorMsg) && networkRetryRef.current < 2) {
+        networkRetryRef.current++
+        setAgentErr(`网络错误，自动重试（第 ${networkRetryRef.current} 次）：${errorMsg}`)
+        setTimeout(() => {
+          void runStep(stepId, projInfo, completedSteps)
+        }, 2500)
+        return
+      }
+
+      // 判断是否有成功的写操作（状态可能已污染）
+      // 只读工具集（与后端保持一致）
+      const READ_TOOL_NAMES = new Set([
+        'get_project_config','get_table_list','read_table','read_cell','get_protected_cells',
+        'get_dependency_graph','get_table_readme','get_algorithm_api_list','run_validation',
+        'list_snapshots','compare_snapshot','run_balance_check','get_validation_history',
+        'get_default_system_rules','glossary_lookup','glossary_list','const_list',
+      ])
+      const hasWriteToolCalls = localTools.some(t => !READ_TOOL_NAMES.has(t.name))
+
+      if (!hasWriteToolCalls) {
+        // 没有写操作 → 直接重试，无需 Recovery（工具逻辑错误由主 Agent 处理）
+        if (autoMode && networkRetryRef.current < 3) {
+          networkRetryRef.current++
+          setAgentErr(`自动重试（第 ${networkRetryRef.current} 次）：${errorMsg}`)
+          setTimeout(() => void runStep(stepId, projInfo, completedSteps), 2000)
+        } else {
+          busyRef.current = false
+          setBusy(false)
+        }
+        return
+      }
+
+      // 有写操作后崩溃 → 可能状态污染，触发 Recovery Agent（每步最多3次）
       if (autoMode && recoveryCountRef.current < 3) {
         const failCtx = {
           step_id: stepId,
@@ -987,7 +1037,10 @@ export default function ProjectSetup() {
           {agentErr && !viewingHistory && !recoveryMode && (
             <div className="ps-agent-err">
               <div className="ps-err-header">
-                <span>⚠ Agent 出错（已尝试修复 {recoveryCountRef.current} 次）</span>
+                <span>⚠ Agent 出错
+                  {recoveryCountRef.current > 0 && `（已尝试修复 ${recoveryCountRef.current} 次）`}
+                  {networkRetryRef.current > 0 && recoveryCountRef.current === 0 && `（已自动重试 ${networkRetryRef.current} 次）`}
+                </span>
               </div>
               <div className="ps-err-body">{agentErr}</div>
               <div className="ps-err-actions">

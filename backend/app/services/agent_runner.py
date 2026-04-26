@@ -52,6 +52,10 @@ READ_TOOLS = {
 
 READ_TOOLS_OPENAI = [t for t in TOOLS_OPENAI if t["function"]["name"] in READ_TOOLS]
 
+# Recovery Agent 只允许用只读工具 + 清理类写工具（delete_table / delete_column 等）
+RECOVERY_CLEANUP_TOOLS = READ_TOOLS | {"delete_table", "update_table_readme", "update_global_readme"}
+RECOVERY_TOOLS_OPENAI = [t for t in TOOLS_OPENAI if t["function"]["name"] in RECOVERY_CLEANUP_TOOLS]
+
 # 工具名称 → 中文标签（用于前端监控显示）
 _TOOL_LABELS: Dict[str, str] = {
     "create_table": "创建数值表",
@@ -345,7 +349,7 @@ def _reviewer_check(client, tool_name: str, tool_args: str, *, model: Optional[s
                 },
             ],
             temperature=0.1,
-            max_tokens=512,
+            max_tokens=2048,
             response_format={"type": "json_object"},
         )
         raw = (resp.choices[0].message.content or "").strip()
@@ -419,7 +423,7 @@ def _run_gather_phase(
                 tool_choice="auto",
                 parallel_tool_calls=True,
                 temperature=0.1,
-                max_tokens=4096,
+                max_tokens=8192,
             )
         except Exception as e:  # noqa: BLE001
             yield _emit("gather", {"type": "error", "message": f"信息收集调用失败: {e!r}"})
@@ -565,7 +569,7 @@ def run_agent_sse(
             model=_model,
             messages=design_messages,
             temperature=0.2,
-            max_tokens=3200,
+            max_tokens=16384,
             stream=True,
         )
         for chunk in stream:
@@ -606,7 +610,7 @@ def run_agent_sse(
             model=_model,
             messages=review_messages,
             temperature=0.2,
-            max_tokens=2400,
+            max_tokens=32768,
             stream=True,
         )
         for chunk in stream:
@@ -717,7 +721,7 @@ def run_agent_sse(
                 tool_choice="auto",
                 parallel_tool_calls=True,
                 temperature=0.2,
-                max_tokens=8192,
+                max_tokens=16384,
             )
         except Exception as e:  # noqa: BLE001
             yield _emit("execute", {"type": "error", "message": f"execute 调用失败: {e!r}"})
@@ -902,18 +906,28 @@ def run_agent_sse(
 # ─── Recovery Agent ──────────────────────────────────────────────────────────
 
 _RECOVERY_SYSTEM = """\
-【角色】你是 Numflow「修复 Agent」（Recovery Agent）。你的工作是分析一次失败的 pipeline 步骤，找出根本原因，并通过调用工具执行必要的修复操作，使该步骤能够在下次重试时成功。
+【角色】你是 Numflow「状态修复 Agent」（Recovery Agent）。
+你的唯一职责是：检查上一次 pipeline 步骤因崩溃/中断留下的"孤儿状态"（部分创建的表、脏数据），并清理它，使下一次重试能从干净状态开始。
+
+【触发前提】
+本 Agent 只在"执行阶段有部分写操作成功后崩溃"时触发。
+如果错误是网络/连接/超时问题，或者没有任何写操作成功，应直接输出 RECOVERY_RETRY，无需任何工具调用。
 
 【工作流程】
-1. 分析：阅读失败上下文（失败步骤、错误信息、已完成的工具调用历史），诊断根本原因。
-2. 修复计划：列出需要执行的修复操作（可能包括：删除已部分创建的冲突表、清理脏数据、更新 README 等）。
-3. 执行修复：调用工具完成修复；调用顺序：先清理冲突→再补全遗漏→最后验证状态。
-4. 汇报：输出结构化修复报告，明确说明已修复内容、未能修复内容、建议的重试策略。
+1. 诊断：阅读失败上下文，判断是否真的有状态污染（孤儿表/不完整数据）。
+   - 若无污染（纯瞬态错误 / 无写入成功） → 立即输出 RECOVERY_RETRY，结束。
+2. 检查：调用 get_table_list / read_table 确认实际残留状态。
+3. 清理：仅调用 delete_table 删除孤儿表（不做任何新建/写入）。
+4. 汇报：输出结构化修复报告，末尾必须有且仅有一个状态标记（单独一行）：
+   - RECOVERY_RETRY  ：无需清理，可直接重试
+   - RECOVERY_DONE   ：已清理完毕，可安全重试
+   - RECOVERY_PARTIAL：部分清理，重试可能成功
+   - RECOVERY_FAILED ：无法自动处理，需人工介入
 
 【约束】
-- 只做清理/恢复性操作，不做超出失败步骤范围的新建工作（新建工作留给重试）。
-- 遇到无法自动修复的问题，必须明确在报告中说明，不要无限重试。
-- 修复报告末尾必须以 RECOVERY_DONE 或 RECOVERY_PARTIAL 或 RECOVERY_FAILED 结尾（机器可读信号）。
+- 只能调用只读工具和 delete_table / update_table_readme / update_global_readme。
+- 绝对不能创建表、写入数据、注册公式——那是重试步骤的工作。
+- 遇到无法判断的情况，优先选 RECOVERY_RETRY，让重试去自然发现。
 """
 
 
@@ -982,7 +996,7 @@ def _run_recovery_sse(
             model=_model,
             messages=design_messages,
             temperature=0.1,
-            max_tokens=1000,
+            max_tokens=8192,
             stream=True,
         )
         for chunk in stream:
@@ -1029,11 +1043,11 @@ def _run_recovery_sse(
             resp = client.chat.completions.create(
                 model=_model,
                 messages=execute_messages,
-                tools=TOOLS_OPENAI,
+                tools=RECOVERY_TOOLS_OPENAI,
                 tool_choice="auto",
                 parallel_tool_calls=True,
                 temperature=0.1,
-                max_tokens=8192,
+                max_tokens=16384,
             )
         except Exception as e:  # noqa: BLE001
             yield _emit("execute", {"type": "error", "message": f"修复执行调用失败: {e!r}"})
@@ -1053,7 +1067,9 @@ def _run_recovery_sse(
             for chunk in _chunk_text(recovery_text, 80):
                 yield _emit("execute", {"type": "token", "text": chunk})
             # 判断修复结果
-            if "RECOVERY_DONE" in recovery_text:
+            if "RECOVERY_RETRY" in recovery_text:
+                status = "retry"
+            elif "RECOVERY_DONE" in recovery_text:
                 status = "done"
             elif "RECOVERY_PARTIAL" in recovery_text:
                 status = "partial"
