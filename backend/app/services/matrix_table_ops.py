@@ -44,21 +44,43 @@ def create_matrix_table(
     kind: str,
     rows: Sequence[Dict[str, str]],          # [{key, display_name, brief}]
     cols: Sequence[Dict[str, str]],          # [{key, display_name, brief}]
-    levels: Optional[Sequence[int]] = None,  # 若为空表示无 level 维（单个值）
+    levels: Optional[Sequence[int]] = None,  # 若为空或 scale_mode='none' 则不分等级
     directory: str = "",
     readme: str = "",
     purpose: str = "",
     value_dtype: str = "float",              # float / percent / int
     value_format: str = "0.00%",
     register_calc: bool = True,
+    scale_mode: Optional[str] = None,        # none | fallback | static
+    # none    = 无等级维（matrix_attr 默认）；所有 cell 存 level=NULL，调用时忽略 level 参数
+    # fallback= 懒触发（matrix_resource 默认）：先查精确 level，找不到自动回退 level=NULL
+    # static  = 全量预存（旧行为，level 列必须全部填满）
 ) -> Dict[str, Any]:
-    """创建 matrix 表。"""
+    """创建 matrix 表。
+
+    推荐规则（避免写入爆炸）：
+    - matrix_attr  → scale_mode='none'     只存 2D（行×列），level=NULL，全等级同值
+    - matrix_resource → scale_mode='fallback'  先写 level=NULL 作为基准，
+                         只为需要区分等级的 cell 写入具体 level 覆盖值
+    - scale_mode='static' 保留旧行为（要求 AI 填满所有 level，适合极少数场景）
+    """
     if kind not in _KIND_META:
         raise ValueError(f"未知 matrix kind={kind}（允许：{list(_KIND_META)}）")
     t = assert_english_ident(table_name, field="表名")
     cur = conn.execute("SELECT 1 FROM _table_registry WHERE table_name = ?", (t,))
     if cur.fetchone():
         raise ValueError(f"表 {t!r} 已存在")
+
+    # 根据 kind 设置默认 scale_mode
+    if scale_mode is None:
+        scale_mode = "none" if kind == "matrix_attr" else "fallback"
+    if scale_mode not in ("none", "fallback", "static"):
+        raise ValueError(f"scale_mode 必须为 none / fallback / static，得到 {scale_mode!r}")
+
+    # none 模式强制 levels 为空
+    effective_levels: List[int] = []
+    if scale_mode == "static":
+        effective_levels = list(levels) if levels else []
 
     meta = _KIND_META[kind]
     row_axis_name = meta["row_axis"]
@@ -75,13 +97,14 @@ def create_matrix_table(
     )'''
     conn.execute(ddl)
 
-    # 唯一索引保证一个 (row, col, level) 只一条
+    # 唯一索引保证一个 (row, col, level) 只一条（level 可为 NULL，NULL 视为唯一）
     conn.execute(
         f'CREATE UNIQUE INDEX "{t}__rcl" ON "{t}" ({row_axis_name}, {col_axis_name}, level)'
     )
 
     matrix_meta = {
         "kind": kind,
+        "scale_mode": scale_mode,
         "row_axis": row_axis_name,
         "col_axis": col_axis_name,
         "value_kind": meta["value_kind"],
@@ -89,7 +112,7 @@ def create_matrix_table(
         "value_format": value_format,
         "rows": [dict(r) for r in rows],
         "cols": [dict(c) for c in cols],
-        "levels": list(levels) if levels else [],
+        "levels": effective_levels,
     }
 
     schema_payload = {
@@ -139,8 +162,8 @@ def create_matrix_table(
                 ],
                 value_column="value",
                 brief=(
-                    f"按 (level, {row_axis_name}, {col_axis_name}) 查询 {display_name} 的投放比例。"
-                    "若 level 维为空表示该 matrix 不分等级。"
+                    f"按 ({row_axis_name}, {col_axis_name}) 查询 {display_name} 的投放比例；"
+                    f"scale_mode={scale_mode}，'none' 时 level 参数忽略，'fallback' 时先查精确 level 再退 NULL。"
                 ),
             )
         except Exception:  # noqa: BLE001
@@ -153,6 +176,7 @@ def create_matrix_table(
         "matrix_meta": matrix_meta,
         "calculator": calc_name,
         "directory": directory or "",
+        "scale_mode": scale_mode,
     }
 
 
@@ -165,6 +189,12 @@ def write_matrix_cells(
     """批量写入 matrix 单元格。
 
     每项: {row, col, level (optional), value, note (optional)}
+
+    scale_mode='none' 时 level 参数被忽略，统一存 level=NULL（避免写入爆炸）。
+    scale_mode='fallback' 时：
+        - 不指定 level → 写入 level=NULL（作为兜底基准值）
+        - 指定 level → 写入精确等级覆盖值
+    scale_mode='static' 时与旧行为一致。
     """
     t = table_name
     cur = conn.execute(
@@ -176,6 +206,7 @@ def write_matrix_cells(
     meta = json.loads(row[1] or "{}") or {}
     row_axis = meta.get("row_axis") or "row_key"
     col_axis = meta.get("col_axis") or "col_key"
+    scale_mode = meta.get("scale_mode") or "static"
 
     written = 0
     for c in cells:
@@ -183,10 +214,19 @@ def write_matrix_cells(
         co = str(c.get("col") or c.get(col_axis) or "").strip()
         if not r or not co:
             continue
-        lv = c.get("level")
-        lv_int: Optional[int] = int(lv) if lv is not None and str(lv) != "" else None
+        raw_lv = c.get("level")
+
+        # 根据 scale_mode 决定存入的 level 值
+        if scale_mode == "none":
+            lv_int: Optional[int] = None          # 强制 NULL，忽略调用方传的 level
+        elif scale_mode == "fallback":
+            lv_int = int(raw_lv) if raw_lv is not None and str(raw_lv) != "" else None
+        else:  # static
+            lv_int = int(raw_lv) if raw_lv is not None and str(raw_lv) != "" else None
+
         v = c.get("value")
         note = c.get("note") or ""
+        # row_id 按照 (row, col, level_or_null) 构成唯一键
         rid = f"{r}__{co}__{lv_int if lv_int is not None else 'na'}"
         conn.execute(
             f'''INSERT INTO "{t}" (row_id, {row_axis}, {col_axis}, level, value, note)
@@ -225,8 +265,17 @@ def read_matrix(
 
     where: List[str] = []
     params: List[Any] = []
+    scale_mode = meta.get("scale_mode") or "static"
+
     if level is not None:
-        where.append("level = ?"); params.append(int(level))
+        if scale_mode == "none":
+            # none 模式：所有 cell 存 level=NULL，level 参数忽略
+            where.append("level IS NULL")
+        elif scale_mode == "fallback":
+            # fallback 模式：先精确 level，结果合并 NULL 基准（读取时不过滤，全部返回）
+            pass  # 不加 level 过滤，让调用方自行选择
+        else:
+            where.append("level = ?"); params.append(int(level))
     if rows:
         placeholders = ",".join("?" * len(rows))
         where.append(f"{row_axis} IN ({placeholders})")

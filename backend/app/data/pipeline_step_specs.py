@@ -61,11 +61,16 @@ _NAMING_RULE_HINT = (
 
 _MATRIX_TABLE_HINT = (
     "【matrix 表使用规则】"
-    "①使用 create_matrix_table 创建（kind=matrix_attr 或 res_alloc）；"
-    "②写入用 write_matrix_cells，行=玩法子系统(如 equip_base/equip_enhance)，列=属性或资源；"
-    "③创建后必须 register_calculator 注册 fun(level, gameplay, attr|res[, grain])，"
-    "brief 字段必须 ≥8 字符，写清楚函数语义、grain 含义、单位；"
-    "④下游可用 call_calculator 取值，不要手工 read_matrix 拼装。"
+    "①使用 create_matrix_table 创建（kind=matrix_attr 或 matrix_resource）；"
+    "②【避免写入爆炸】scale_mode 默认规则：\n"
+    "   matrix_attr  → scale_mode='none'    纯 2D，无等级维，write_matrix_cells 不传 level；\n"
+    "   matrix_resource → scale_mode='fallback' 先写 level=NULL 基准值，\n"
+    "   只对有等级差异的 cell 写入 level 覆盖，call_calculator 自动回退基准；\n"
+    "   【禁止使用 scale_mode='static' 填满所有 level，除非设计上必须每级不同且已说明原因】\n"
+    "③写入用 write_matrix_cells，行=玩法子系统(如 equip_base/equip_enhance)，列=属性或资源；"
+    "④创建后必须 register_calculator 注册 fun(gameplay, attr|res[, level, grain])，"
+    "brief 字段必须 ≥8 字符，写清楚函数语义与 grain 含义；"
+    "⑤下游可用 call_calculator 取值，不要手工 read_matrix 拼装。"
 )
 
 
@@ -105,52 +110,95 @@ PIPELINE_STEP_SPECS: List[StepSpec] = [
     ),
     StepSpec(
         step_id="base_attribute_framework",
-        title_zh="基本属性基础框架表",
+        title_zh="基本属性基础框架表（除 HP）",
         goal=(
-            "以全等级（默认 60/200 行）拉出基础一阶属性曲线。"
+            "以全等级（默认 60/200 行）拉出基础一阶属性曲线，覆盖所有勾选属性但不包括 hp 列。"
             "本步遵循新规则（第3轮）：以攻击力按膨胀速率公式贯穿全等级（不分段），"
             "所有勾选属性必须在表中且必须有膨胀；高级属性（暴击率、闪避、命中、抗性等）"
-            "由 AI 基于设计意图给出更合理的曲线（仍单调，线性或指数，禁止分段）；"
-            "HP 不能拍脑袋，必须由 (atk, def, 战斗节奏=期望生存时间) 反推。"
+            "由 AI 基于设计意图给出更合理的曲线（仍单调，线性或指数，禁止分段）。"
+            "HP 列留到下一步 hp_formula_derivation 单独填充。"
         ),
         inputs=[
             "全局 README 中的属性勾选与公式选择（减法/乘法）",
             "默认常数与曲线策略（02 + 用户覆盖）",
             "标准等级数 settings.core.level_max",
-            "战斗节奏：期望生存秒数（默认 8s 同级 PvE，可被用户覆盖）",
         ],
         outputs=[
-            "num_base_framework：全等级一阶属性表（覆盖所有勾选属性）",
-            "对应 README：写明攻击膨胀公式、各高级属性曲线、HP 反推公式与战斗节奏假设",
+            "num_base_framework：全等级一阶属性表（覆盖所有勾选属性，暂留 hp 列空值）",
+            "对应 README：写明攻击膨胀公式、各高级属性曲线方案与设计依据",
         ],
         required_tables=["num_base_framework"],
         required_columns={
-            "num_base_framework": [
-                "level", "atk", "def", "hp",
-            ],
+            "num_base_framework": ["level", "atk", "def"],
         },
         acceptance=[
             "num_base_framework 行数 == level_max（默认 60，禁止只填 2 行示例）",
             "atk 列严格单调递增，使用单一膨胀速率公式贯穿全等级（禁止分段）",
             "用户勾选的所有属性都有同名列且全等级单调（线性或指数，禁止分段）",
             "高级属性（暴击率、闪避、命中等百分比类）必须有合理上下界且单调",
-            "hp 列由公式 hp = fn(atk_attacker, def_self, expected_survive_seconds) 反推得到，"
-            "公式必须 update_formula 登记到 _formula_registry",
-            "README 必须显式写出战斗节奏假设（期望生存秒数）与反推过程",
+            "hp 列此步允许为空或 0，留待下一步反推填充",
             "所有名词（每列名、属性中文名）必须先 glossary_register，README 用 $name$ 引用",
         ],
         agent_hint=_AGENT_THREE_PHASE_HINT + "\n" + _NAMING_RULE_HINT + (
-            " design 阶段：明确攻击膨胀公式（线性 a+bL 或指数 a*r^L）、高级属性曲线方案、"
-            "HP 反推公式与战斗节奏；review 阶段对照单调性与膨胀连续性自检；"
-            "execute 时对每个 cell 写入用 source_tag=base_framework_v1。"
+            " design 阶段：明确攻击膨胀公式（线性 a+bL 或指数 a*r^L）与各高级属性曲线方案；"
+            " review 阶段对照单调性与膨胀连续性自检；execute 时用 source_tag=base_framework_v1。"
+            " 本步不填 hp 列，无需考虑战斗节奏。"
         ),
         common_pitfalls=[
             "攻击力分段膨胀（被新规则禁止）",
             "用户勾选了某属性但未在表中出现",
-            "HP 直接填线性数列，未由攻防+战斗节奏反推",
             "高级属性写常数不膨胀",
+            "在本步就试图填 hp 列（hp 属于下一步）",
         ],
         upstream_steps=["environment_global_readme"],
+    ),
+    StepSpec(
+        step_id="hp_formula_derivation",
+        title_zh="HP 反推公式推导",
+        goal=(
+            "基于已建立的 atk / def 曲线与战斗节奏假设，通过公式反推推导出 hp 列，"
+            "确保每一等级的 HP 都有战斗设计依据，而非拍脑袋填数。\n"
+            "核心公式：hp(L) = atk_attacker(L) × (1 - def_ratio(L)) × expected_survive_seconds(L) × attacks_per_second\n"
+            "其中 expected_survive_seconds 必须注册为 const_register（可按等级分档，如低中高区段）。"
+        ),
+        inputs=[
+            "num_base_framework 中已完成的 atk / def 全等级数据",
+            "战斗节奏：期望生存秒数（同级 PvE 默认 8s，可按低中高等级区段设不同值）",
+            "攻击频率（attacks_per_second，默认 1.0，可注册为 const）",
+            "伤害减免模型（减法/乘法，来自全局 README）",
+        ],
+        outputs=[
+            "num_base_framework 的 hp 列：全等级反推值（update_rows 更新已有表）",
+            "在 _formula_registry 登记 hp_formula（update_formula）",
+            "在 _constants 中注册 expected_survive_seconds（const_register，标签 combat_rhythm）",
+            "本步 README：写出反推公式、战斗节奏假设、各等级区间 HP 合理性校验结论",
+        ],
+        required_tables=["num_base_framework"],
+        required_columns={
+            "num_base_framework": ["level", "atk", "def", "hp"],
+        },
+        acceptance=[
+            "hp 列严格单调递增，禁止出现平台段或负值",
+            "expected_survive_seconds 已通过 const_register 注册到 _constants（标签 combat_rhythm）",
+            "hp_formula 已通过 update_formula 登记到 _formula_registry",
+            "README 写出了公式推导过程、每个参数取值依据，及 1/中/max 等级的 HP 数值合理性校验",
+            "design 阶段明确说明了攻击方 atk 参考值（同级 PvE 对手等同于自身 atk）",
+        ],
+        agent_hint=_AGENT_THREE_PHASE_HINT + "\n" + _NAMING_RULE_HINT + (
+            " design 阶段：\n"
+            "  1. 明确战斗节奏参数（expected_survive_seconds 按等级区段），\n"
+            "  2. 写出推导公式 hp = atk_ref × net_dmg_ratio × survive_sec × aps，\n"
+            "  3. 给出 level 1 / level_max/2 / level_max 三个校验样本；\n"
+            " review 阶段：对照 def 与 hp 的比值趋势，确保高等级 HP 膨胀合理（不超过 atk×10）；\n"
+            " execute 阶段：用 update_rows 把 hp 列写入 num_base_framework（不重建表）。"
+        ),
+        common_pitfalls=[
+            "直接填等差/等比数列，未从战斗公式反推",
+            "expected_survive_seconds 全等级统一用一个值（应允许按区段分档）",
+            "忘记 update_formula 登记公式到 _formula_registry",
+            "攻击方参考 atk 使用错误值（应使用同等级自身 atk，不是 level 1 的 atk）",
+        ],
+        upstream_steps=["base_attribute_framework"],
     ),
     StepSpec(
         step_id="gameplay_allocation",
@@ -194,7 +242,7 @@ PIPELINE_STEP_SPECS: List[StepSpec] = [
             "忘了 register_calculator 或 brief 太短",
             "列里漏了某些勾选属性",
         ],
-        upstream_steps=["base_attribute_framework"],
+        upstream_steps=["hp_formula_derivation"],
     ),
     StepSpec(
         step_id="cultivation_resource_framework",
@@ -248,7 +296,7 @@ PIPELINE_STEP_SPECS: List[StepSpec] = [
             "把多个资源压缩成一张子表（应当用同一张表的多列）",
             "用 minutes 单位（本轮统一用 hours）",
         ],
-        upstream_steps=["base_attribute_framework"],
+        upstream_steps=["hp_formula_derivation"],
     ),
     StepSpec(
         step_id="cultivation_allocation",

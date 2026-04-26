@@ -97,14 +97,37 @@ def call_calculator(
     kind, table_name, axes_json, value_column = r
     axes = json.loads(axes_json or "[]")
 
+    # 查出 matrix 的 scale_mode（若是 matrix 表）
+    scale_mode = "static"
+    try:
+        mm_row = conn.execute(
+            "SELECT matrix_meta_json FROM _table_registry WHERE table_name = ?", (table_name,)
+        ).fetchone()
+        if mm_row and mm_row[0]:
+            mm = json.loads(mm_row[0])
+            scale_mode = mm.get("scale_mode") or "static"
+    except Exception:  # noqa: BLE001
+        pass
+
     where: List[str] = []
     params: List[Any] = []
     grain_value: Optional[str] = None
+    level_value: Optional[Any] = None
+
     for a in axes:
         nm = a.get("name")
         src = a.get("source")
         if nm == "grain":
             grain_value = str(kwargs.get("grain") or a.get("default") or "")
+            continue
+        if nm == "level":
+            # scale_mode=none → 跳过 level，不加入 WHERE（查 level=NULL 的行）
+            if scale_mode == "none":
+                continue
+            level_value = kwargs.get("level")
+            if level_value is not None and str(level_value) != "":
+                where.append(f'"{src}" = ?')
+                params.append(int(level_value))
             continue
         if nm not in kwargs:
             continue
@@ -114,26 +137,31 @@ def call_calculator(
         where.append(f'"{src}" = ?')
         params.append(v)
 
-    # matrix_resource 三档（hourly / per_level / cumulative）通过 col_axis 值选择
-    # 由调用方在 kwargs 直接传 res_id + grain；calculator 把 grain 拼到 col 选择里
     sel_col = value_column
-    if kind == "matrix_resource" and grain_value:
-        # 约定：col 名为 res_id；行存 per_minute/amount_this_level/amount_cumulative 三种 col 之一
-        # 这里是直接按列名规约：col_axis 值为 res_id::grain
-        params_with_grain: List[Any] = []
-        new_where: List[str] = []
-        for w, pv in zip(where, params):
-            new_where.append(w); params_with_grain.append(pv)
-        where = new_where
-        params = params_with_grain
-        # 简化：grain 由调用者写到 col 值后缀 res_id::hourly
-        # 这里不再做特殊拼接，让上层 calculator 注册时把 grain 编码到 col 字段值
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    sql = f'SELECT "{sel_col}" FROM "{table_name}"{where_sql} LIMIT 1'
 
-    sql = f'SELECT "{sel_col}" FROM "{table_name}"' + (" WHERE " + " AND ".join(where) if where else "") + " LIMIT 1"
     try:
         rr = conn.execute(sql, params).fetchone()
     except sqlite3.OperationalError as e:
         return {"ok": False, "error": f"查询失败: {e}", "sql": sql}
+
+    # fallback 模式：精确 level 找不到时，回退查 level=NULL 的基准值
+    if not rr and scale_mode == "fallback" and level_value is not None:
+        fallback_where = [w for w, _ in zip(where, params) if '"level"' not in w]
+        fallback_params = [p for w, p in zip(where, params) if '"level"' not in w]
+        fb_sql = (
+            f'SELECT "{sel_col}" FROM "{table_name}"'
+            + (" WHERE " + " AND ".join(fallback_where) + " AND level IS NULL" if fallback_where else " WHERE level IS NULL")
+            + " LIMIT 1"
+        )
+        try:
+            rr = conn.execute(fb_sql, fallback_params).fetchone()
+        except sqlite3.OperationalError:
+            pass
+        if rr:
+            return {"ok": True, "value": rr[0], "found": True, "fallback": True}
+
     if not rr:
         return {"ok": True, "value": None, "found": False, "sql": sql, "params": params}
     return {"ok": True, "value": rr[0], "found": True}

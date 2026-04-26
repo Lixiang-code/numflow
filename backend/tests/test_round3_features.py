@@ -98,15 +98,16 @@ def test_create_matrix_table_and_read_back():
         conn,
         table_name="gameplay_attr_alloc",
         cells=[
-            {"row": "equip_base", "col": "atk", "level": 1, "value": 0.4},
-            {"row": "equip_base", "col": "hp", "level": 1, "value": 0.5},
-            {"row": "equip_enhance", "col": "atk", "level": 1, "value": 0.2},
+            {"row": "equip_base", "col": "atk", "value": 0.4},
+            {"row": "equip_base", "col": "hp", "value": 0.5},
+            {"row": "equip_enhance", "col": "atk", "value": 0.2},
         ],
     )
-    snap = read_matrix(conn, table_name="gameplay_attr_alloc", level=1)
+    # scale_mode='none': level stored as NULL, read_matrix ignores level param
+    snap = read_matrix(conn, table_name="gameplay_attr_alloc")
     data = snap["data"]
-    assert data["equip_base"]["atk"]["1"]["value"] == 0.4
-    assert data["equip_base"]["hp"]["1"]["value"] == 0.5
+    assert data["equip_base"]["atk"]["_"]["value"] == 0.4
+    assert data["equip_base"]["hp"]["_"]["value"] == 0.5
 
     listed = list_matrix_tables(conn)
     names = [t.get("table_name") for t in listed]
@@ -200,3 +201,82 @@ def test_expose_param_round_trip():
     assert len(items) == 1
     assert items[0]["key"] == "equip_base_attr_ratio"
     assert items[0]["value"] == 0.6
+
+
+# ---------- scale_mode fallback ----------
+
+def test_matrix_fallback_scale_mode():
+    """fallback 模式：只写 NULL 基准，call_calculator 能按 level 查到回退值。"""
+    conn = _new_conn()
+    create_matrix_table(
+        conn,
+        table_name="res_alloc",
+        display_name="资源分配",
+        kind="matrix_resource",
+        rows=[{"key": "equip_base", "display_name": "装备·基础", "brief": ""}],
+        cols=[{"key": "gold", "display_name": "金币", "brief": ""}],
+        directory="分配/资源",
+        scale_mode="fallback",
+        register_calc=True,
+    )
+    # 只写基准值（无 level）
+    write_matrix_cells(
+        conn,
+        table_name="res_alloc",
+        cells=[{"row": "equip_base", "col": "gold", "value": 100.0}],
+    )
+    # 查 level=5（不存在精确行），应回退到 NULL 基准
+    res = call_calculator(conn, name="res_alloc_lookup",
+                          kwargs={"gameplay": "equip_base", "res_id": "gold", "level": 5})
+    assert res["found"] is True
+    assert res["value"] == 100.0
+    assert res.get("fallback") is True
+
+
+def test_matrix_none_scale_mode_ignores_level():
+    """none 模式：写入时忽略 level，read_matrix 不过滤 level。"""
+    conn = _new_conn()
+    create_matrix_table(
+        conn,
+        table_name="attr_alloc2",
+        display_name="属性分配2",
+        kind="matrix_attr",
+        rows=[{"key": "skill", "display_name": "技能", "brief": ""}],
+        cols=[{"key": "atk", "display_name": "攻击", "brief": ""}],
+        directory="分配/测试",
+        scale_mode="none",
+        register_calc=True,
+    )
+    # 传 level 也应被忽略（存 NULL）
+    write_matrix_cells(
+        conn,
+        table_name="attr_alloc2",
+        cells=[{"row": "skill", "col": "atk", "level": 99, "value": 0.3}],
+    )
+    snap = read_matrix(conn, table_name="attr_alloc2")
+    data = snap["data"]
+    assert data["skill"]["atk"]["_"]["value"] == 0.3  # key='_' 表示 level=NULL
+
+
+# ---------- pipeline step specs ----------
+
+def test_pipeline_has_hp_formula_step():
+    """流水线应包含独立的 hp_formula_derivation 步骤。"""
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+    from app.data.pipeline_step_specs import list_step_specs
+    ids = [s.step_id for s in list_step_specs()]
+    assert "hp_formula_derivation" in ids
+    assert "base_attribute_framework" in ids
+    hp_idx = ids.index("hp_formula_derivation")
+    base_idx = ids.index("base_attribute_framework")
+    assert hp_idx == base_idx + 1  # hp 步紧跟 base
+
+
+def test_pipeline_base_attr_does_not_require_hp():
+    """base_attribute_framework 步骤不应把 hp 列列为必填列。"""
+    from app.data.pipeline_step_specs import get_step_spec
+    spec = get_step_spec("base_attribute_framework")
+    assert spec is not None
+    required = spec.required_columns.get("num_base_framework") or []
+    assert "hp" not in required

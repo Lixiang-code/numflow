@@ -757,7 +757,11 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "用途：分配方案表（行=玩法/子系统，列=属性 或 资源，交叉=投放比例/权重）。\n"
                 "kind=matrix_attr：玩法×属性 投放比例；kind=matrix_resource：玩法×资源 分配比例。\n"
                 "rows/cols 每项为 {key:'装备_基础', display_name:'装备·基础', brief:''}；\n"
-                "levels 可空（表示该 matrix 无等级维），否则给出完整等级列表 [1..max_level]。\n"
+                "【重要】scale_mode 决定 level 维的处理策略（避免写入爆炸）：\n"
+                "  - 'none'（默认 matrix_attr）：无等级维，2D 表，调用时忽略 level 参数，无需填 levels。\n"
+                "  - 'fallback'（默认 matrix_resource）：只写 level=NULL 基准值，有特殊等级时覆盖写；\n"
+                "     call_calculator 先查精确 level，找不到自动回退 level=NULL 基准，无需预填所有等级。\n"
+                "  - 'static'：旧行为，要求 AI 填满所有 (row,col,level) 组合，慎用。\n"
                 "建表后会自动注册一个名为 <table>_lookup 的 calculator，供后续 call_calculator 查询。"
             ),
             "parameters": {
@@ -767,6 +771,11 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                     "display_name": {"type": "string", "description": "中文表名"},
                     "kind": {"type": "string", "enum": ["matrix_attr", "matrix_resource"]},
                     "directory": {"type": "string", "description": "目录路径（必填，如 '分配表'）"},
+                    "scale_mode": {
+                        "type": "string",
+                        "enum": ["none", "fallback", "static"],
+                        "description": "等级维策略：none=无等级（matrix_attr 默认）；fallback=懒触发（matrix_resource 默认）；static=全量预存",
+                    },
                     "rows": {
                         "type": "array",
                         "items": {
@@ -791,7 +800,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                             "required": ["key", "display_name"],
                         },
                     },
-                    "levels": {"type": "array", "items": {"type": "integer"}},
+                    "levels": {"type": "array", "items": {"type": "integer"}, "description": "仅 scale_mode='static' 时需要填写"},
                     "value_dtype": {"type": "string", "enum": ["float", "percent", "int"], "default": "float"},
                     "value_format": {"type": "string", "default": "0.00%"},
                     "readme": {"type": "string", "default": ""},
@@ -805,7 +814,11 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "write_matrix_cells",
-            "description": "向 matrix 表批量写入交叉点值。每项 {row, col, level (可空), value, note}。一次 ≤200 条。",
+            "description": (
+                "向 matrix 表批量写入交叉点值。每项 {row, col, level (可空), value, note}。一次 ≤200 条。\n"
+                "scale_mode='none' 时 level 字段自动忽略（存 NULL）；\n"
+                "scale_mode='fallback' 时不传 level 即写入基准值（level=NULL），传 level 写精确覆盖。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1707,6 +1720,7 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                     purpose=str(args.get("purpose", "")),
                     value_dtype=str(args.get("value_dtype", "float")),
                     value_format=str(args.get("value_format", "0.00%")),
+                    scale_mode=args.get("scale_mode") or None,
                 )
             except ValueError as e:
                 out = {"error": str(e)}

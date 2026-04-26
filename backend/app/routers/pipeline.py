@@ -29,10 +29,11 @@ def _readme_setting_key(step_id: str) -> str:
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
-# 与第3轮优化文档对齐的稳定 ID（顺序约束）
+# 与第3轮优化文档对齐的稳定 ID（顺序约束）—— 第3.5轮：HP 单独成步
 PIPELINE_STEPS_BASE: List[str] = [
     "environment_global_readme",
     "base_attribute_framework",
+    "hp_formula_derivation",
     "gameplay_allocation",
     "cultivation_resource_framework",
     "cultivation_allocation",
