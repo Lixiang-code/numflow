@@ -21,6 +21,7 @@ from app.db.project_schema import (
 )
 from app.deps import ProjectDB, get_project_read, get_project_write
 from app.services.snapshot_ops import create_snapshot
+from app.services.validation_report import build_validation_report
 
 
 def _readme_setting_key(step_id: str) -> str:
@@ -164,12 +165,25 @@ def pipeline_advance(body: AdvanceBody, p: ProjectDB = Depends(get_project_write
         label=f"pipeline:{expected}",
         note=f"流水线自动快照：完成步骤 {expected}",
     )
+
+    # 自动跑一次全表校验，把 unknown 状态收敛掉，并把违规数注入下一步上下文
+    try:
+        report = build_validation_report(p.conn)
+        validation_summary = {
+            "passed": report.get("passed"),
+            "violations_count": len(report.get("violations") or []),
+            "warnings_count": len(report.get("warnings") or []),
+        }
+    except Exception as e:  # noqa: BLE001
+        validation_summary = {"error": str(e)}
+
     return {
         "ok": True,
         "completed_steps": done,
         "next_expected": nxt or None,
         "snapshot": snap,
         "readme_seeded": readme_seeded,
+        "validation": validation_summary,
     }
 
 

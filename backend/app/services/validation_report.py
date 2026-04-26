@@ -11,6 +11,114 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.services.cell_writes import assert_col_or_table
 
 
+# ────────────────────────── 默认规则 / 自动挂载 ──────────────────────────
+
+# 表 kind 识别：建表方调用时显式传 kind；缺省按"启发式"识别。
+TABLE_KINDS = ("base", "alloc", "attr", "quant", "landing", "resource", "unknown")
+
+
+def _is_id_like(col_name: str) -> bool:
+    n = col_name.lower()
+    return n in ("level", "stage", "tier", "rank", "id", "row_id") or n.endswith("_id") or n.endswith("_level")
+
+
+def _is_percent_like(col_name: str, number_format: str = "") -> bool:
+    if number_format == "0.00%":
+        return True
+    n = col_name.lower()
+    return any(tok in n for tok in ("ratio", "rate", "percent", "_pct", "pct_", "share"))
+
+
+def _is_cost_perf_like(col_name: str) -> bool:
+    n = col_name.lower()
+    return any(tok in n for tok in ("perf", "value_per", "cost_eff", "efficiency"))
+
+
+def default_rules_for(
+    kind: str,
+    schema_columns: Optional[List[Dict[str, Any]]] = None,
+    formula_columns: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """根据表 kind 与列 schema 推导一组默认规则。
+
+    schema_columns: [{name, sql_type, dtype, number_format, display_name, ...}]
+    formula_columns: 已注册公式的列名列表（用于挂 formula_has_value）
+    """
+    cols = list(schema_columns or [])
+    formula_cols = set(formula_columns or [])
+    rules: List[Dict[str, Any]] = []
+    seen_ids = set()
+
+    for col in cols:
+        name = str(col.get("name", ""))
+        if not name or name == "row_id":
+            continue
+        nf = str(col.get("number_format") or "")
+        sqlt = str(col.get("sql_type") or "").upper()
+
+        if _is_id_like(name) and name not in seen_ids:
+            rules.append({"id": f"id_{name}_not_empty", "type": "not_empty_id", "column": name})
+            seen_ids.add(name)
+            continue
+
+        if _is_percent_like(name, nf):
+            rules.append({
+                "id": f"pct_{name}_bounds",
+                "type": "percent_bounds",
+                "column": name,
+                "min": 0.0,
+                "max": 0.95 if "rate" in name.lower() or "ratio" in name.lower() else 1.0,
+            })
+            rules.append({"id": f"fmt_{name}", "type": "format_consistency", "column": name})
+
+        if name in formula_cols:
+            rules.append({"id": f"f_{name}_has_value", "type": "formula_has_value", "column": name})
+
+        if kind in ("quant", "landing") and _is_cost_perf_like(name):
+            rules.append({
+                "id": f"mono_{name}",
+                "type": "monotone_warning",
+                "column": name,
+                "order_by": "row_id",
+            })
+
+    # 表层面：alloc 表的所有 REAL 列默认 percent_bounds（除非明显是非占比命名）
+    if kind == "alloc":
+        for col in cols:
+            name = str(col.get("name", ""))
+            if not name or name == "row_id" or _is_id_like(name):
+                continue
+            sqlt = str(col.get("sql_type") or "").upper()
+            if sqlt == "REAL" and not _is_percent_like(name, str(col.get("number_format") or "")):
+                rules.append({
+                    "id": f"alloc_{name}_bounds",
+                    "type": "percent_bounds",
+                    "column": name,
+                    "min": 0.0,
+                    "max": 1.0,
+                })
+    return rules
+
+
+def attach_default_rules(
+    conn: sqlite3.Connection,
+    table_name: str,
+    *,
+    kind: str = "unknown",
+    schema_columns: Optional[List[Dict[str, Any]]] = None,
+    formula_columns: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """将默认规则集合写入 _table_registry.validation_rules_json（覆盖式 upsert）。"""
+    rules = default_rules_for(kind, schema_columns, formula_columns)
+    doc = {"rules": rules, "kind": kind}
+    conn.execute(
+        "UPDATE _table_registry SET validation_rules_json = ? WHERE table_name = ?",
+        (json.dumps(doc, ensure_ascii=False), table_name),
+    )
+    conn.commit()
+    return {"ok": True, "table_name": table_name, "kind": kind, "rules_count": len(rules)}
+
+
 def append_validation_history(conn: sqlite3.Connection, table_name: Optional[str], report: Dict[str, Any]) -> None:
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     conn.execute(
@@ -342,8 +450,11 @@ def _evaluate_rules_for_table(conn: sqlite3.Connection, table_name: str) -> Dict
                 violations.append({"table": t, "rule_id": rid, "message": f"非法列 {col}"})
                 summaries.append({"rule_id": rid, "type": rtype, "column": col, "passed": False, "violation_count": 1})
                 continue
-            cur = conn.execute('SELECT number_format FROM _column_meta WHERE table_name = ? AND column_name = ?', (t, cq))
-            row_meta = cur.fetchone()
+            try:
+                cur = conn.execute('SELECT number_format FROM _column_meta WHERE table_name = ? AND column_name = ?', (t, cq))
+                row_meta = cur.fetchone()
+            except sqlite3.OperationalError:
+                row_meta = None
             nf = (row_meta["number_format"] if row_meta else "") or ""
             local = []
             if nf == "0.00%":
@@ -475,10 +586,8 @@ def build_validation_report(conn: sqlite3.Connection, filter_table: Optional[str
 
     for t in all_rows:
         name = str(t["table_name"])
-        st = str(t.get("validation_status") or "unknown")
-        per_table[name] = "warn" if st == "unknown" else "ok"
-        if st == "unknown":
-            warnings.append(f"表 {name} 尚未验证")
+        # 默认假设通过；若评估出违反或未挂规则，再降级
+        per_table[name] = "ok"
 
     for t in all_rows:
         name = str(t["table_name"])
@@ -488,6 +597,10 @@ def build_validation_report(conn: sqlite3.Connection, filter_table: Optional[str
             row = dict(s)
             row["table"] = name
             rule_summaries.append(row)
+        # 没有任何规则被评估（rule_summaries 为空）→ 标记 warn 并提醒
+        if not part.get("rule_summaries"):
+            per_table[name] = "warn"
+            warnings.append(f"表 {name} 未配置校验规则")
 
     if violations:
         warnings.append(f"规则违反 {len(violations)} 条")
@@ -495,6 +608,18 @@ def build_validation_report(conn: sqlite3.Connection, filter_table: Optional[str
             tn = str(v.get("table", ""))
             if tn in per_table:
                 per_table[tn] = "warn"
+
+    # 把 per_table 状态回写 _table_registry.validation_status，避免永远停留在 unknown
+    for name, st in per_table.items():
+        new_status = "passed" if st == "ok" else "warn"
+        try:
+            conn.execute(
+                "UPDATE _table_registry SET validation_status = ? WHERE table_name = ?",
+                (new_status, name),
+            )
+        except sqlite3.OperationalError:
+            pass
+    conn.commit()
 
     passed = len(warnings) == 0 and len(violations) == 0
     rep = {

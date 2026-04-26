@@ -1,12 +1,24 @@
-"""动态建表（供 /data 与 Agent 工具复用）。"""
+"""动态建表（供 /data 与 Agent 工具复用）。
+
+设计要点（第二轮矫正）：
+- 表名/列名严格英文 snake_case（`assert_english_ident`）；中文一律走 display_name。
+- 建表时按 kind 自动挂载默认校验规则到 `_table_registry.validation_rules_json`。
+- 建表时把表名 / 各列名（若有 display_name）自动写入 `_glossary`，让中英对照不再依赖 AI 调用。
+"""
 
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
-from typing import Any, Dict, List, Tuple, Union
+import time
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from app.util.identifiers import assert_table_or_column as assert_ident
+from app.util.identifiers import (
+    assert_english_ident,
+    assert_table_or_column as assert_ident_loose,
+)
+from app.services.validation_report import attach_default_rules
 
 # 系统保留表名，Agent 不得创建
 _SYSTEM_TABLES = frozenset({
@@ -17,7 +29,70 @@ _SYSTEM_TABLES = frozenset({
     "_snapshots",
     "pipeline_state",
     "_cell_provenance",
+    "_glossary",
+    "_glossary_usage",
+    "_constants",
+    "_validation_history",
+    "_agent_sessions",
+    "_column_meta",
 })
+
+
+_KIND_HINTS: Tuple[Tuple[str, str], ...] = (
+    ("_alloc", "alloc"),
+    ("allocation", "alloc"),
+    ("_attr", "attr"),
+    ("attribute", "attr"),
+    ("_quant", "quant"),
+    ("_landing", "landing"),
+    ("_resource", "resource"),
+    ("base_attr", "base"),
+)
+
+
+def _infer_kind(table_name: str, explicit: str = "") -> str:
+    if explicit:
+        return explicit
+    n = (table_name or "").lower()
+    for hint, kind in _KIND_HINTS:
+        if hint in n:
+            return kind
+    return "unknown"
+
+
+def _glossary_register_terms(
+    conn: sqlite3.Connection,
+    *,
+    table_name: str,
+    display_name: str,
+    column_meta: List[Dict[str, str]],
+) -> None:
+    """将表名/列名 → 中文 display_name 写入 _glossary。已存在的不覆盖中文（避免冲掉手工注册）。"""
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    pairs: List[Tuple[str, str, str, str]] = []  # (term_en, term_zh, kind, scope)
+    if display_name:
+        pairs.append((table_name, display_name, "noun", ""))
+    for col in column_meta or []:
+        en = str(col.get("name") or "").strip()
+        zh = str(col.get("display_name") or "").strip()
+        if en and zh and en != "row_id":
+            pairs.append((en, zh, "metric", table_name))
+    for term_en, term_zh, kind, scope in pairs:
+        try:
+            conn.execute(
+                """
+                INSERT INTO _glossary (term_en, term_zh, kind, brief, scope_table, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?)
+                ON CONFLICT(term_en) DO UPDATE SET
+                    term_zh = COALESCE(NULLIF(_glossary.term_zh, ''), excluded.term_zh),
+                    scope_table = COALESCE(NULLIF(_glossary.scope_table, ''), excluded.scope_table),
+                    updated_at = excluded.updated_at
+                """,
+                (term_en, term_zh, kind, "", scope or None, now, now),
+            )
+        except sqlite3.OperationalError:
+            # _glossary 表可能尚未迁移
+            return
 
 
 def create_dynamic_table(
@@ -29,15 +104,15 @@ def create_dynamic_table(
     purpose: str = "",
     display_name: str = "",
     column_meta: Union[List[Dict[str, str]], None] = None,
+    kind: str = "",
 ) -> Dict[str, Any]:
-    """columns: (列名, TEXT|REAL|INTEGER)，不含 row_id。
+    """建表入口。
 
-    可选参数：
-    - display_name: 表的中文显示名（如「基础属性表」）
-    - column_meta: [{name, display_name, dtype}]，dtype 是语义类型（int/float/str/percent/...）
-                   按 name 与 columns 关联；列出现在 columns 但 column_meta 缺失则用空串。
+    严格规则（新建路径）：
+    - table_name / columns[].name 必须为英文 snake_case；中文写到 display_name / column_meta[].display_name。
+    - 建表后自动：(a) 注册术语对照到 _glossary；(b) 按 kind 挂载默认 validation 规则。
     """
-    t = assert_ident(table_name)
+    t = assert_english_ident(table_name, field="表名")
     if t in _SYSTEM_TABLES:
         raise ValueError(f"表名 {t!r} 是系统保留名，不允许通过工具创建")
     cur = conn.execute("SELECT 1 FROM _table_registry WHERE table_name = ?", (t,))
@@ -67,7 +142,7 @@ def create_dynamic_table(
         st = str(sql_type).upper()
         if st not in ("TEXT", "REAL", "INTEGER"):
             raise ValueError(f"非法列类型: {sql_type}")
-        cn = assert_ident(name)
+        cn = assert_english_ident(name, field="列名")
         cols_sql.append(f'"{cn}" {st} NULL')
         m = meta_map.get(cn, {})
         schema_cols.append({
@@ -91,14 +166,50 @@ def create_dynamic_table(
         (t, "dynamic", purpose, readme, json.dumps(schema_payload, ensure_ascii=False)),
     )
     conn.commit()
-    return {"ok": True, "table_name": t, "display_name": display_name}
+
+    # 自动术语注册（中英对照）
+    _glossary_register_terms(
+        conn,
+        table_name=t,
+        display_name=display_name or "",
+        column_meta=list(meta_map_to_list(meta_map)),
+    )
+
+    # 自动挂载默认校验规则
+    inferred_kind = _infer_kind(t, kind)
+    try:
+        attach_default_rules(
+            conn,
+            t,
+            kind=inferred_kind,
+            schema_columns=schema_cols,
+            formula_columns=[],
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    return {
+        "ok": True,
+        "table_name": t,
+        "display_name": display_name,
+        "kind": inferred_kind,
+        "auto_rules": True,
+    }
+
+
+def meta_map_to_list(meta_map: Dict[str, Dict[str, str]]) -> List[Dict[str, str]]:
+    out = []
+    for name, m in meta_map.items():
+        out.append({"name": name, **m})
+    return out
 
 
 def delete_dynamic_table(conn: sqlite3.Connection, *, table_name: str, confirm: Union[bool, str, int]) -> Dict[str, Any]:
     """删除动态表及元数据；若有公式依赖本表列则拒绝。"""
     if confirm not in (True, "true", "True", 1, "1"):
         raise ValueError("confirm 须显式为 true")
-    t = assert_ident(table_name)
+    # 删除路径仍允许中文老表（兼容老库）
+    t = assert_ident_loose(table_name)
     cur = conn.execute("SELECT 1 FROM _table_registry WHERE table_name = ?", (t,))
     if not cur.fetchone():
         raise ValueError(f"未知表 {t}")

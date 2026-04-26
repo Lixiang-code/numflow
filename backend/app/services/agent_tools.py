@@ -221,6 +221,16 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                     },
                     "readme": {"type": "string", "default": ""},
                     "purpose": {"type": "string", "default": ""},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["base", "alloc", "attr", "quant", "landing", "resource", "unknown"],
+                        "description": (
+                            "表类型，用于自动挂载默认校验规则："
+                            "base=基础属性、alloc=分配比例、attr=玩法属性、"
+                            "quant=养成量化、landing=落地表、resource=资源；"
+                            "若不传则按表名启发式推断。"
+                        ),
+                    },
                 },
                 "required": ["table_name", "display_name", "columns"],
             },
@@ -473,9 +483,11 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
             "description": (
                 "【高效·一步建好等级表】建表 + 自动生成 1..max_level 行 + 批量公式（每列一个公式）+ 立即执行。"
                 "适用于「随等级递增」的属性表/消耗表/经验表等规律表格。"
-                "level_column 默认 '等级'；columns 每项含 name + sql_type（默认 'REAL'）+ 可选 formula_string。"
+                "level_column 默认 'level'（英文）；columns 每项含 name + sql_type（默认 'REAL'）+ 可选 formula_string。"
                 "公式中 @T[列] 用于同行逐行引用；@@表名[列] 用于查找函数整列引用；@T 会自动替换为本表名。"
-                "示例：columns=[{name:'等级',sql_type:'INTEGER'},{name:'HP',formula_string:'ROUND(1000+49000*POWER((@T[等级]-1)/199,0.85),0)'}]"
+                "示例：columns=[{name:'level',sql_type:'INTEGER',display_name:'等级'},"
+                "{name:'hp',formula_string:'ROUND(${hp_lv1}+(${hp_max}-${hp_lv1})*POWER((@T[level]-1)/(${max_level}-1),0.85),0)',display_name:'HP'}]"
+                "★ 注意：name 必须英文 snake_case（a-z/0-9/_），中文写到 display_name。"
             ),
             "parameters": {
                 "type": "object",
@@ -998,7 +1010,6 @@ def _setup_level_table(
             "name": level_column, "display_name": "等级",
             "dtype": "int", "number_format": "0",
         })
-
     try:
         create_dynamic_table(
             conn,
@@ -1147,6 +1158,7 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                     purpose=str(args.get("purpose", "")),
                     display_name=str(args.get("display_name", "")),
                     column_meta=col_meta,
+                    kind=str(args.get("kind", "")),
                 )
             except ValueError as e:
                 tname = str(args.get("table_name", ""))
@@ -1303,7 +1315,7 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                 conn,
                 table_name=str(args.get("table_name", "")),
                 max_level=int(args.get("max_level", 1)),
-                level_column=str(args.get("level_column") or "等级"),
+                level_column=str(args.get("level_column") or "level"),
                 columns=args.get("columns") or [],
                 readme=str(args.get("readme", "")),
                 purpose=str(args.get("purpose", "")),

@@ -242,6 +242,26 @@ def register_formula(
         out["auto_executed"] = auto_executed
     if auto_error is not None:
         out["auto_execute_error"] = auto_error
+    # constants-gate: 公式中如有浮点字面量（非 0/1/小整数），提示先 const_register
+    try:
+        import re as _re
+        suspect: List[str] = []
+        # 抽出所有数值字面量（含小数点 或 >= 10 的整数）
+        for m in _re.findall(r"(?<![\w.])-?\d+(?:\.\d+)?", formula or ""):
+            try:
+                v = float(m)
+            except ValueError:
+                continue
+            # 0、1、-1、小于 10 的纯整数视为索引/小常量；其余建议命名常数
+            if "." in m or abs(v) >= 10:
+                suspect.append(m)
+        if suspect:
+            out["warnings"] = [
+                f"公式包含字面量 {suspect[:5]}{'...' if len(suspect) > 5 else ''}，"
+                "建议先调用 const_register 命名后用 ${name} 引用，避免魔法数。"
+            ]
+    except Exception:  # noqa: BLE001
+        pass
     return out
 
 
