@@ -23,6 +23,7 @@ class CreateProjectBody(BaseModel):
     slug: Optional[str] = None
     """核心定义等 JSON（阶段 B/F 使用）；可为空对象。"""
     settings: Optional[Dict[str, Any]] = None
+    ai_model: Optional[str] = Field(None, max_length=100)
 
 
 @router.get("")
@@ -94,6 +95,14 @@ def create_project(
             "INSERT INTO project_settings (key, value_json, updated_at) VALUES (?,?,?)",
             ("fixed_layer_config", json.dumps(settings, ensure_ascii=False), now),
         )
+        if body.ai_model:
+            pc.execute(
+                """INSERT INTO project_settings (key, value_json, updated_at)
+                   VALUES ('agent_model', ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+                                                  updated_at = excluded.updated_at""",
+                (json.dumps(body.ai_model), now),
+            )
         pc.commit()
     finally:
         pc.close()

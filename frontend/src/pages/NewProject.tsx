@@ -452,6 +452,45 @@ function AttrNodeRow({
 }
 
 /* ─────────────────────────────────────────────────────────────
+   子组件：AI 模型选择器（创建时绑定，可在 Workbench 切换）
+   ───────────────────────────────────────────────────────────── */
+function ModelSelector({
+  aiModel, setAiModel, aiModels,
+}: {
+  aiModel: string
+  setAiModel: (m: string) => void
+  aiModels: string[]
+}) {
+  return (
+    <div className="form-section" style={{ marginTop: '1rem' }}>
+      <div className="form-section-title">AI 模型</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <select
+          value={aiModel}
+          onChange={(e) => setAiModel(e.target.value)}
+          style={{ flex: 1 }}
+        >
+          <option value="">系统默认（{aiModels[0] ?? '…'}）</option>
+          {aiModels.map((m) => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+        </select>
+        {aiModel && (
+          <button type="button" className="btn ghost"
+            style={{ fontSize: '0.78rem', padding: '2px 8px' }}
+            onClick={() => setAiModel('')}>
+            重置
+          </button>
+        )}
+      </div>
+      <div style={{ fontSize: '0.75rem', color: '#888', marginTop: 4 }}>
+        创建后可在工作台右上角随时切换。旗舰模型效果更好但速度较慢。
+      </div>
+    </div>
+  )
+}
+
+/* ─────────────────────────────────────────────────────────────
    主组件：NewProject
    ───────────────────────────────────────────────────────────── */
 export default function NewProject() {
@@ -467,6 +506,16 @@ export default function NewProject() {
   const [attributes,  setAttributes]  = useState<AttributesDraft>(initialDraft.attributes)
   const [aiDesignSubsystems, setAiDesignSubsystems] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  const [aiModel, setAiModel] = useState('')
+  const [aiModels, setAiModels] = useState<string[]>([])
+
+  // 拉取可用模型列表（无需 project context，直接用公开端点）
+  useEffect(() => {
+    apiFetch('/meta/ai-models').then((r) => {
+      const res = r as { models: string[] }
+      setAiModels(Array.isArray(res.models) ? res.models : [])
+    }).catch(() => {})
+  }, [])
 
   const persist = useCallback(() => {
     localStorage.setItem(DRAFT_KEY, JSON.stringify({
@@ -628,7 +677,7 @@ export default function NewProject() {
       }
       const res = await apiFetch('/projects', {
         method: 'POST',
-        body: JSON.stringify({ name: name.trim() || '未命名项目', settings }),
+        body: JSON.stringify({ name: name.trim() || '未命名项目', settings, ai_model: aiModel || undefined }),
       }) as { id: number }
       localStorage.removeItem(DRAFT_KEY)
       nav(`/project-setup/${res.id}`)
@@ -644,7 +693,7 @@ export default function NewProject() {
       }
       const res = await apiFetch('/projects', {
         method: 'POST',
-        body: JSON.stringify({ name: name.trim() || '提示词项目', settings }),
+        body: JSON.stringify({ name: name.trim() || '提示词项目', settings, ai_model: aiModel || undefined }),
       }) as { id: number }
       localStorage.removeItem(DRAFT_KEY)
       nav(`/project-setup/${res.id}`)
@@ -1091,6 +1140,9 @@ export default function NewProject() {
                   </div>
                 </div>
 
+                {/* AI 模型选择 */}
+                <ModelSelector aiModel={aiModel} setAiModel={setAiModel} aiModels={aiModels} />
+
                 <div className="wizard-actions">
                   <button type="button" className="btn ghost" onClick={() => setWizardStep(1)}>← 上一步</button>
                   <div className="right">
@@ -1129,6 +1181,8 @@ export default function NewProject() {
                 placeholder="描述你想做的数值项目，例如：我要做一个回合制 RPG，玩法有装备、坐骑和天赋，攻防暴击体系，60天生命周期…"
               />
             </div>
+            {/* AI 模型选择 */}
+            <ModelSelector aiModel={aiModel} setAiModel={setAiModel} aiModels={aiModels} />
             <div className="wizard-actions">
               <button type="button" className="btn ghost" onClick={resetDraft}>重置草稿</button>
               <button
