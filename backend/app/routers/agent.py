@@ -104,14 +104,23 @@ def _session_tracking_wrapper(
                     elif etype == "phase_messages":
                         msgs = raw.get("messages", [])
                         if msgs:
-                            turn = {
-                                "phase": str(raw.get("phase", phase)),
-                                "messages": msgs,
-                            }
+                            phase_name = str(raw.get("phase", phase))
                             rnd = raw.get("round")
+                            turn = {"phase": phase_name, "messages": msgs}
                             if rnd is not None:
                                 turn["round"] = rnd
-                            conversation_turns.append(turn)
+                                # Execute 中间轮次：原地覆盖最后一条同 phase 记录
+                                # 避免 O(n²) 存储（每轮快照包含所有历史内容）
+                                replaced = False
+                                for i in range(len(conversation_turns) - 1, -1, -1):
+                                    if conversation_turns[i].get("phase") == phase_name:
+                                        conversation_turns[i] = turn
+                                        replaced = True
+                                        break
+                                if not replaced:
+                                    conversation_turns.append(turn)
+                            else:
+                                conversation_turns.append(turn)
                             _flush_messages()
 
                     elif etype == "token":
