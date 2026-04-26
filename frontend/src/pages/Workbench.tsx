@@ -67,6 +67,114 @@ function applyNumberFormat(value: unknown, fmt: string): string | number {
   return result
 }
 
+type ConstantItem = {
+  name_en: string
+  name_zh: string
+  value: unknown
+  brief?: string
+  scope_table?: string | null
+  tags: string[]
+}
+type ConstTagItem = { name: string; parent?: string | null; brief?: string | null }
+
+function ConstantsPanel({
+  constants,
+  tags,
+  onRefresh,
+}: {
+  constants: ConstantItem[]
+  tags: ConstTagItem[]
+  onRefresh: () => void
+}) {
+  const [filter, setFilter] = useState('')
+  const groups = useMemo(() => {
+    const f = filter.trim().toLowerCase()
+    const filtered = f
+      ? constants.filter((c) =>
+          [c.name_en, c.name_zh, c.brief ?? '', c.scope_table ?? '', ...(c.tags || [])]
+            .join(' ')
+            .toLowerCase()
+            .includes(f),
+        )
+      : constants
+    const map = new Map<string, ConstantItem[]>()
+    for (const c of filtered) {
+      const tagList = c.tags && c.tags.length > 0 ? c.tags : ['（未分类）']
+      for (const t of tagList) {
+        const arr = map.get(t) ?? []
+        arr.push(c)
+        map.set(t, arr)
+      }
+    }
+    return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0], 'zh'))
+  }, [constants, filter])
+
+  const formatValue = (v: unknown): string => {
+    if (v === null || v === undefined) return '—'
+    if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+    if (typeof v === 'string') return v
+    try {
+      return JSON.stringify(v)
+    } catch {
+      return String(v)
+    }
+  }
+
+  return (
+    <div style={{ padding: '0.5rem 0.25rem', overflow: 'auto', height: '100%' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.75rem' }}>
+        <h3 style={{ margin: 0 }}>📐 常量（{constants.length}）</h3>
+        <input
+          type="text"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="搜索名称 / 标签 / 简介"
+          style={{ flex: 1, maxWidth: 320, padding: '0.25rem 0.5rem' }}
+        />
+        <button type="button" className="btn tiny" onClick={onRefresh}>刷新</button>
+      </div>
+      {tags.length > 0 && (
+        <p className="muted small" style={{ marginBottom: '0.75rem' }}>
+          共 {tags.length} 个标签：{tags.map((t) => t.name).join('、')}
+        </p>
+      )}
+      {groups.length === 0 ? (
+        <p className="muted">暂无常量。AI 在 02 阶段使用 <code>const_register</code> 工具登记后会显示在这里。</p>
+      ) : (
+        groups.map(([tag, items]) => (
+          <details key={tag} open style={{ marginBottom: '0.75rem', border: '1px solid #2a2a2a', borderRadius: 6, padding: '0.5rem 0.75rem' }}>
+            <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
+              {tag} <span className="muted small">（{items.length}）</span>
+            </summary>
+            <table style={{ width: '100%', marginTop: '0.5rem', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ textAlign: 'left', borderBottom: '1px solid #333' }}>
+                  <th style={{ padding: '0.25rem 0.5rem' }}>名称 (en)</th>
+                  <th style={{ padding: '0.25rem 0.5rem' }}>中文</th>
+                  <th style={{ padding: '0.25rem 0.5rem' }}>值</th>
+                  <th style={{ padding: '0.25rem 0.5rem' }}>简介</th>
+                  <th style={{ padding: '0.25rem 0.5rem' }}>范围表</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((c) => (
+                  <tr key={c.name_en} style={{ borderBottom: '1px solid #222' }}>
+                    <td style={{ padding: '0.25rem 0.5rem', fontFamily: 'monospace' }}>{c.name_en}</td>
+                    <td style={{ padding: '0.25rem 0.5rem' }}>{c.name_zh}</td>
+                    <td style={{ padding: '0.25rem 0.5rem', fontFamily: 'monospace' }}>{formatValue(c.value)}</td>
+                    <td style={{ padding: '0.25rem 0.5rem' }} className="small">{c.brief || '—'}</td>
+                    <td style={{ padding: '0.25rem 0.5rem' }} className="small muted">{c.scope_table || '全局'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </details>
+        ))
+      )}
+    </div>
+  )
+}
+
 export default function Workbench() {
   const { projectId } = useParams()
   const pid = Number(projectId)
@@ -98,6 +206,21 @@ export default function Workbench() {
     value: unknown
     brief?: string
     scope_table?: string | null
+  }>>([])
+
+  /** 全部常量（用于"📐 常量"专属页） */
+  const [allConstants, setAllConstants] = useState<Array<{
+    name_en: string
+    name_zh: string
+    value: unknown
+    brief?: string
+    scope_table?: string | null
+    tags: string[]
+  }>>([])
+  const [allConstTags, setAllConstTags] = useState<Array<{
+    name: string
+    parent?: string | null
+    brief?: string | null
   }>>([])
   const [pipeline, setPipeline] = useState<{
     next_expected_step: string | null
@@ -155,6 +278,9 @@ export default function Workbench() {
   const writeCellManualRef = useRef<
     (tableName: string, rowId: string, colName: string, value: unknown) => Promise<void>
   >(async () => {})
+  /** 单元格写入后的"重算+刷新"防抖计时器（避免连续编辑触发整表重渲染卡顿） */
+  const recalcDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingRecalcTablesRef = useRef<Set<string>>(new Set())
 
   const loadTables = useCallback(async () => {
     const d = (await apiFetch('/meta/tables', { headers })) as { tables?: unknown }
@@ -166,6 +292,36 @@ export default function Workbench() {
     })
     setTables(tables)
     setSelected((sel) => sel ?? (tables[0]?.table_name ?? null))
+  }, [headers])
+
+  const loadAllConstants = useCallback(async () => {
+    try {
+      const d = (await apiFetch('/meta/constants', { headers })) as {
+        constants?: Array<{
+          name_en: string
+          name_zh: string
+          value: unknown
+          brief?: string
+          scope_table?: string | null
+          tags?: string[]
+        }>
+        tags?: Array<{ name: string; parent?: string | null; brief?: string | null }>
+      }
+      const list = Array.isArray(d.constants) ? d.constants : []
+      setAllConstants(
+        list.map((c) => ({
+          name_en: String(c.name_en),
+          name_zh: String(c.name_zh ?? ''),
+          value: c.value,
+          brief: c.brief,
+          scope_table: c.scope_table,
+          tags: Array.isArray(c.tags) ? c.tags.map(String) : [],
+        })),
+      )
+      setAllConstTags(Array.isArray(d.tags) ? d.tags : [])
+    } catch (e) {
+      console.warn('加载常量失败', e)
+    }
   }, [headers])
 
   const loadProjectConfig = useCallback(async () => {
@@ -473,7 +629,13 @@ export default function Workbench() {
   )
 
   useEffect(() => {
-    if (!selected) {
+    if (selected === '__constants__') {
+      void loadAllConstants()
+    }
+  }, [selected, loadAllConstants])
+
+  useEffect(() => {
+    if (!selected || selected === '__constants__') {
       setRows([])
       setActiveCols([])
       setActiveColMeta([])
@@ -623,26 +785,39 @@ export default function Workbench() {
             }
           }
         }
-        // 如果当前表有 row 类型公式列，重算后刷新
+        // 如果当前表有 row 类型公式列，重算后刷新——但用防抖避免连续编辑触发整表重渲染卡顿
         const tableFormulas = tableFormulasCacheRef.current.get(tableName) || {}
         const hasRowFormulas = Object.values(tableFormulas).some((fi) => fi.type === 'row')
         if (hasRowFormulas) {
-          try {
-            await apiFetch(
-              `/compute/column-formula/recalculate-table?table_name=${encodeURIComponent(tableName)}`,
-              { method: 'POST', headers },
-            )
-            // 重算成功后刷新表格显示
-            const r2 = (await apiFetch(`/data/tables/${encodeURIComponent(tableName)}/rows?limit=200`, { headers })) as { rows?: unknown }
-            const rawRows2 = Array.isArray(r2.rows) ? r2.rows : []
-            const normalized2 = rawRows2.filter((row): row is Record<string, unknown> => row != null && typeof row === 'object' && !Array.isArray(row))
-            const cols2 = normalized2.length > 0 ? Object.keys(normalized2[0]) : tableColsCacheRef.current.get(tableName) || []
-            const colMeta2 = tableColMetaCacheRef.current.get(tableName) || []
-            const dn2 = activeDisplayName
-            tableRowsCacheRef.current.set(tableName, normalized2)
-            setRows(normalized2)
-            populateSheet(tableName, normalized2, cols2, tableFormulas, colMeta2, dn2)
-          } catch { /* 重算失败不影响写入 */ }
+          pendingRecalcTablesRef.current.add(tableName)
+          if (recalcDebounceRef.current) clearTimeout(recalcDebounceRef.current)
+          recalcDebounceRef.current = setTimeout(() => {
+            const tables = Array.from(pendingRecalcTablesRef.current)
+            pendingRecalcTablesRef.current.clear()
+            recalcDebounceRef.current = null
+            void (async () => {
+              for (const tn of tables) {
+                try {
+                  await apiFetch(
+                    `/compute/column-formula/recalculate-table?table_name=${encodeURIComponent(tn)}`,
+                    { method: 'POST', headers },
+                  )
+                  const r2 = (await apiFetch(`/data/tables/${encodeURIComponent(tn)}/rows?limit=200`, { headers })) as { rows?: unknown }
+                  const rawRows2 = Array.isArray(r2.rows) ? r2.rows : []
+                  const normalized2 = rawRows2.filter((row): row is Record<string, unknown> => row != null && typeof row === 'object' && !Array.isArray(row))
+                  const cols2 = normalized2.length > 0 ? Object.keys(normalized2[0]) : tableColsCacheRef.current.get(tn) || []
+                  const colMeta2 = tableColMetaCacheRef.current.get(tn) || []
+                  const tf = tableFormulasCacheRef.current.get(tn) || {}
+                  const dn2 = activeDisplayName
+                  tableRowsCacheRef.current.set(tn, normalized2)
+                  if (tn === activeTableRef.current) {
+                    setRows(normalized2)
+                    populateSheet(tn, normalized2, cols2, tf, colMeta2, dn2)
+                  }
+                } catch { /* 重算失败不影响写入 */ }
+              }
+            })()
+          }, 500)
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
@@ -935,16 +1110,29 @@ export default function Workbench() {
             : ''}
         </p>
       )}
-      {validateReport && (validateReport.rule_summaries?.length ?? 0) > 0 && (
-        <ul className="wb-rule-sum muted small" style={{ margin: '0 1rem 0.5rem' }}>
-          {(validateReport.rule_summaries ?? []).map((s, i) => (
-            <li key={i}>
-              {s.table}.{s.rule_id} [{s.type}] {s.passed ? '通过' : '未通过'}
-              {typeof s.violation_count === 'number' ? `（${s.violation_count} 条违反）` : ''}
-            </li>
-          ))}
-        </ul>
-      )}
+      {validateReport && (validateReport.rule_summaries?.length ?? 0) > 0 && (() => {
+        const allSummaries = validateReport.rule_summaries ?? []
+        const failed = allSummaries.filter(
+          (s) => !s.passed || (typeof s.violation_count === 'number' && s.violation_count > 0),
+        )
+        const showFailedOnly = failed.length > 0 && failed.length < allSummaries.length
+        return (
+          <details className="wb-rule-sum muted small" style={{ margin: '0 1rem 0.5rem' }}>
+            <summary>
+              校验明细（共 {allSummaries.length} 条规则
+              {failed.length > 0 ? `，未通过 ${failed.length} 条` : '，全部通过'}）
+            </summary>
+            <ul style={{ marginTop: '0.35rem' }}>
+              {(showFailedOnly ? failed : allSummaries).map((s, i) => (
+                <li key={i}>
+                  {s.table}.{s.rule_id} [{s.type}] {s.passed ? '通过' : '未通过'}
+                  {typeof s.violation_count === 'number' ? `（${s.violation_count} 条违反）` : ''}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )
+      })()}
 
       <div className="wb-body">
         <aside className="wb-left">
@@ -965,6 +1153,17 @@ export default function Workbench() {
             刷新
           </button>
           <ul>
+            <li key="__constants__">
+              <button
+                type="button"
+                className={selected === '__constants__' ? 'sel' : undefined}
+                onClick={() => setSelected('__constants__')}
+                title="查看项目内所有常量（按标签分组）"
+              >
+                <span className="tbl-name">📐 常量</span>
+                <small className="tbl-purpose">全局/分表常数清单</small>
+              </button>
+            </li>
             {tables.map((t) => {
               const warn = validateReport?.per_table?.[t.table_name] === 'warn'
               const cls = [selected === t.table_name ? 'sel' : '', warn ? 'row-warn' : ''].filter(Boolean).join(' ')
@@ -1003,6 +1202,14 @@ export default function Workbench() {
         </aside>
 
         <section className="wb-center">
+          {selected === '__constants__' ? (
+            <ConstantsPanel
+              constants={allConstants}
+              tags={allConstTags}
+              onRefresh={() => void loadAllConstants()}
+            />
+          ) : (
+          <>
           <h3>{selected || '未选择表'}</h3>
           <div className="wb-formula-bar">
             <span className="wb-formula-bar-label">
@@ -1076,6 +1283,8 @@ export default function Workbench() {
             <div className="wb-readonly-overlay" title="只读模式">
               🔒 只读模式（在 Agent 进程页中查看，请回到完整工作台编辑）
             </div>
+          )}
+          </>
           )}
         </section>
 

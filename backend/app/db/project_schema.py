@@ -106,8 +106,22 @@ def init_project_db(conn: sqlite3.Connection, *, seed_readme: bool = True) -> No
             tools_json TEXT NOT NULL DEFAULT '[]',
             error_text TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS _const_tags (
+            name TEXT PRIMARY KEY,
+            parent TEXT,
+            brief TEXT,
+            created_at TEXT NOT NULL
+        );
         """
     )
+    # 增量迁移：为旧库补 _constants.tags（JSON 数组字符串）
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(_constants)")}
+        if "tags" not in cols:
+            conn.execute("ALTER TABLE _constants ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
+    except Exception:  # noqa: BLE001
+        pass
     if seed_readme:
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         cur = conn.execute(

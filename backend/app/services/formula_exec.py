@@ -12,6 +12,7 @@ import pandas as pd
 from app.services.formula_engine import (
     eval_row_formula,
     eval_series,
+    normalize_self_table_refs,
     parse_constant_refs,
     parse_formula_refs,
     parse_row_refs,
@@ -147,6 +148,8 @@ def execute_formula_on_column(
     if not row:
         raise ValueError("未注册公式")
     formula = row["formula"]
+    # 兼容历史存储里的 @T[col]/@this[col]
+    formula = normalize_self_table_refs(formula, table_name)
     # ${name} 常量预替换
     const_names = parse_constant_refs(formula)
     if const_names:
@@ -200,6 +203,8 @@ def register_formula(
     *,
     defer: bool = False,
 ) -> Dict[str, Any]:
+    # 把 @T[col]/@this[col] 中的 T/this 统一为当前表名，避免引擎报"未加载表 T"
+    formula = normalize_self_table_refs(formula, table_name)
     refs: Set[Tuple[str, str]] = parse_formula_refs(formula)
     cur = conn.execute(
         "SELECT 1 FROM _table_registry WHERE table_name = ?",

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Union
 from app.deps import ProjectDB
 from app.services import algorithms
 from app.services.cell_writes import apply_write_cells, assert_col_or_table
+from app.services.formula_engine import normalize_self_table_refs
 from app.services.formula_exec import (
     execute_formula_on_column,
     recalculate_downstream,
@@ -271,6 +272,48 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                     },
                 },
                 "required": ["table_name", "updates"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_cells_series",
+            "description": (
+                "★ 系列填充：用模板生成连续 row_id（如 lv_1..lv_50）的写入，避免一次性贴数百行 JSON。"
+                "row_id_template 必须包含 {i} 占位符；start..end 闭区间生成索引；"
+                "value_list 与索引一一对应（长度需 = end-start+1），"
+                "或用 value_template（含 {i}）+ 表达式 expr 计算（expr 可用 i 变量，如 'i*100+50'）。"
+                "value_list 与 expr 二选一。column 是目标列名。适用于：等级表数值列、批量配置项。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string"},
+                    "row_id_template": {
+                        "type": "string",
+                        "description": "row_id 模板，必须包含 {i}，例如 'lv_{i}' 或 'item_{i}'",
+                    },
+                    "column": {"type": "string"},
+                    "start": {"type": "integer"},
+                    "end": {"type": "integer"},
+                    "value_list": {
+                        "type": "array",
+                        "items": {},
+                        "description": "与 [start..end] 一一对应的值数组（长度严格相等）",
+                    },
+                    "expr": {
+                        "type": "string",
+                        "description": "受限算术表达式（变量 i 表示当前索引），如 'i*100+50'、'2**i'",
+                    },
+                    "source_tag": {
+                        "type": "string",
+                        "enum": ["ai_generated", "algorithm_derived", "formula_computed"],
+                        "default": "ai_generated",
+                    },
+                },
+                "required": ["table_name", "row_id_template", "column", "start", "end"],
+                "additionalProperties": False,
             },
         },
     },
@@ -576,19 +619,62 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "const_register",
-            "description": "注册项目常数（用于公式中的 ${name} 替换；同名 upsert）。value 必须为 number 或可转 number 的字符串。",
+            "description": (
+                "注册项目常数（用于公式中的 ${name} 替换；同名 upsert）。"
+                "value 必须为 number 或可转 number 的字符串。"
+                "★ tags 必填且至少 1 个：用于在前端常量页按『主系统/分类』聚合展示，"
+                "可使用 const_tag_register 预先创建标签；通常至少包含所属主系统名。"
+                "★ brief 描述常数语义/单位/取值范围，但禁止包含具体数值（如『=10』、『为 0.5』）。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name_en": {"type": "string"},
                     "name_zh": {"type": "string"},
                     "value": {"type": ["number", "string"]},
-                    "brief": {"type": "string"},
+                    "brief": {
+                        "type": "string",
+                        "description": "语义描述，禁止出现具体数值（如 '10'、'0.5'）",
+                    },
                     "scope_table": {"type": "string"},
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "description": "至少 1 个分类标签（如主系统名 'combat'/'economy'）",
+                    },
                 },
-                "required": ["name_en", "value"],
+                "required": ["name_en", "value", "tags"],
                 "additionalProperties": False,
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "const_tag_register",
+            "description": (
+                "注册常数分类标签（如主系统名 combat / economy / level_curve），"
+                "用于 const_register.tags 取值与前端常量页聚合。同名 upsert。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "parent": {"type": "string", "description": "父标签（可选，构成层级）"},
+                    "brief": {"type": "string"},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "const_tag_list",
+            "description": "列出所有已注册的常数标签",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     },
     {
@@ -1045,7 +1131,7 @@ def _setup_level_table(
         formula = c.get("formula_string")
         if not formula:
             continue
-        formula = str(formula).replace("@T[", f"@{table_name}[")
+        formula = normalize_self_table_refs(str(formula), table_name)
         formula_items.append({"column_name": cname, "formula_string": formula})
 
     bulk = _bulk_register_and_compute(conn, table_name, formula_items, False) if formula_items else {
@@ -1189,6 +1275,8 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                     )
                 except ValueError as e:
                     out = {"error": str(e)}
+    elif name == "write_cells_series":
+        out = _write_cells_series(conn, args, p.can_write)
     elif name == "register_formula":
         if not p.can_write:
             out = {"error": "无写权限"}
@@ -1338,6 +1426,10 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
         out = _const_list(conn, args)
     elif name == "const_delete":
         out = _const_delete(conn, args, p.can_write)
+    elif name == "const_tag_register":
+        out = _const_tag_register(conn, args, p.can_write)
+    elif name == "const_tag_list":
+        out = _const_tag_list(conn, args)
     else:
         out = {"error": f"未知工具 {name}"}
     return json.dumps(wrap_tool_payload(out), ensure_ascii=False)
@@ -1427,6 +1519,26 @@ def _coerce_value_json(v: Any) -> str:
     return json.dumps(v)
 
 
+_BRIEF_NUMBER_RE = __import__("re").compile(r"\d")
+
+
+def _validate_brief_no_value(brief: str) -> Optional[str]:
+    """常数 brief 不得包含具体数值（防止 AI 把"=10"写进去）。
+
+    允许的情形：纯文本说明、英文标识、单位词。
+    禁止：任何阿拉伯数字、`= 10` `为 0.5` 等数值表达。
+    """
+    if not brief:
+        return None
+    if _BRIEF_NUMBER_RE.search(brief):
+        return (
+            "brief 不得包含具体数值（任何阿拉伯数字均禁止）。"
+            "应仅描述语义、用途、单位、取值范围的语义类别（如\"百分比\"、\"秒数\"），"
+            "数值由 value 字段承载。"
+        )
+    return None
+
+
 def _const_register(conn: sqlite3.Connection, args: Dict[str, Any], can_write: bool) -> Dict[str, Any]:
     err = _require_write(can_write, "const_register")
     if err:
@@ -1438,24 +1550,44 @@ def _const_register(conn: sqlite3.Connection, args: Dict[str, Any], can_write: b
         return {"error": "value 必填"}
     name_zh = str(args.get("name_zh", ""))
     brief = str(args.get("brief", ""))
+    brief_err = _validate_brief_no_value(brief)
+    if brief_err:
+        return {"error": brief_err}
     scope_table = args.get("scope_table") or None
-    value_json = _coerce_value_json(args["value"])
+    raw_tags = args.get("tags") or []
+    if not isinstance(raw_tags, list) or not raw_tags:
+        return {
+            "error": "tags 必填且至少 1 项",
+            "fix": "请先用 const_tag_register 注册主系统标签（如 'combat'/'economy'），再传入 tags=['<标签>']",
+        }
+    tags = [str(t).strip() for t in raw_tags if str(t).strip()]
+    if not tags:
+        return {"error": "tags 不能为空字符串"}
+    # 自动建标签（缺则插入），但不强制要求 parent
     now = _now_iso()
+    for t in tags:
+        conn.execute(
+            "INSERT OR IGNORE INTO _const_tags (name, parent, brief, created_at) VALUES (?,?,?,?)",
+            (t, None, "", now),
+        )
+    value_json = _coerce_value_json(args["value"])
+    tags_json = json.dumps(tags, ensure_ascii=False)
     conn.execute(
         """
-        INSERT INTO _constants (name_en, name_zh, value_json, brief, scope_table, created_at, updated_at)
-        VALUES (?,?,?,?,?,?,?)
+        INSERT INTO _constants (name_en, name_zh, value_json, brief, scope_table, tags, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?)
         ON CONFLICT(name_en) DO UPDATE SET
             name_zh = excluded.name_zh,
             value_json = excluded.value_json,
             brief = excluded.brief,
             scope_table = excluded.scope_table,
+            tags = excluded.tags,
             updated_at = excluded.updated_at
         """,
-        (name_en, name_zh, value_json, brief, scope_table, now, now),
+        (name_en, name_zh, value_json, brief, scope_table, tags_json, now, now),
     )
     conn.commit()
-    return {"ok": True, "name_en": name_en, "value": json.loads(value_json)}
+    return {"ok": True, "name_en": name_en, "value": json.loads(value_json), "tags": tags}
 
 
 def _const_set(conn: sqlite3.Connection, args: Dict[str, Any], can_write: bool) -> Dict[str, Any]:
@@ -1491,8 +1623,115 @@ def _const_list(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any
             d["value"] = json.loads(d.pop("value_json"))
         except Exception:  # noqa: BLE001
             d["value"] = None
+        # 兼容旧库未有 tags 列的情况
+        raw_tags = d.get("tags")
+        try:
+            d["tags"] = json.loads(raw_tags) if isinstance(raw_tags, str) and raw_tags else []
+        except Exception:  # noqa: BLE001
+            d["tags"] = []
         items.append(d)
     return {"ok": True, "items": items}
+
+
+def _const_tag_register(conn: sqlite3.Connection, args: Dict[str, Any], can_write: bool) -> Dict[str, Any]:
+    err = _require_write(can_write, "const_tag_register")
+    if err:
+        return err
+    name = str(args.get("name", "")).strip()
+    if not name:
+        return {"error": "name 必填"}
+    parent = args.get("parent") or None
+    brief = str(args.get("brief", ""))
+    now = _now_iso()
+    conn.execute(
+        """
+        INSERT INTO _const_tags (name, parent, brief, created_at) VALUES (?,?,?,?)
+        ON CONFLICT(name) DO UPDATE SET parent = excluded.parent, brief = excluded.brief
+        """,
+        (name, parent, brief, now),
+    )
+    conn.commit()
+    return {"ok": True, "name": name, "parent": parent}
+
+
+def _const_tag_list(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        cur = conn.execute("SELECT name, parent, brief, created_at FROM _const_tags ORDER BY name")
+        items = [dict(r) for r in cur.fetchall()]
+    except Exception:  # noqa: BLE001
+        items = []
+    return {"ok": True, "items": items}
+
+
+# ─── 系列填充：实现 ───────────────────────────────────────────────
+
+
+_SAFE_EXPR_CHARS = __import__("re").compile(r"^[\d\s+\-*/().%i]+$")
+
+
+def _eval_series_expr(expr: str, i: int) -> Any:
+    """安全求值：仅允许数字、运算符、括号与变量 i。"""
+    if not _SAFE_EXPR_CHARS.match(expr):
+        raise ValueError(
+            f"expr 含非法字符：{expr!r}；仅允许数字、+-*/()%、空格 与变量 i"
+        )
+    return eval(expr, {"__builtins__": {}}, {"i": i})  # noqa: S307 — 字符集已限制
+
+
+def _write_cells_series(
+    conn: sqlite3.Connection, args: Dict[str, Any], can_write: bool
+) -> Dict[str, Any]:
+    err = _require_write(can_write, "write_cells_series")
+    if err:
+        return err
+    table_name = str(args.get("table_name", "")).strip()
+    template = str(args.get("row_id_template", "")).strip()
+    column = str(args.get("column", "")).strip()
+    if not (table_name and template and column):
+        return {"error": "table_name / row_id_template / column 均必填"}
+    if "{i}" not in template:
+        return {"error": "row_id_template 必须包含 {i} 占位符"}
+    try:
+        start = int(args.get("start"))
+        end = int(args.get("end"))
+    except (TypeError, ValueError):
+        return {"error": "start / end 必须为整数"}
+    if end < start:
+        return {"error": "end 必须 ≥ start"}
+    n = end - start + 1
+    if n > 2000:
+        return {"error": f"单次系列填充上限 2000 行，当前 {n}"}
+    value_list = args.get("value_list")
+    expr = args.get("expr")
+    if (value_list is None) == (expr is None):
+        return {"error": "value_list 与 expr 必须二选一"}
+    if value_list is not None:
+        if not isinstance(value_list, list) or len(value_list) != n:
+            return {"error": f"value_list 长度需等于 {n}（end-start+1）"}
+    tag = args.get("source_tag") or "ai_generated"
+    if tag not in ("ai_generated", "algorithm_derived", "formula_computed"):
+        return {"error": f"非法 source_tag: '{tag}'"}
+    updates: List[Dict[str, Any]] = []
+    for offset, idx in enumerate(range(start, end + 1)):
+        if value_list is not None:
+            v = value_list[offset]
+        else:
+            try:
+                v = _eval_series_expr(str(expr), idx)
+            except Exception as e:  # noqa: BLE001
+                return {"error": f"i={idx} 求值失败: {e}"}
+        updates.append(
+            {"row_id": template.replace("{i}", str(idx)), "column": column, "value": v}
+        )
+    try:
+        result = apply_write_cells(
+            conn, table_name=table_name, updates=updates, source_tag=tag
+        )
+    except ValueError as e:
+        return {"error": str(e)}
+    if isinstance(result, dict):
+        result["expanded_rows"] = n
+    return result
 
 
 def _const_delete(conn: sqlite3.Connection, args: Dict[str, Any], can_write: bool) -> Dict[str, Any]:

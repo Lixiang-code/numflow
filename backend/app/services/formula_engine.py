@@ -576,8 +576,29 @@ _SAME_ROW_REF = re.compile(
 )
 
 
+_POW_CARET = re.compile(r"\^")
+
+
+def normalize_self_table_refs(formula: str, table_name: str) -> str:
+    """把 @T[col] / @this[col] / @@T[col] / @@this[col] 中的 T、this 替换为当前表名。
+
+    AI 经常使用 ``@T[col]`` 或 ``@this[col]`` 这种"自引用"写法；此处统一在公式入口
+    把它们重写成真实表名，避免引擎把 T/this 当成不存在的表去查找。
+    """
+    if not table_name:
+        return formula
+    # 先处理 @@（整列）再处理 @（逐行），保持与正则相同的优先级语义
+    formula = re.sub(r"@@T\[", f"@@{table_name}[", formula)
+    formula = re.sub(r"@@this\[", f"@@{table_name}[", formula)
+    formula = re.sub(r"(?<!@)@T\[", f"@{table_name}[", formula)
+    formula = re.sub(r"(?<!@)@this\[", f"@{table_name}[", formula)
+    return formula
+
+
 def preprocess_formula(formula: str) -> str:
-    """将 Excel 风格运算符（大写 AND/OR/NOT/TRUE/FALSE）转为 Python 兼容写法。"""
+    """将 Excel 风格运算符（大写 AND/OR/NOT/TRUE/FALSE、^ 幂）转为 Python 兼容写法。"""
+    # ^ 在 Python AST 中是按位异或；公式里几乎都意为"幂"，统一改为 **
+    formula = _POW_CARET.sub("**", formula)
     formula = re.sub(r"\bAND\b", "and", formula)
     formula = re.sub(r"\bOR\b", "or", formula)
     formula = re.sub(r"\bNOT\b", "not", formula)

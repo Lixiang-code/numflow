@@ -29,6 +29,62 @@ def get_project_config(p: ProjectDB = Depends(get_project_read)):
     return {"project": dict(p.row), "settings": settings, "can_write": p.can_write}
 
 
+@router.get("/constants")
+def get_constants(p: ProjectDB = Depends(get_project_read)):
+    """返回项目中所有常量及标签。
+
+    输出结构：
+        {
+            "constants": [ {name_en,name_zh,value,brief,scope_table,tags[]} ... ],
+            "tags": [ {name,parent,brief} ... ]
+        }
+    """
+    conn = p.conn
+    constants: List[Dict[str, Any]] = []
+    try:
+        cur = conn.execute(
+            "SELECT name_en, name_zh, value_json, brief, scope_table, "
+            "COALESCE(tags, '[]') AS tags FROM _constants ORDER BY name_en"
+        )
+        for r in cur.fetchall():
+            try:
+                v = json.loads(r["value_json"])
+            except Exception:  # noqa: BLE001
+                v = None
+            try:
+                tags = json.loads(r["tags"]) if r["tags"] else []
+                if not isinstance(tags, list):
+                    tags = []
+            except Exception:  # noqa: BLE001
+                tags = []
+            constants.append(
+                {
+                    "name_en": r["name_en"],
+                    "name_zh": r["name_zh"],
+                    "value": v,
+                    "brief": r["brief"],
+                    "scope_table": r["scope_table"],
+                    "tags": tags,
+                }
+            )
+    except Exception:  # noqa: BLE001
+        constants = []
+
+    tags: List[Dict[str, Any]] = []
+    try:
+        cur_t = conn.execute(
+            "SELECT name, parent, brief FROM _const_tags ORDER BY name"
+        )
+        for r in cur_t.fetchall():
+            tags.append(
+                {"name": r["name"], "parent": r["parent"], "brief": r["brief"]}
+            )
+    except Exception:  # noqa: BLE001
+        tags = []
+
+    return {"constants": constants, "tags": tags}
+
+
 @router.get("/tables")
 def get_table_list(p: ProjectDB = Depends(get_project_read)):
     cur = p.conn.execute(

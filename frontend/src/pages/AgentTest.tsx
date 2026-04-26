@@ -376,6 +376,13 @@ export default function AgentTest() {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
+  // 错误浮层 6 秒后自动消失（用户也可点 × 关闭）
+  useEffect(() => {
+    if (!err) return
+    const t = setTimeout(() => setErr(null), 6000)
+    return () => clearTimeout(t)
+  }, [err])
+
   // 当前会话实时状态
   const [curSession, setCurSession] = useState<Session | null>(null)
   const [livePhase, setLivePhase] = useState<string>('')
@@ -810,7 +817,47 @@ export default function AgentTest() {
                 )}
               </div>
             </form>
-            {err && <p className="err banner" style={{ marginTop: '0.5rem' }}>{err}</p>}
+            {err && (
+              <div
+                className="err banner"
+                role="alert"
+                style={{
+                  position: 'fixed',
+                  top: 16,
+                  right: 16,
+                  zIndex: 9999,
+                  maxWidth: 480,
+                  padding: '0.75rem 1rem',
+                  background: '#3a1f1f',
+                  color: '#ffd6d6',
+                  border: '1px solid #c0392b',
+                  borderRadius: 6,
+                  boxShadow: '0 6px 20px rgba(0,0,0,0.4)',
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: '0.5rem',
+                }}
+              >
+                <span style={{ flex: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  ⚠ {err}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setErr(null)}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    color: '#ffd6d6',
+                    cursor: 'pointer',
+                    fontSize: '1.1rem',
+                    lineHeight: 1,
+                  }}
+                  aria-label="关闭"
+                >
+                  ×
+                </button>
+              </div>
+            )}
             {isViewing && (
               <p className="muted small" style={{ marginTop: '0.4rem' }}>
                 📋 正在查看历史会话：{viewSession!.userMessage.slice(0, 60)} ({viewSession!.metrics.startedAt.slice(0, 16).replace('T', ' ')})

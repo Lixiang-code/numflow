@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Generator, Iterable, List, Optional
+import time
+from typing import Any, Callable, Dict, Generator, Iterable, List, Optional
 
 from app.config import QWEN_MODEL
 from app.db.project_schema import get_pipeline_state
@@ -11,6 +12,37 @@ from app.deps import ProjectDB
 from app.services.agent_tools import TOOLS_OPENAI, dispatch_tool, _get_project_config
 from app.services.prompt_router import route_prompt
 from app.services.qwen_client import get_client_for_model
+
+
+def _retry_llm_call(
+    fn: Callable[[], Any],
+    *,
+    attempts: int = 4,
+    base_delay: float = 1.0,
+    on_retry: Optional[Callable[[int, Exception, float], None]] = None,
+) -> Any:
+    """对 LLM 调用做指数退避重试。
+
+    AI 服务（DashScope/DeepSeek）偶发 5xx/超时/连接重置，不应让整个 step 重做。
+    重试 ``attempts`` 次（含首次），失败时仅在用尽后再向上抛出。
+    """
+    last_exc: Optional[Exception] = None
+    for i in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 — 网络/服务端错误均需要重试
+            last_exc = exc
+            if i >= attempts:
+                break
+            delay = base_delay * (2 ** (i - 1))
+            if on_retry:
+                try:
+                    on_retry(i, exc, delay)
+                except Exception:  # noqa: BLE001
+                    pass
+            time.sleep(delay)
+    assert last_exc is not None
+    raise last_exc
 
 
 WRITE_TOOLS = {
@@ -271,8 +303,21 @@ _EXECUTE_SYSTEM_TAIL = (
     "② write_cells 只用于：分类标签、名称、描述、少量手工配置等**非规律内容**。\n"
     "③ 同一回合内所有独立工具 → **一次性并行调用**，不要一个一个排队。\n"
     "④ setup_level_table：所有列公式同时放入 columns 数组，一次调用完成。\n"
-    "⑤ write_cells 单次 ≤30 行，超出分多次调用。\n"
+    "⑤ write_cells 单次 ≤30 行，超出分多次调用；**对连续 row_id 的批量写入**优先使用 write_cells_series（用 row_id_template + start..end + value_list/expr，一次扩展数十/数百行，避免长 JSON 截断）。\n"
     "⑥ 最终总结：必须包含 TODO 完成状态 + executed_count/rows_updated 关键数字。\n\n"
+
+    "═══ ★ 公式语法 ★ ═══\n"
+    "幂运算用 `^` 或 `**` 均可（引擎内部统一为 `**`）。\n"
+    "在公式中可以使用 `@T[col]` 或 `@this[col]` 表示『当前正在注册公式的这张表』，引擎会自动替换为真实表名；\n"
+    "因此 register_formula(table_name='unit_table', formula='@T[lvl]^2 + ${base_atk}') 等价于显式写 `@unit_table[lvl]**2 + ${base_atk}`。\n\n"
+
+    "═══ ★ 常数标签 / brief 规范 ★ ═══\n"
+    "const_register 必填 tags（数组，至少 1 个）：常数会按 tags 分组在前端常量页中展示。\n"
+    "  - 标签通常是『主系统名』(如 combat / economy / mount / wing) 或语义类别 (如 level_curve / drop_rate)。\n"
+    "  - 若标签未注册可直接传，系统会自动登记；建议先用 const_tag_register 显式定义层级。\n"
+    "brief 字段**严禁出现任何阿拉伯数字**：只描述含义/单位/取值范围语义，不写具体值；\n"
+    "  ✗ 'HP 基础值=100' / '默认 0.85'\n"
+    "  ✓ '玩家 HP 初始值（生命点数）' / '暴击伤害放大倍率（小数表示）'\n\n"
 
     "═══ ★ 收尾操作限制（每个 session 仅允许一次）★ ═══\n"
     "create_snapshot：整个 execute 阶段只允许调用 **1次**（最终收尾时），严禁在循环中多次调用。\n"
@@ -301,12 +346,15 @@ def _stream_phase_text(
     model: Optional[str] = None,
 ) -> Generator[bytes, None, str]:
     """无工具的纯文本阶段：调用一次模型，按 token 切片 emit；返回完整文本。"""
-    resp = client.chat.completions.create(
-        model=model or QWEN_MODEL,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
+    def _do() -> Any:
+        return client.chat.completions.create(
+            model=model or QWEN_MODEL,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    resp = _retry_llm_call(_do, attempts=4, base_delay=1.0)
     text = (resp.choices[0].message.content or "").strip()
     for chunk in _chunk_text(text, 80):
         yield _emit(phase, {"type": "token", "text": chunk})
@@ -657,12 +705,13 @@ def run_agent_sse(
     total_errors = 0    # 累计错误（不重置）
     total_success = 0   # 累计成功
     MAX_CONSEC_ERRORS = 4  # 连续失败4次强制注入分析提示
-    MAX_EXECUTE_ROUNDS = 24  # execute 阶段总轮次硬上限（兜底防失控）
+    MAX_EXECUTE_ROUNDS = 80  # execute 阶段总轮次硬上限（兜底防失控；放宽以容纳大批量数值表）
     # ---- 反循环计数器 ----
     _snapshot_count = 0        # create_snapshot 调用次数
     _validation_count = 0      # run_validation 调用次数
     _recalc_count = 0          # recalculate_downstream 调用次数
     _recent_tools: List[str] = []  # 最近20次工具名（用于检测重复模式）
+    _final_validation_injected = False  # 收尾前主动反馈违反，只注入一次
     while True:
         round_i += 1
 
@@ -714,17 +763,35 @@ def run_agent_sse(
         if round_i > 1:
             yield _emit("execute", {"type": "phase_messages", "phase": "execute", "round": round_i, "messages": list(execute_messages)})
         try:
-            resp = client.chat.completions.create(
-                model=_model,
-                messages=execute_messages,
-                tools=TOOLS_OPENAI,
-                tool_choice="auto",
-                parallel_tool_calls=True,
-                temperature=0.2,
-                max_tokens=16384,
-            )
+            _retry_log: List[Dict[str, Any]] = []
+            def _do_call() -> Any:
+                return client.chat.completions.create(
+                    model=_model,
+                    messages=execute_messages,
+                    tools=TOOLS_OPENAI,
+                    tool_choice="auto",
+                    parallel_tool_calls=True,
+                    temperature=0.2,
+                    max_tokens=16384,
+                )
+
+            def _on_retry(i: int, exc: Exception, delay: float) -> None:
+                _retry_log.append({"i": i, "err": repr(exc)[:300], "delay": delay})
+
+            resp = _retry_llm_call(_do_call, attempts=4, base_delay=1.0, on_retry=_on_retry)
+            for entry in _retry_log:
+                yield _emit(
+                    "execute",
+                    {
+                        "type": "log",
+                        "message": f"⚠ LLM 调用第 {entry['i']} 次失败，{entry['delay']:.1f}s 后重试：{entry['err']}",
+                    },
+                )
         except Exception as e:  # noqa: BLE001
-            yield _emit("execute", {"type": "error", "message": f"execute 调用失败: {e!r}"})
+            yield _emit(
+                "execute",
+                {"type": "error", "message": f"execute 调用最终失败（已重试 4 次）: {e!r}"},
+            )
             return
         choice = resp.choices[0]
         finish_reason = getattr(choice, "finish_reason", None) or ""
@@ -889,6 +956,44 @@ def run_agent_sse(
             continue
 
         final_text = msg.content or ""
+        # ---- 收尾前主动校验：若仍有违反，注入一条 user 消息要求修正再继续 ----
+        if not _final_validation_injected:
+            _final_validation_injected = True
+            try:
+                vresult = dispatch_tool("run_validation", "{}", p)
+                vdata = json.loads(vresult) if isinstance(vresult, str) else {}
+                vpayload = vdata.get("data") if isinstance(vdata, dict) else None
+                violations = []
+                if isinstance(vpayload, dict):
+                    violations = vpayload.get("violations") or []
+                viol_count = len(violations) if isinstance(violations, list) else 0
+                if viol_count > 0:
+                    yield _emit(
+                        "execute",
+                        {
+                            "type": "log",
+                            "message": f"⚠ 收尾自检：仍有 {viol_count} 条规则违反，注入修正请求继续执行",
+                        },
+                    )
+                    # 截取前若干条违反，避免上下文过长
+                    sample = violations[:30]
+                    feedback = (
+                        f"自动收尾校验触发：当前仍有 {viol_count} 条规则违反，必须修正后再结束。\n"
+                        f"违反明细（最多展示前 30 条）：\n```json\n"
+                        f"{json.dumps(sample, ensure_ascii=False, indent=2)}\n```\n"
+                        "请按以下顺序处理：\n"
+                        "1. 逐条分析根因（数据错误 / 公式错误 / 规则过严）；\n"
+                        "2. 优先用 register_formula / write_cells 修正数据；\n"
+                        "3. 若规则本身不合理，用 update_validation_rules 调整后再 run_validation 复核；\n"
+                        "4. 直到 run_validation 全部通过或无法处理后再输出最终总结。"
+                    )
+                    execute_messages.append({"role": "user", "content": feedback})
+                    continue
+            except Exception as exc:  # noqa: BLE001
+                yield _emit(
+                    "execute",
+                    {"type": "log", "message": f"收尾自检失败（忽略）：{exc!r}"},
+                )
         for chunk in _chunk_text(final_text, 80):
             yield _emit("execute", {"type": "token", "text": chunk})
         yield _emit(

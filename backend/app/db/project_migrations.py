@@ -76,4 +76,17 @@ def ensure_project_migrations(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "_agent_sessions", "user_message", "TEXT NOT NULL DEFAULT ''")
     _add_column_if_missing(conn, "_agent_sessions", "model_used", "TEXT NOT NULL DEFAULT ''")
 
+    # 第二轮优化：常量标签系统（每个常量必须 ≥1 标签；标签可挂父系统名）
+    _add_column_if_missing(conn, "_constants", "tags", "TEXT NOT NULL DEFAULT '[]'")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS _const_tags (
+            name TEXT PRIMARY KEY,
+            parent TEXT,
+            brief TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+
     conn.commit()
