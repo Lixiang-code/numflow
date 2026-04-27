@@ -646,8 +646,9 @@ export default function ProjectSetup() {
       // retry / done / partial → 重试原步骤
       if ((rs === 'retry' || rs === 'done' || rs === 'partial') && autoMode && recoveryCountRef.current <= 3) {
         setRecoveryMode(false)
+        busyRef.current = false
+        setBusy(false)
         setTimeout(() => {
-          if (busyRef.current) return
           void runStep(stepId, projInfo, completedSteps)
         }, 2000)
       } else if (rs === 'failed') {
@@ -748,6 +749,8 @@ export default function ProjectSetup() {
       if (autoMode && isNetworkError(errorMsg) && networkRetryRef.current < 2) {
         networkRetryRef.current++
         setAgentErr(`网络错误，自动重试（第 ${networkRetryRef.current} 次）：${errorMsg}`)
+        busyRef.current = false
+        setBusy(false)
         setTimeout(() => {
           void runStep(stepId, projInfo, completedSteps)
         }, 2500)
@@ -769,6 +772,8 @@ export default function ProjectSetup() {
         if (autoMode && networkRetryRef.current < 3) {
           networkRetryRef.current++
           setAgentErr(`自动重试（第 ${networkRetryRef.current} 次）：${errorMsg}`)
+          busyRef.current = false
+          setBusy(false)
           setTimeout(() => void runStep(stepId, projInfo, completedSteps), 2000)
         } else {
           busyRef.current = false
@@ -789,6 +794,8 @@ export default function ProjectSetup() {
           })),
           partial_design: localPhases['design']?.text ?? '',
         }
+        busyRef.current = false
+        setBusy(false)
         setTimeout(() => {
           void runRecovery(stepId, failCtx, projInfo, completedSteps)
         }, 1500)
