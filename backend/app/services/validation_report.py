@@ -122,7 +122,55 @@ def attach_default_rules(
     return {"ok": True, "table_name": table_name, "kind": kind, "rules_count": len(rules)}
 
 
-def append_validation_history(conn: sqlite3.Connection, table_name: Optional[str], report: Dict[str, Any]) -> None:
+def confirm_validation_rule(
+    conn: sqlite3.Connection,
+    table_name: str,
+    rule_id: str,
+    reason: str = "",
+) -> Dict[str, Any]:
+    """将指定规则标记为已确认（confirmed=True），后续 run_validation 跳过该规则报警。
+
+    典型场景：percent_bounds 检测到 crit_dmg=1.5 并报警，
+    设计者确认这是合理的暴击倍率（> 1），调用此接口标记后不再触发报警。
+    """
+    cur = conn.execute(
+        "SELECT validation_rules_json FROM _table_registry WHERE table_name = ?",
+        (table_name,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return {"error": f"表 {table_name!r} 不存在于 _table_registry"}
+    raw = row["validation_rules_json"] or "{}"
+    try:
+        doc = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {"error": "validation_rules_json 解析失败，无法更新"}
+
+    rules: List[Dict[str, Any]] = list(doc.get("rules") or [])
+    matched = False
+    for r in rules:
+        if str(r.get("id", "")) == rule_id:
+            r["confirmed"] = True
+            if reason:
+                r["confirmed_reason"] = reason
+            matched = True
+            break
+
+    if not matched:
+        # 规则不在已存储列表中（可能是运行时自动生成的）——插入一条占位确认条目
+        rules.append({"id": rule_id, "type": "confirmed_override", "confirmed": True, "confirmed_reason": reason or "manual"})
+
+    doc["rules"] = rules
+    conn.execute(
+        "UPDATE _table_registry SET validation_rules_json = ? WHERE table_name = ?",
+        (json.dumps(doc, ensure_ascii=False), table_name),
+    )
+    conn.commit()
+    return {"ok": True, "table_name": table_name, "rule_id": rule_id, "confirmed": True}
+
+
+def append_validation_history(
+        conn: sqlite3.Connection, table_name: Optional[str], report: Dict[str, Any]) -> None:
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     conn.execute(
         "INSERT INTO _validation_history (table_name, created_at, result_json) VALUES (?,?,?)",
@@ -227,6 +275,14 @@ def _evaluate_rules_for_table(conn: sqlite3.Connection, table_name: str) -> Dict
         rid = str(rule.get("id", ""))
         rtype = str(rule.get("type", ""))
         col = str(rule.get("column", ""))
+
+        # 已确认跳过的规则：跳过校验并标记为已确认通过
+        if rule.get("confirmed"):
+            summaries.append({
+                "rule_id": rid, "type": rtype, "column": col or None,
+                "passed": True, "violation_count": 0, "confirmed_override": True,
+            })
+            continue
 
         if rtype == "not_null" and col:
             try:
@@ -441,7 +497,14 @@ def _evaluate_rules_for_table(conn: sqlite3.Connection, table_name: str) -> Dict
                 except (TypeError, ValueError):
                     continue
                 if fv < lo or fv > hi:
-                    local.append({"table": t, "rule_id": rid, "row_id": rr["row_id"], "column": cq, "message": f"percent_bounds: {fv} 不在 [{lo}, {hi}]"})
+                    local.append({
+                        "table": t, "rule_id": rid, "row_id": rr["row_id"], "column": cq,
+                        "message": (
+                            f"percent_bounds: {fv} 不在 [{lo}, {hi}]。"
+                            f"若此设计合理（如暴击伤害倍率 > 1），请调用 confirm_validation_rule("
+                            f"table_name='{t}', rule_id='{rid}') 确认，确认后本规则不再报警。"
+                        ),
+                    })
             violations.extend(local)
             summaries.append({"rule_id": rid, "type": rtype, "column": cq, "passed": len(local) == 0, "violation_count": len(local)})
             continue

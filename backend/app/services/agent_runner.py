@@ -59,6 +59,7 @@ WRITE_TOOLS = {
     "bulk_register_and_compute",
     "setup_level_table",
     "create_snapshot",
+    "confirm_validation_rule",
 }
 
 # 只读工具白名单（gather 阶段只允许调用这些）
@@ -334,8 +335,10 @@ _EXECUTE_SYSTEM_TAIL = (
     "const_register 必填 tags（数组，至少 1 个）：常数会按 tags 分组在前端常量页中展示。\n"
     "  - 标签通常是『主系统名』(如 combat / economy / mount / wing) 或语义类别 (如 level_curve / drop_rate)。\n"
     "  - 若标签未注册可直接传，系统会自动登记；建议先用 const_tag_register 显式定义层级。\n"
-    "brief 字段描述常数的含义/单位/用途；数值本身已由 value 字段承载，brief 无需重复写出来。\n"
-    "  ✓ 'HP 基础值，生命点数' / '暴击伤害放大倍率（小数表示）' / '基础攻击力起始值=100'\n\n"
+    "brief 字段是对常数的**描述性介绍**（含义、单位、用途），应以自然语言说明，不应出现具体数值；\n"
+    "  数值已由 value 字段承载，brief 里写数值属于信息冗余且降低可读性。\n"
+    "  ✓ 'HP 基础值，单位：生命点' / '暴击伤害放大倍率，小数表示' / '防御减伤公式中的平衡系数'\n"
+    "  ✗ 'HP 基础值=100' / '默认 0.85' / 'K=500'\n\n"
 
     "═══ ★ 收尾操作限制（每个 session 仅允许一次）★ ═══\n"
     "create_snapshot：整个 execute 阶段只允许调用 **1次**（最终收尾时），严禁在循环中多次调用。\n"

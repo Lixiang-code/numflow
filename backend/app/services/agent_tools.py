@@ -19,7 +19,7 @@ from app.data.default_rules_02 import get_default_rules_payload
 from app.services.snapshot_ops import compare_snapshot, create_snapshot, list_snapshots
 from app.services.table_ops import create_dynamic_table, delete_dynamic_table
 from app.services.tool_envelope import wrap_tool_payload
-from app.services.validation_report import build_validation_report, list_validation_history
+from app.services.validation_report import build_validation_report, list_validation_history, confirm_validation_rule as _confirm_validation_rule
 
 TOOLS_OPENAI: List[Dict[str, Any]] = [
     {
@@ -405,6 +405,26 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "confirm_validation_rule",
+            "description": (
+                "将指定校验规则标记为「已确认通过」，后续 run_validation 将跳过该规则报警。\n"
+                "典型用途：当 percent_bounds 报告某列值超出 [0,1] 但设计本身合理时（如暴击伤害倍率=1.5），"
+                "调用此工具确认，填写 reason 说明理由。确认后该 rule_id 不再触发报警。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "规则所在的表"},
+                    "rule_id": {"type": "string", "description": "要确认的规则 ID（来自 run_validation 的 rule_id 字段）"},
+                    "reason": {"type": "string", "description": "确认理由，说明为何此设计合理（选填但建议填写）"},
+                },
+                "required": ["table_name", "rule_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "delete_table",
             "description": "删除动态表；confirm 须为 true；若存在公式依赖本表列则拒绝",
             "parameters": {
@@ -628,7 +648,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "value 必须为 number 或可转 number 的字符串。"
                 "★ tags 必填且至少 1 个：用于在前端常量页按『主系统/分类』聚合展示，"
                 "可使用 const_tag_register 预先创建标签；通常至少包含所属主系统名。"
-                "★ brief 描述常数语义/单位/取值范围，可以包含具体数值（如『起始值=100』）方便阅读。"
+                "★ brief 是对常数的描述性介绍（含义/单位/用途），应以自然语言说明，不应出现具体数值（数值由 value 承载）。"
             ),
             "parameters": {
                 "type": "object",
@@ -1632,6 +1652,13 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
         tn = args.get("table_name")
         ft = str(tn) if tn else None
         out = build_validation_report(conn, filter_table=ft)
+    elif name == "confirm_validation_rule":
+        out = _confirm_validation_rule(
+            conn,
+            str(args.get("table_name", "")),
+            str(args.get("rule_id", "")),
+            str(args.get("reason", "")),
+        )
     elif name == "delete_table":
         if not p.can_write:
             out = {"error": "无写权限"}
