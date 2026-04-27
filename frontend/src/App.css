@@ -775,6 +775,63 @@ label > input, label > select, label > textarea { color: var(--text); }
 .tbl-en { font-size: 0.7rem; color: var(--text-muted); font-family: var(--font-mono); }
 .tbl-purpose { font-size: 0.72rem; color: var(--text-muted); }
 
+/* ─── 目录树样式 ─────────────────────────────────────── */
+/* 目录分组容器 */
+.dir-group {
+  margin-bottom: 0.15rem;
+}
+/* 目录标题行（可折叠） */
+.dir-name {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.28rem 0.75rem 0.28rem 0.6rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-alt);
+  transition: background 0.1s;
+}
+.dir-name:hover {
+  background: var(--green-light);
+  color: var(--green-dark);
+  border-left-color: var(--green);
+}
+.dir-name .dir-arrow {
+  font-size: 0.65rem;
+  opacity: 0.6;
+  transition: transform 0.15s;
+  flex-shrink: 0;
+}
+.dir-name.open .dir-arrow {
+  transform: rotate(90deg);
+}
+/* 目录子项容器（树形缩进） */
+.dir-children {
+  border-left: 2px solid var(--border);
+  margin-left: 1.1rem;
+  padding-left: 0;
+}
+.dir-children .dir-children {
+  margin-left: 0.9rem;
+}
+/* 子目录（非叶）按钮在缩进内的样式 */
+.dir-children > li > button,
+.dir-children > .dir-group .dir-name {
+  padding-left: 0.5rem;
+}
+/* 未分目录的顶级表 */
+.dir-ungrouped {
+  border-top: 1px solid var(--border);
+  padding-top: 0.15rem;
+}
+
 /* 流水线块 */
 .pipe-box {
   padding: 0.65rem 0.75rem;
@@ -950,6 +1007,38 @@ label > input, label > select, label > textarea { color: var(--text); }
 }
 .wb-adv-section[open] > summary { margin-bottom: 0.4rem; border-bottom: 1px solid var(--border); }
 .wb-adv-section .wb-snap-list { max-height: 180px; overflow-y: auto; }
+
+/* 相关常数表：窄侧栏内紧凑布局 */
+.wb-const-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+  table-layout: fixed;
+}
+.wb-const-table th, .wb-const-table td {
+  padding: 0.2rem 0.3rem;
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: top;
+}
+.wb-const-table th {
+  color: var(--text-muted);
+  font-weight: 600;
+  background: var(--surface);
+}
+/* 列宽分配：name_en/value 各占约35%，中文 20%，scope 10% */
+.wb-const-table th:nth-child(1), .wb-const-table td:nth-child(1) { width: 35%; }
+.wb-const-table th:nth-child(2), .wb-const-table td:nth-child(2) { width: 22%; }
+.wb-const-table th:nth-child(3), .wb-const-table td:nth-child(3) { width: 28%; font-family: var(--font-mono); }
+.wb-const-table th:nth-child(4), .wb-const-table td:nth-child(4) { width: 15%; }
+/* 包裹 overflow，防止撑宽侧栏 */
+.wb-adv-section .wb-const-wrap {
+  overflow-x: auto;
+  max-height: 220px;
+  overflow-y: auto;
+}
 
 /* 右栏 tab 按钮 */
 .readme-tab-btns {

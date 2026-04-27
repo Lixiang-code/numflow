@@ -106,6 +106,7 @@ def create_dynamic_table(
     column_meta: Union[List[Dict[str, str]], None] = None,
     kind: str = "",
     directory: str = "",
+    tags: Union[List[str], None] = None,
 ) -> Dict[str, Any]:
     """建表入口。
 
@@ -161,10 +162,10 @@ def create_dynamic_table(
     }
     conn.execute(
         """
-        INSERT INTO _table_registry (table_name, layer, purpose, readme, schema_json, validation_status, directory)
-        VALUES (?,?,?,?,?, 'unknown', ?)
+        INSERT INTO _table_registry (table_name, layer, purpose, readme, schema_json, validation_status, directory, tags)
+        VALUES (?,?,?,?,?, 'unknown', ?, ?)
         """,
-        (t, "dynamic", purpose, readme, json.dumps(schema_payload, ensure_ascii=False), directory or ""),
+        (t, "dynamic", purpose, readme, json.dumps(schema_payload, ensure_ascii=False), directory or "", json.dumps(tags or [], ensure_ascii=False)),
     )
     conn.commit()
 

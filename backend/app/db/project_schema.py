@@ -122,6 +122,13 @@ def init_project_db(conn: sqlite3.Connection, *, seed_readme: bool = True) -> No
             conn.execute("ALTER TABLE _constants ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
     except Exception:  # noqa: BLE001
         pass
+    # 增量迁移：为旧库补 _table_registry.tags（JSON 数组字符串）
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(_table_registry)")}
+        if "tags" not in cols:
+            conn.execute("ALTER TABLE _table_registry ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
+    except Exception:  # noqa: BLE001
+        pass
     if seed_readme:
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         cur = conn.execute(

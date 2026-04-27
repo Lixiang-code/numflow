@@ -86,6 +86,31 @@ def get_constants(p: ProjectDB = Depends(get_project_read)):
     return {"constants": constants, "tags": tags}
 
 
+class PatchConstantBody(BaseModel):
+    value: Any = Field(..., description="新值（数字 / 字符串 / bool / null 均可）")
+
+
+@router.patch("/constants/{name_en}")
+def patch_constant(
+    name_en: str,
+    body: PatchConstantBody,
+    p: ProjectDB = Depends(get_project_write),
+):
+    """更新常量值。写权限保护。"""
+    conn = p.conn
+    cur = conn.execute("SELECT 1 FROM _constants WHERE name_en = ?", (name_en,))
+    if not cur.fetchone():
+        raise HTTPException(status_code=404, detail=f"常量 {name_en} 不存在")
+    value_json = json.dumps(body.value, ensure_ascii=False)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    conn.execute(
+        "UPDATE _constants SET value_json = ?, updated_at = ? WHERE name_en = ?",
+        (value_json, now, name_en),
+    )
+    conn.commit()
+    return {"ok": True, "name_en": name_en, "value": body.value}
+
+
 @router.get("/tables")
 def get_table_list(p: ProjectDB = Depends(get_project_read)):
     cur = p.conn.execute(

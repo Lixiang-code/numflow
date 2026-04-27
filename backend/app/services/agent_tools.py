@@ -236,6 +236,12 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                         "type": "string",
                         "description": "目录路径（强烈建议填写，'/' 分隔），如 '基础属性' / '落地表/装备' / '养成资源'。便于工作台目录树管理。",
                     },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "表的标签列表（至少1个，用于相关常数筛选），如 ['属性', '基础']。与常量的 tags 做交集匹配，决定右侧面板显示哪些相关常数。",
+                        "minItems": 1,
+                    },
                 },
                 "required": ["table_name", "display_name", "columns"],
             },
@@ -825,6 +831,13 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                     "value_format": {"type": "string", "default": "0.00%"},
                     "readme": {"type": "string", "default": ""},
                     "purpose": {"type": "string", "default": ""},
+                    "readme": {"type": "string", "default": ""},
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "表的标签列表（至少1个），用于相关常数筛选。",
+                        "minItems": 1,
+                    },
                 },
                 "required": ["table_name", "display_name", "kind", "directory", "rows", "cols"],
             },
@@ -1563,6 +1576,7 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                     column_meta=col_meta,
                     kind=str(args.get("kind", "")),
                     directory=str(args.get("directory", "")),
+                    tags=args.get("tags") or [],
                 )
             except ValueError as e:
                 tname = str(args.get("table_name", ""))
@@ -1781,6 +1795,7 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                     value_dtype=str(args.get("value_dtype", "float")),
                     value_format=str(args.get("value_format", "0.00%")),
                     scale_mode=args.get("scale_mode") or None,
+                    tags=args.get("tags") or [],
                 )
             except ValueError as e:
                 out = {"error": str(e)}

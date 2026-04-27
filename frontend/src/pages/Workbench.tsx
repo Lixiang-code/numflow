@@ -110,13 +110,22 @@ type ConstTagItem = { name: string; parent?: string | null; brief?: string | nul
 function ConstantsPanel({
   constants,
   tags,
+  canWrite,
+  headers,
   onRefresh,
 }: {
   constants: ConstantItem[]
   tags: ConstTagItem[]
+  canWrite?: boolean
+  headers?: Record<string, string>
   onRefresh: () => void
 }) {
   const [filter, setFilter] = useState('')
+  const [editingKey, setEditingKey] = useState<string | null>(null)
+  const [editDraft, setEditDraft] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveErr, setSaveErr] = useState<string | null>(null)
+
   const groups = useMemo(() => {
     const f = filter.trim().toLowerCase()
     const filtered = f
@@ -150,6 +159,41 @@ function ConstantsPanel({
     }
   }
 
+  const startEdit = (c: ConstantItem) => {
+    if (!canWrite) return
+    setEditingKey(c.name_en)
+    setEditDraft(formatValue(c.value))
+    setSaveErr(null)
+  }
+
+  const cancelEdit = () => {
+    setEditingKey(null)
+    setEditDraft('')
+    setSaveErr(null)
+  }
+
+  const saveEdit = async (name_en: string) => {
+    if (!canWrite || !headers) return
+    setSaving(true)
+    setSaveErr(null)
+    try {
+      // 尝试解析为数字，否则按字符串处理
+      const numVal = Number(editDraft)
+      const value = editDraft.trim() !== '' && !isNaN(numVal) ? numVal : editDraft
+      await apiFetch(`/meta/constants/${encodeURIComponent(name_en)}`, {
+        method: 'PATCH',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value }),
+      })
+      setEditingKey(null)
+      onRefresh()
+    } catch (e) {
+      setSaveErr(String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <div style={{ padding: '0.5rem 0.25rem', overflow: 'auto', height: '100%' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.75rem' }}>
@@ -163,6 +207,7 @@ function ConstantsPanel({
         />
         <button type="button" className="btn tiny" onClick={onRefresh}>刷新</button>
       </div>
+      {saveErr && <p style={{ color: 'red', fontSize: '0.8rem' }}>保存失败：{saveErr}</p>}
       {tags.length > 0 && (
         <p className="muted small" style={{ marginBottom: '0.75rem' }}>
           共 {tags.length} 个标签：{tags.map((t) => t.name).join('、')}
@@ -181,7 +226,7 @@ function ConstantsPanel({
                 <tr style={{ textAlign: 'left', borderBottom: '1px solid #333' }}>
                   <th style={{ padding: '0.25rem 0.5rem' }}>名称 (en)</th>
                   <th style={{ padding: '0.25rem 0.5rem' }}>中文</th>
-                  <th style={{ padding: '0.25rem 0.5rem' }}>值</th>
+                  <th style={{ padding: '0.25rem 0.5rem' }}>值 {canWrite && <span className="muted small">（点击编辑）</span>}</th>
                   <th style={{ padding: '0.25rem 0.5rem' }}>简介</th>
                   <th style={{ padding: '0.25rem 0.5rem' }}>范围表</th>
                 </tr>
@@ -191,7 +236,34 @@ function ConstantsPanel({
                   <tr key={c.name_en} style={{ borderBottom: '1px solid #222' }}>
                     <td style={{ padding: '0.25rem 0.5rem', fontFamily: 'monospace' }}>{c.name_en}</td>
                     <td style={{ padding: '0.25rem 0.5rem' }}>{c.name_zh}</td>
-                    <td style={{ padding: '0.25rem 0.5rem', fontFamily: 'monospace' }}>{formatValue(c.value)}</td>
+                    <td style={{ padding: '0.25rem 0.5rem', fontFamily: 'monospace' }}>
+                      {editingKey === c.name_en ? (
+                        <span style={{ display: 'flex', gap: '0.3rem', alignItems: 'center' }}>
+                          <input
+                            autoFocus
+                            style={{ width: 90, padding: '0.15rem 0.3rem', fontFamily: 'monospace', fontSize: '0.8rem' }}
+                            value={editDraft}
+                            onChange={(e) => setEditDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') void saveEdit(c.name_en)
+                              if (e.key === 'Escape') cancelEdit()
+                            }}
+                          />
+                          <button type="button" className="btn tiny primary" disabled={saving} onClick={() => void saveEdit(c.name_en)}>
+                            {saving ? '…' : '✓'}
+                          </button>
+                          <button type="button" className="btn tiny" onClick={cancelEdit}>✕</button>
+                        </span>
+                      ) : (
+                        <span
+                          style={{ cursor: canWrite ? 'pointer' : undefined, textDecoration: canWrite ? 'underline dotted' : undefined }}
+                          title={canWrite ? '点击编辑值' : undefined}
+                          onClick={() => startEdit(c)}
+                        >
+                          {formatValue(c.value)}
+                        </span>
+                      )}
+                    </td>
                     <td style={{ padding: '0.25rem 0.5rem' }} className="small">{c.brief || '—'}</td>
                     <td style={{ padding: '0.25rem 0.5rem' }} className="small muted">{c.scope_table || '全局'}</td>
                   </tr>
@@ -915,7 +987,7 @@ export default function Workbench() {
           try {
             const mm = typeof desc.matrix_meta_json === 'string'
               ? JSON.parse(desc.matrix_meta_json)
-              : null
+              : (desc.matrix_meta_json != null ? desc.matrix_meta_json : null)
             setSelectedMatrixMeta(mm)
           } catch {
             setSelectedMatrixMeta({})
@@ -1450,7 +1522,7 @@ export default function Workbench() {
                   >
                     <button
                       type="button"
-                      className="dir-name"
+                      className={`dir-name${collapsed ? '' : ' open'}`}
                       onClick={() => setCollapsedDirs((prev) => {
                         const next = new Set(prev)
                         if (next.has(dir)) next.delete(dir)
@@ -1459,7 +1531,8 @@ export default function Workbench() {
                       })}
                       title={collapsed ? '展开' : '折叠'}
                     >
-                      <span>{collapsed ? '▶' : '▼'} {dir}</span>
+                      <span className="dir-arrow">▶</span>
+                      <span>{dir}</span>
                       <small className="muted">{groups[dir].length}</small>
                     </button>
                     {!collapsed && (
@@ -1519,6 +1592,8 @@ export default function Workbench() {
             <ConstantsPanel
               constants={allConstants}
               tags={allConstTags}
+              canWrite={canWrite}
+              headers={headers}
               onRefresh={() => void loadAllConstants()}
             />
           ) : selected && selectedMatrixMeta != null ? (
@@ -1543,7 +1618,7 @@ export default function Workbench() {
                 glossary={glossary}
               />
             </>
-          ) : (
+          ) : selected !== '__constants__' && selectedMatrixMeta == null ? (
           <>
           {/* 暴露参数 banner */}
           {exposedParams.length > 0 && (
@@ -1625,13 +1700,19 @@ export default function Workbench() {
               </span>
             )}
           </div>
-          <div className="wb-univer-host" ref={univerHostRef} />
-          {readOnly && (
+          </>
+          ) : null}
+          {/* wb-univer-host 始终挂载在 DOM，避免 Univer 宿主容器被卸载后引用断裂；
+              在常量页 / 矩阵页时用 CSS 隐藏 */}
+          <div
+            className="wb-univer-host"
+            ref={univerHostRef}
+            style={{ display: (selected === '__constants__' || selectedMatrixMeta != null) ? 'none' : undefined }}
+          />
+          {readOnly && selected !== '__constants__' && selectedMatrixMeta == null && (
             <div className="wb-readonly-overlay" title="只读模式">
               🔒 只读模式（在 Agent 进程页中查看，请回到完整工作台编辑）
             </div>
-          )}
-          </>
           )}
         </section>
 
@@ -1836,6 +1917,7 @@ export default function Workbench() {
               {relatedConstants.length === 0 ? (
                 <p className="muted small">暂无项目级 / 本表常数。可在 Agent 会话中通过 const_register 注册，或从 README 中识别 ${'${name}'} 引用。</p>
               ) : (
+                <div className="wb-const-wrap">
                 <table className="wb-const-table small">
                   <thead>
                     <tr>
@@ -1848,14 +1930,17 @@ export default function Workbench() {
                   <tbody>
                     {relatedConstants.map((c) => (
                       <tr key={c.name_en}>
-                        <td><code>{c.name_en}</code></td>
-                        <td>{c.name_zh || '—'}</td>
-                        <td>{typeof c.value === 'object' ? JSON.stringify(c.value) : String(c.value)}</td>
-                        <td className="muted small">{c.scope_table || '全局'}</td>
+                        <td title={c.name_en}><code>{c.name_en}</code></td>
+                        <td title={c.name_zh || ''}>{c.name_zh || '—'}</td>
+                        <td title={typeof c.value === 'object' ? JSON.stringify(c.value) : String(c.value)}>
+                          {typeof c.value === 'object' ? JSON.stringify(c.value) : String(c.value)}
+                        </td>
+                        <td className="muted small" title={c.scope_table || '全局'}>{c.scope_table || '全局'}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
+                </div>
               )}
               <p className="muted small">公式中可用 <code>${'${name_en}'}</code> 引用；执行时自动替换为数值。</p>
             </details>

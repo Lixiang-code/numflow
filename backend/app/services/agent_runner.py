@@ -186,6 +186,12 @@ def _common_system(mode_norm: str) -> str:
             "②写入用 write_matrix_cells（行=玩法子系统，列=属性或资源）；"
             "③创建后必须调用 register_calculator 注册 fun(level, gameplay, attr|res[, grain])，"
             "brief 必须 ≥8 字符；下游一律用 call_calculator 取值，避免硬编码。",
+            "【表命名与标签规范（严格）】"
+            "①每张表的 display_name 必须为中文，如「基础属性表」，不得省略或留空；"
+            "②每次调用 create_table 或 create_matrix_table 必须传 tags 参数（数组，至少1个标签），"
+            "如 ['属性', '基础'] 或 ['资源', '养成']；标签决定右侧面板的「相关常数」筛选——"
+            "只有与表 tags 有交集的全局常数才会显示，请在 design 阶段为每张表规划好合适的 tags；"
+            "③tags 应与已注册的 const_tag_register 标签对齐（先 const_tag_register，再用相同标签）。",
             "【表目录管理】调用 create_table / create_matrix_table 时必须传 directory 参数（"
             "如 '基础/属性'、'分配/玩法属性'、'落地/装备'）以便目录化管理；"
             "可用 list_directories / set_table_directory 查询和移动。",

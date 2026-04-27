@@ -111,15 +111,43 @@ def describe_table(table_name: str, p: ProjectDB = Depends(get_project_read)):
         for r in curf.fetchall()
     }
 
-    # 相关常数：scope_table=t 或 全局
+    # 相关常数：scope_table=t 的常数，加上与本表 tags 有交集的全局常数
     related_constants: List[Dict[str, Any]] = []
     try:
+        # 先获取本表 tags
+        cur_tags = conn.execute(
+            "SELECT COALESCE(tags, '[]') FROM _table_registry WHERE table_name = ?", (t,)
+        )
+        row_tags = cur_tags.fetchone()
+        try:
+            table_tags: list = json.loads(row_tags[0]) if row_tags else []
+            if not isinstance(table_tags, list):
+                table_tags = []
+        except Exception:  # noqa: BLE001
+            table_tags = []
+
         cur_c = conn.execute(
-            "SELECT name_en, name_zh, value_json, brief, scope_table FROM _constants "
-            "WHERE scope_table IS NULL OR scope_table = '' OR scope_table = ? ORDER BY name_en",
-            (t,),
+            "SELECT name_en, name_zh, value_json, brief, scope_table, COALESCE(tags, '[]') AS tags FROM _constants ORDER BY name_en",
         )
         for r in cur_c.fetchall():
+            scope = r["scope_table"]
+            # 始终包含 scope=本表 的常数
+            if scope and scope != '' and scope == t:
+                pass  # 包含
+            else:
+                # 全局常数（scope 为空）按 tags 交集过滤
+                if scope and scope != '':
+                    continue  # 属于其他表，跳过
+                # scope 为空：只有 table_tags 为空（旧数据）或有交集才显示
+                if table_tags:
+                    try:
+                        const_tags = json.loads(r["tags"]) if r["tags"] else []
+                        if not isinstance(const_tags, list):
+                            const_tags = []
+                    except Exception:  # noqa: BLE001
+                        const_tags = []
+                    if not any(tag in table_tags for tag in const_tags):
+                        continue
             try:
                 v = json.loads(r["value_json"])
             except Exception:  # noqa: BLE001

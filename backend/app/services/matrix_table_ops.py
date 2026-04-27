@@ -52,6 +52,7 @@ def create_matrix_table(
     value_format: str = "0.00%",
     register_calc: bool = True,
     scale_mode: Optional[str] = None,        # none | fallback | static
+    tags: Optional[List[str]] = None,
     # none    = 无等级维（matrix_attr 默认）；所有 cell 存 level=NULL，调用时忽略 level 参数
     # fallback= 懒触发（matrix_resource 默认）：先查精确 level，找不到自动回退 level=NULL
     # static  = 全量预存（旧行为，level 列必须全部填满）
@@ -130,8 +131,8 @@ def create_matrix_table(
     conn.execute(
         """
         INSERT INTO _table_registry
-            (table_name, layer, purpose, readme, schema_json, validation_status, directory, matrix_meta_json)
-        VALUES (?,?,?,?,?, 'unknown', ?, ?)
+            (table_name, layer, purpose, readme, schema_json, validation_status, directory, matrix_meta_json, tags)
+        VALUES (?,?,?,?,?, 'unknown', ?, ?, ?)
         """,
         (
             t,
@@ -141,6 +142,7 @@ def create_matrix_table(
             json.dumps(schema_payload, ensure_ascii=False),
             directory or "",
             json.dumps(matrix_meta, ensure_ascii=False),
+            json.dumps(tags or [], ensure_ascii=False),
         ),
     )
     conn.commit()
