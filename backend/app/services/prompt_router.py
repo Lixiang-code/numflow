@@ -93,14 +93,24 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
         _NAMING_HEADER
         + "【步骤 2/7 基础属性框架（除 HP）】\n"
         "目标：定义角色基础属性骨架，输出 1..max_level 行的标准等级基础属性表（hp 列暂留空，下一步反推）。\n"
-        "新规则：\n"
+        "规则：\n"
         "  · 攻击力按膨胀速率单一公式贯穿全等级（禁止分段）；\n"
         "  · 用户勾选的所有属性都必须在表中且必须有膨胀（高级属性如暴击率/闪避/抗性给合理曲线，仍单调）；\n"
         "  · 单调线性或单调指数膨胀，禁止分段；\n"
         "  · 本步不填 hp 列，hp 由下一步 hp_formula_derivation 通过战斗公式反推。\n"
         "先 `get_project_config` → 读 core.game_type 与 attribute_systems.selectedAttrs。\n"
         "必产出表：`num_base_framework`（display_name=「基础属性·标准等级」），列至少含 level/atk/def 与所有勾选属性（hp 列建好但可为空）。\n"
-        "★ 强制效率方式：用 `setup_level_table` 一次完成。常数先 `const_register`，再以 `${name}` 引用。"
+        "★ 强制效率方式：用 `setup_level_table` 一次完成。常数先 `const_register`，再以 `${name}` 引用。\n\n"
+        "★★ 乘法防御公式时必须执行以下流程（减法公式不需要）：\n"
+        "  1. 设计 def 曲线后，**必须设计 K 值**（战斗公式为 net_dmg = 1 - def/(def+K)）。\n"
+        "     K 值决定减伤曲线斜率，影响高等级防御是否过强或过弱，需自行权衡（建议先用 atk_mid 对齐目标减伤率 30~50%）。\n"
+        "  2. `const_register('def_K', 值, tags=['combat'])` 注册 K 值。\n"
+        "  3. 在 num_base_framework 中增加 `def_reduction` 列（display_name=「防御减伤率」），\n"
+        "     公式：def_reduction = def / (def + ${def_K})，用 `setup_level_table` 或 `write_cells_series` 填入。\n"
+        "  4. 用 `sparse_sample(table_name='num_base_framework', columns=['level','def','def_reduction'], n=20)`\n"
+        "     采样 20 行检查减伤曲线，确认低/中/高等级减伤率在设计目标范围内（如低区 10~20%、高区 40~60%）。\n"
+        "  5. 若曲线不合理（减伤过高或过低）：调整 ${def_K} 常数值，重新计算 def_reduction 列，再次 sparse_sample 复查。\n"
+        "     **可多轮迭代**，直到曲线符合预期。"
     ),
     "hp_formula_derivation": (
         _NAMING_HEADER

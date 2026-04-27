@@ -80,6 +80,9 @@ READ_TOOLS = {
     "glossary_lookup",
     "glossary_list",
     "const_list",
+    "sparse_sample",
+    "list_calculators",
+    "call_calculator",
 }
 
 READ_TOOLS_OPENAI = [t for t in TOOLS_OPENAI if t["function"]["name"] in READ_TOOLS]

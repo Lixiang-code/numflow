@@ -953,6 +953,39 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "sparse_sample",
+            "description": (
+                "从表中均匀采样 N 行，用于在不读取全表的情况下直观检查曲线形态（如减伤曲线、属性膨胀曲线）。"
+                "按 level 列（或 row_id）升序排列后，等间距抽取 N 行，返回指定列的值。"
+                "典型用途：设计防御 K 值后采样减伤曲线验证，或检查 HP/ATK 膨胀趋势。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "目标表名"},
+                    "columns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "要采样的列名列表（建议包含 level 列，方便阅读）",
+                    },
+                    "n": {
+                        "type": "integer",
+                        "description": "采样行数，默认 20，最大 100",
+                        "default": 20,
+                    },
+                    "order_by": {
+                        "type": "string",
+                        "description": "排序列，默认 level（不存在则回退 row_id）",
+                        "default": "level",
+                    },
+                },
+                "required": ["table_name", "columns"],
+            },
+        },
+    },
 ]
 
 
@@ -1780,6 +1813,8 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
             out = _expose_param(conn, args)
     elif name == "list_exposed_params":
         out = _list_exposed_params(conn, str(args.get("target_step", "")))
+    elif name == "sparse_sample":
+        out = _sparse_sample(conn, args)
     else:
         out = {"error": f"未知工具 {name}"}
     return json.dumps(wrap_tool_payload(out), ensure_ascii=False)
@@ -2131,3 +2166,70 @@ def _const_delete(conn: sqlite3.Connection, args: Dict[str, Any], can_write: boo
     conn.execute("DELETE FROM _constants WHERE name_en = ?", (name_en,))
     conn.commit()
     return {"ok": True, "name_en": name_en}
+
+
+def _sparse_sample(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any]:
+    """均匀采样表中 N 行，用于曲线形态检查。"""
+    table_name = str(args.get("table_name", "")).strip()
+    columns = args.get("columns")
+    if not table_name:
+        return {"error": "table_name 必填"}
+    if not isinstance(columns, list) or not columns:
+        return {"error": "columns 必填，传列名数组"}
+    n = max(2, min(int(args.get("n", 20)), 100))
+    order_by = str(args.get("order_by", "level")).strip() or "level"
+
+    # 验证表存在
+    exists = conn.execute(
+        "SELECT 1 FROM _table_registry WHERE table_name = ?", (table_name,)
+    ).fetchone()
+    if not exists:
+        return {"error": f"表 {table_name!r} 不存在"}
+
+    # 确认排序列是否存在，否则回退 row_id
+    try:
+        conn.execute(f'SELECT "{order_by}" FROM "{table_name}" LIMIT 1')
+    except Exception:  # noqa: BLE001
+        order_by = "row_id"
+
+    # 获取总行数
+    total = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+    if total == 0:
+        return {"table": table_name, "total_rows": 0, "sampled": 0, "rows": []}
+
+    # 均匀采样：计算每隔 step 取一行
+    safe_cols = ", ".join(f'"{c}"' for c in columns)
+    if total <= n:
+        # 行数不超过 n，全取
+        cur = conn.execute(f'SELECT {safe_cols} FROM "{table_name}" ORDER BY "{order_by}"')
+    else:
+        # 用 ROW_NUMBER 等间隔采样
+        step = total / n
+        indices = [int(i * step) for i in range(n)]
+        placeholders = ",".join(str(i) for i in indices)
+        cur = conn.execute(
+            f"""
+            WITH ranked AS (
+                SELECT {safe_cols}, ROW_NUMBER() OVER (ORDER BY "{order_by}") - 1 AS rn
+                FROM "{table_name}"
+            )
+            SELECT {safe_cols} FROM ranked WHERE rn IN ({placeholders})
+            ORDER BY rn
+            """
+        )
+
+    rows = []
+    for r in cur.fetchall():
+        row: Dict[str, Any] = {}
+        for col in columns:
+            v = r[col] if col in r.keys() else None
+            row[col] = round(v, 6) if isinstance(v, float) else v
+        rows.append(row)
+
+    return {
+        "table": table_name,
+        "total_rows": total,
+        "sampled": len(rows),
+        "order_by": order_by,
+        "rows": rows,
+    }
