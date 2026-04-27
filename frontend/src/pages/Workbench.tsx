@@ -878,6 +878,16 @@ export default function Workbench() {
           if (usedRange) usedRange.clearContent()
         } catch { /* ignore */ }
         sheet.getRange(0, 0, matrix.length, numCols).setValues(matrix)
+        // 设置列宽（避免 Univer 打印布局计算 "column width < 0" 警告）
+        try {
+          const sheetCols = sheet as unknown as { setColumnWidth?: (col: number, width: number) => unknown }
+          if (sheetCols.setColumnWidth) {
+            const MIN_COL_WIDTH = 90
+            for (let ci = 0; ci < numCols; ci++) {
+              sheetCols.setColumnWidth(ci, MIN_COL_WIDTH)
+            }
+          }
+        } catch { /* ignore column width errors */ }
         // 表头样式（尽力而为，不同 Univer 版本 API 略有差异）
         try {
           const headRange = sheet.getRange(0, 0, 3, numCols)
