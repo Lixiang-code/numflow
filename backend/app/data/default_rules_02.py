@@ -41,7 +41,7 @@ DEFAULT_RULES_02: Dict[str, Any] = {
     },
     "combat_attrs": {
         "primary": ["atk", "def", "hp", "spd", "crit_rate", "crit_dmg", "hit", "dodge"],
-        "derived_notes": "暴击伤害默认 1.5x 基线，可由装备/神器改写",
+        "derived_notes": "暴击伤害默认 1.5x 基线，养成玩法可提升",
     },
     # 文档 02 子系统「宝石」及落地轴说明（供 Agent/表结构对齐，避免所有玩法共用「角色 1..N 级」一行一行的机械套表）
     "gem": {

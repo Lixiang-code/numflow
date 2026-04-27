@@ -127,7 +127,7 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
         "  3. 写出 hp_formula 表达式，`update_formula('hp_formula', expression, ...)` 登记到 _formula_registry；\n"
         "  4. 用 `update_rows` 把 hp 列写入 num_base_framework（不重建表）；\n"
         "  5. `update_table_readme`：写出公式、战斗节奏假设、level1/mid/max 的 HP 合理性校验。\n"
-        "★ review 阶段：对比 atk vs hp/atk 比值趋势，确保高等级 HP 膨胀合理（不超过 atk×10~20）。\n"
+        "★ review 阶段：对比 atk vs hp/atk 比值趋势，确保高等级 HP 膨胀曲线合理。\n"
         "★ 攻击方 atk_ref 使用同等级自身 atk（PvE 对手等级同玩家），不要用 level1 固定值。\n"
         "★ expected_survive_seconds 必须 const_register 到 _constants，禁止硬编码。"
     ),

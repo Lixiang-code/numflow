@@ -3,19 +3,52 @@
 from __future__ import annotations
 
 import copy
+import math
 from typing import Any, Dict, List
 
 # 从工具返回中剥除的噪声字段（对 AI 无用，占用 token）
 _STRIP_KEYS = frozenset({"created_at", "updated_at"})
 
+# 小数精度：保留 4 位有效小数（忽略小数点后的前导零）
+_DECIMAL_SIG = 4
+
+
+def _round_float(v: float) -> float:
+    """保留 4 位有效小数，前导零不计入有效位数。
+
+    规则：
+    - |v| >= 1：保留 4 位小数（round to 4 decimal places）
+    - |v| < 1：找到小数点后第一个非零位的位置 P，保留 P+3 位小数
+    示例：0.0004648678 → 0.0004649；1.056487454 → 1.0565
+    """
+    if not math.isfinite(v) or v == 0.0:
+        return v
+    abs_v = abs(v)
+    if abs_v >= 1.0:
+        dp = _DECIMAL_SIG
+    else:
+        # floor(log10(abs_v)) 是负数，其绝对值等于小数点后前导零个数+1
+        exp = math.floor(math.log10(abs_v))  # e.g. -4 for 0.0004...
+        dp = -exp + _DECIMAL_SIG - 1         # e.g. 4+4-1=7 → 7位小数
+    rounded = round(v, dp)
+    # 消除浮点精度噪声（round有时产生1.0565000000001之类）
+    return float(f"{rounded:.{dp}f}".rstrip('0').rstrip('.') or '0') if '.' in f"{rounded:.{dp}f}" else rounded
+
+
+def _clean_output(obj: Any) -> Any:
+    """递归：删除时间戳字段 + 对浮点数保留4位有效小数。"""
+    if isinstance(obj, dict):
+        return {k: _clean_output(v) for k, v in obj.items() if k not in _STRIP_KEYS}
+    if isinstance(obj, list):
+        return [_clean_output(item) for item in obj]
+    if isinstance(obj, float):
+        return _round_float(obj)
+    return obj
+
 
 def _strip_timestamps(obj: Any) -> Any:
-    """递归删除 created_at / updated_at 字段，避免 token 浪费。"""
-    if isinstance(obj, dict):
-        return {k: _strip_timestamps(v) for k, v in obj.items() if k not in _STRIP_KEYS}
-    if isinstance(obj, list):
-        return [_strip_timestamps(item) for item in obj]
-    return obj
+    """兼容旧调用入口，现在直接走 _clean_output。"""
+    return _clean_output(obj)
 
 
 def wrap_tool_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
