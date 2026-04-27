@@ -48,6 +48,13 @@ type ConversationTurn = {
   messages: LlmMessage[]
 }
 
+type ToolsMeta = {
+  phase: string
+  tools: string[]
+  parallel_tool_calls: boolean
+  tool_choice: string
+}
+
 type Metrics = {
   startedAt: string
   finishedAt: string | null
@@ -315,7 +322,34 @@ function LlmMessageBubble({ msg, index }: { msg: LlmMessage; index: number }) {
   )
 }
 
-function ConversationView({ turns }: { turns: ConversationTurn[] }) {
+function ToolsMetaBadge({ meta }: { meta: ToolsMeta }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div style={{ marginBottom: '8px', borderRadius: '6px', border: '1px solid #2d3a5a', background: '#0e1525', overflow: 'hidden' }}>
+      <div
+        style={{ padding: '5px 10px', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', userSelect: 'none' }}
+        onClick={() => setOpen(!open)}
+      >
+        <span style={{ fontWeight: 700, fontSize: '0.7rem', color: '#60a0e0', minWidth: '90px' }}>🔧 TOOLS配置</span>
+        <span style={{ fontSize: '0.68rem', color: meta.parallel_tool_calls ? '#50d080' : '#e06060' }}>
+          parallel_tool_calls: {meta.parallel_tool_calls ? '✅ true' : '❌ false'}
+        </span>
+        <span style={{ fontSize: '0.68rem', color: '#888' }}>tool_choice: {meta.tool_choice}</span>
+        <span style={{ fontSize: '0.68rem', color: '#aaa' }}>{meta.tools.length} 个工具可用</span>
+        <span style={{ marginLeft: 'auto', fontSize: '0.65rem', color: '#666' }}>{open ? '▲ 折叠' : '▼ 展开'}</span>
+      </div>
+      {open && (
+        <div style={{ padding: '6px 10px 8px', borderTop: '1px solid #1a2a4a', display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+          {meta.tools.map(t => (
+            <code key={t} style={{ fontSize: '0.65rem', background: '#1a2030', padding: '2px 6px', borderRadius: '3px', color: '#9ab0d0' }}>{t}</code>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ConversationView({ turns, toolsMeta }: { turns: ConversationTurn[]; toolsMeta: Record<string, ToolsMeta> }) {
   if (turns.length === 0) {
     return (
       <div style={{ padding: '2rem', textAlign: 'center', color: '#666' }}>
@@ -325,16 +359,25 @@ function ConversationView({ turns }: { turns: ConversationTurn[] }) {
     )
   }
 
-  // Deduplicate: for execute phase, only keep the last snapshot (most complete)
-  // For design/review, keep the one per phase
+  // Deduplicate: for gather/execute, keep last round; for design/review, keep the last one per phase
   const phaseLastTurn: Record<string, ConversationTurn> = {}
   const executeRounds: ConversationTurn[] = []
+  const gatherRounds: ConversationTurn[] = []
   for (const t of turns) {
     if (t.phase === 'execute') executeRounds.push(t)
+    else if (t.phase === 'gather') gatherRounds.push(t)
     else phaseLastTurn[t.phase] = t
   }
 
   const sections: Array<{ title: string; messages: LlmMessage[]; key: string }> = []
+  if (gatherRounds.length > 0) {
+    const lastGather = gatherRounds[gatherRounds.length - 1]
+    sections.push({
+      title: `🔍 Gather 阶段完整对话（${gatherRounds.length - 1} 轮工具调用，最终快照）`,
+      messages: lastGather.messages,
+      key: 'gather',
+    })
+  }
   if (phaseLastTurn['design']) sections.push({ title: '📐 Design 阶段（发送给 AI 的完整消息）', messages: phaseLastTurn['design'].messages, key: 'design' })
   if (phaseLastTurn['review']) sections.push({ title: '🔍 Review 阶段（发送给 AI 的完整消息）', messages: phaseLastTurn['review'].messages, key: 'review' })
   if (executeRounds.length > 0) {
@@ -356,6 +399,7 @@ function ConversationView({ turns }: { turns: ConversationTurn[] }) {
           <h4 style={{ fontSize: '0.85rem', color: '#aaa', marginBottom: '0.5rem', padding: '6px 8px', background: '#1a1a2e', borderRadius: '4px' }}>
             {sec.title}
           </h4>
+          {toolsMeta[sec.key] && <ToolsMetaBadge meta={toolsMeta[sec.key]} />}
           {sec.messages.map((msg, i) => <LlmMessageBubble key={i} msg={msg} index={i} />)}
         </div>
       ))}
@@ -391,6 +435,7 @@ export default function AgentTest() {
   const [routeInfo, setRouteInfo] = useState<RouteInfo | null>(null)
   const [metrics, setMetrics] = useState<Metrics | null>(null)
   const [conversationTurns, setConversationTurns] = useState<ConversationTurn[]>([])
+  const [toolsMeta, setToolsMeta] = useState<Record<string, ToolsMeta>>({})
   const [activeView, setActiveView] = useState<'phases' | 'conversation'>('phases')
 
   // 历史
@@ -542,6 +587,7 @@ export default function AgentTest() {
     setLivePhase(''); setPhases({}); setTools([]); setRouteInfo(null)
     setMetrics(null); setErr(null); setCurSession(null); setViewSession(null)
     setConversationTurns([])
+    setToolsMeta({})
   }, [])
 
   const runAgent = async (e: FormEvent) => {
@@ -633,6 +679,17 @@ export default function AgentTest() {
                 messages: msgs,
               }])
             }
+          } else if (type === 'tools_meta') {
+            const metaPhase = String(raw.phase ?? phase)
+            setToolsMeta(prev => ({
+              ...prev,
+              [metaPhase]: {
+                phase: metaPhase,
+                tools: (raw.tools as string[] | undefined) ?? [],
+                parallel_tool_calls: Boolean(raw.parallel_tool_calls),
+                tool_choice: String(raw.tool_choice ?? 'auto'),
+              },
+            }))
           } else if (type === 'done') {
             const fin = new Date().toISOString()
             setMetrics({
@@ -966,7 +1023,7 @@ export default function AgentTest() {
 
           {/* 完整对话视图 */}
           {activeView === 'conversation' && (
-            <ConversationView turns={conversationTurns} />
+            <ConversationView turns={conversationTurns} toolsMeta={toolsMeta} />
           )}
 
           {/* 等待开始提示 */}

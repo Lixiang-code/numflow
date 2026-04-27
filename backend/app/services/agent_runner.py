@@ -502,6 +502,16 @@ def _run_gather_phase(
     exchange_messages: List[Dict[str, Any]] = []
     MAX_GATHER_ROUNDS = 6
 
+    # 发出初始消息快照（供监控查看 system prompt）
+    yield _emit("gather", {"type": "phase_messages", "phase": "gather", "round": 0, "messages": list(gather_messages)})
+    # 发出工具元信息（供监控查看可用工具与并行设置）
+    yield _emit("gather", {
+        "type": "tools_meta", "phase": "gather",
+        "tools": sorted(READ_TOOLS),
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+    })
+
     for round_i in range(1, MAX_GATHER_ROUNDS + 1):
         yield _emit("gather", {"type": "log", "message": f"信息收集轮次 {round_i}"})
         try:
@@ -563,6 +573,9 @@ def _run_gather_phase(
                 yield _emit("gather", {"type": "token", "text": chunk})
             summary_msg = _build_assistant_msg(msg)
             exchange_messages.append(summary_msg)
+            gather_messages.append(summary_msg)
+            # 最终快照（含完整会话记录，供监控查看）
+            yield _emit("gather", {"type": "phase_messages", "phase": "gather", "round": round_i, "messages": list(gather_messages)})
             yield _emit("gather", {"type": "done", "summary": summary_text[:800]})
             return exchange_messages
 
@@ -748,6 +761,13 @@ def run_agent_sse(
     )
 
     yield _emit("execute", {"type": "log", "message": "execute 阶段开始（启用工具循环）"})
+    # 发出工具元信息（供监控查看可用工具与并行设置）
+    yield _emit("execute", {
+        "type": "tools_meta", "phase": "execute",
+        "tools": sorted(WRITE_TOOLS | READ_TOOLS),
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+    })
     # 发出初始消息快照（后续每轮 LLM 调用前也会更新）
     yield _emit("execute", {"type": "phase_messages", "phase": "execute", "messages": list(execute_messages)})
     final_text = ""
