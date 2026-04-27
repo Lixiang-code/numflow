@@ -5,6 +5,18 @@ from __future__ import annotations
 import copy
 from typing import Any, Dict, List
 
+# 从工具返回中剥除的噪声字段（对 AI 无用，占用 token）
+_STRIP_KEYS = frozenset({"created_at", "updated_at"})
+
+
+def _strip_timestamps(obj: Any) -> Any:
+    """递归删除 created_at / updated_at 字段，避免 token 浪费。"""
+    if isinstance(obj, dict):
+        return {k: _strip_timestamps(v) for k, v in obj.items() if k not in _STRIP_KEYS}
+    if isinstance(obj, list):
+        return [_strip_timestamps(item) for item in obj]
+    return obj
+
 
 def wrap_tool_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -66,7 +78,7 @@ def wrap_tool_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
         st = "success" if raw.get("passed") and not vlist and not warns else "partial"
         return {
             "status": st,
-            "data": copy.deepcopy(raw),
+            "data": _strip_timestamps(raw),
             "warnings": [str(w) for w in warns],
             "blocked_cells": [],
         }
@@ -76,20 +88,20 @@ def wrap_tool_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
         if errs:
             return {
                 "status": "partial",
-                "data": copy.deepcopy(raw),
+                "data": _strip_timestamps(raw),
                 "warnings": [str(e) for e in errs],
                 "blocked_cells": [],
             }
         return {
             "status": "success",
-            "data": copy.deepcopy(raw),
+            "data": _strip_timestamps(raw),
             "warnings": [],
             "blocked_cells": [],
         }
 
     return {
         "status": "success",
-        "data": copy.deepcopy(raw),
+        "data": _strip_timestamps(raw),
         "warnings": [],
         "blocked_cells": [],
     }
