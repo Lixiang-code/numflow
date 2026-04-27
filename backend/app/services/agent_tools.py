@@ -17,7 +17,7 @@ from app.services.formula_exec import (
 )
 from app.data.default_rules_02 import get_default_rules_payload
 from app.services.snapshot_ops import compare_snapshot, create_snapshot, list_snapshots
-from app.services.table_ops import create_dynamic_table, delete_dynamic_table
+from app.services.table_ops import create_dynamic_table, delete_dynamic_table, create_3d_table
 from app.services.tool_envelope import wrap_tool_payload
 from app.services.validation_report import build_validation_report, list_validation_history, confirm_validation_rule as _confirm_validation_rule
 
@@ -1019,6 +1019,100 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_3d_table",
+            "description": (
+                "创建三维矩阵表：行同时包含两个维度（如 等级 × 宝石类型），列是属性。\n"
+                "典型场景：宝石属性表（dim1=等级1~30, dim2=宝石类型, cols=atk_bonus/def_bonus/...）。\n"
+                "系统自动预插所有 (dim1 × dim2) 组合行（row_id='{d1}_{d2}'）；\n"
+                "属性列可设置 formula（支持 @dim1列名、@dim2列名 同行引用语法），设置后自动计算全表。\n"
+                "物理存储为普通 dynamic 表，前端以 2D 宽表渲染，头两列为维度列（高亮冻结）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "英文 snake_case 表名"},
+                    "display_name": {"type": "string", "description": "中文显示名，必填"},
+                    "dim1": {
+                        "type": "object",
+                        "description": "第一维度（行维度1，通常是等级）",
+                        "properties": {
+                            "col_name": {"type": "string", "description": "维度列名（英文，如 level）"},
+                            "display_name": {"type": "string", "description": "维度中文名（如 等级）"},
+                            "keys": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "key": {"type": "string", "description": "维度值（如 '1','2','30'，数字字符串会自动转为 INTEGER）"},
+                                        "display_name": {"type": "string"},
+                                    },
+                                    "required": ["key", "display_name"],
+                                },
+                                "description": "所有维度值，顺序即行顺序",
+                            },
+                        },
+                        "required": ["col_name", "display_name", "keys"],
+                    },
+                    "dim2": {
+                        "type": "object",
+                        "description": "第二维度（行维度2，通常是分类，如宝石类型）",
+                        "properties": {
+                            "col_name": {"type": "string"},
+                            "display_name": {"type": "string"},
+                            "keys": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "key": {"type": "string"},
+                                        "display_name": {"type": "string"},
+                                    },
+                                    "required": ["key", "display_name"],
+                                },
+                            },
+                        },
+                        "required": ["col_name", "display_name", "keys"],
+                    },
+                    "cols": {
+                        "type": "array",
+                        "description": "属性列定义，每列可附加 formula 公式",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "key": {"type": "string", "description": "列英文名"},
+                                "display_name": {"type": "string", "description": "列中文名，必填"},
+                                "dtype": {"type": "string", "enum": ["float", "int", "percent"], "default": "float"},
+                                "number_format": {"type": "string", "default": "0.00"},
+                                "formula": {
+                                    "type": "string",
+                                    "description": (
+                                        "可选，同行公式（支持 @列名 引用本表其他列，含维度列）。\n"
+                                        "示例：@level * ${gem_base_atk} * 0.01\n"
+                                        "若公式含 ${常量} 则注册为 row_template，需后续手动计算。"
+                                    ),
+                                },
+                            },
+                            "required": ["key", "display_name"],
+                        },
+                        "minItems": 1,
+                    },
+                    "readme": {"type": "string", "default": ""},
+                    "purpose": {"type": "string", "default": ""},
+                    "directory": {"type": "string", "description": "目录路径（如 '落地表/宝石'）", "default": ""},
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "表标签（至少1个），用于相关常数筛选",
+                        "minItems": 1,
+                    },
+                },
+                "required": ["table_name", "display_name", "dim1", "dim2", "cols", "directory", "tags"],
+            },
+        },
+    },
 ]
 
 
@@ -1857,6 +1951,25 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
         out = _list_exposed_params(conn, str(args.get("target_step", "")))
     elif name == "sparse_sample":
         out = _sparse_sample(conn, args)
+    elif name == "create_3d_table":
+        if not p.can_write:
+            out = {"error": "无写权限"}
+        else:
+            try:
+                out = create_3d_table(
+                    conn,
+                    table_name=str(args.get("table_name", "")),
+                    display_name=str(args.get("display_name", "")),
+                    dim1=args.get("dim1") or {},
+                    dim2=args.get("dim2") or {},
+                    cols=args.get("cols") or [],
+                    readme=str(args.get("readme", "")),
+                    purpose=str(args.get("purpose", "")),
+                    directory=str(args.get("directory", "")),
+                    tags=args.get("tags") or [],
+                )
+            except Exception as e:  # noqa: BLE001
+                out = {"error": str(e)}
     else:
         out = {"error": f"未知工具 {name}"}
     return json.dumps(wrap_tool_payload(out), ensure_ascii=False)

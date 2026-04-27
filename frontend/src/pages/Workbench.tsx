@@ -12,7 +12,7 @@ import '@univerjs/preset-sheets-core/lib/index.css'
 import MatrixEditor from './MatrixEditor'
 
 type TableInfo = { table_name: string; validation_status: string; layer: string; purpose?: string; display_name?: string; directory?: string; is_matrix?: boolean }
-type ColumnMeta = { name: string; sql_type?: string; display_name?: string; dtype?: string; number_format?: string }
+type ColumnMeta = { name: string; sql_type?: string; display_name?: string; dtype?: string; number_format?: string; is_dim?: boolean }
 /** 列公式信息（含类型：sql / row / row_template） */
 type FormulaInfo = { formula: string; type: string }
 type FormulaMap = Record<string, FormulaInfo>
@@ -520,6 +520,11 @@ export default function Workbench() {
   /** 单元格写入后的"重算+刷新"防抖计时器（避免连续编辑触发整表重渲染卡顿） */
   const recalcDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingRecalcTablesRef = useRef<Set<string>>(new Set())
+  /** 当前选中表是否是传统 2D 矩阵表（基于 tables 列表同步判断，避免 selectedMatrixMeta 异步更新时序问题） */
+  const selectedIsMatrix = useMemo(
+    () => Boolean(tables.find((t) => t.table_name === selected)?.is_matrix),
+    [tables, selected],
+  )
 
   const loadTables = useCallback(async () => {
     const d = (await apiFetch('/meta/tables', { headers })) as { tables?: unknown }
@@ -890,6 +895,25 @@ export default function Workbench() {
           freezer.setFrozenRows?.(3)
           freezer.setFrozen?.({ ySplit: 3, xSplit: 0 })
         } catch { /* ignore freeze errors */ }
+        // 3D matrix 维度列（dim1/dim2）高亮为蓝色
+        try {
+          const dimColIdxs = colMeta
+            .filter((m) => m.is_dim)
+            .map((m) => cols.indexOf(m.name))
+            .filter((ci) => ci >= 0)
+          for (const ci of dimColIdxs) {
+            const headerColRange = sheet.getRange(0, ci, 3, 1)
+            const hs = headerColRange as unknown as { setBackgroundColor?: (c: string) => void; setBackground?: (c: string) => void }
+            hs.setBackgroundColor?.('#e3f2fd')
+            hs.setBackground?.('#e3f2fd')
+            if (rowsArr.length > 0) {
+              const dataColRange = sheet.getRange(3, ci, rowsArr.length, 1)
+              const ds = dataColRange as unknown as { setBackgroundColor?: (c: string) => void; setBackground?: (c: string) => void }
+              ds.setBackgroundColor?.('#f1f8ff')
+              ds.setBackground?.('#f1f8ff')
+            }
+          }
+        } catch { /* ignore dim styling errors */ }
         // 公式模板列（row_template）高亮 + 自动检测含 @col 的单元格
         try {
           const rowPatn = /(?<!@)@(?!@)[\u4e00-\u9fffA-Za-z_]/
@@ -982,19 +1006,19 @@ export default function Workbench() {
         }
         if (cancelled) return
 
-        // 如果是 matrix 表，解析 matrix_meta_json
+        // 解析 matrix_meta_json（传统 2D matrix 和 3d_matrix 均处理）
+        let parsedMM: Record<string, unknown> | null = null
+        try {
+          parsedMM = typeof desc.matrix_meta_json === 'string'
+            ? JSON.parse(desc.matrix_meta_json)
+            : (desc.matrix_meta_json != null ? desc.matrix_meta_json as Record<string, unknown> : null)
+        } catch { parsedMM = null }
         if (isMatrix) {
-          try {
-            const mm = typeof desc.matrix_meta_json === 'string'
-              ? JSON.parse(desc.matrix_meta_json)
-              : (desc.matrix_meta_json != null ? desc.matrix_meta_json : null)
-            setSelectedMatrixMeta(mm)
-          } catch {
-            setSelectedMatrixMeta({})
-          }
+          setSelectedMatrixMeta(parsedMM)
         } else {
           setSelectedMatrixMeta(null)
         }
+
         const rawRows = Array.isArray(r.rows) ? r.rows : []
         const normalized = rawRows.filter(
           (row): row is Record<string, unknown> =>
@@ -1011,12 +1035,22 @@ export default function Workbench() {
           }
         }
         const schemaCols = Array.isArray(desc.schema?.columns) ? desc.schema!.columns! : []
+
+        // 3d_matrix 维度列标记：从 matrix_meta_json 提取 dim1/dim2 col_name
+        const dim3dCols = new Set<string>()
+        if (parsedMM && (parsedMM as { kind?: string }).kind === '3d_matrix') {
+          const mm3d = parsedMM as { dim1?: { col_name?: string }; dim2?: { col_name?: string } }
+          if (mm3d.dim1?.col_name) dim3dCols.add(mm3d.dim1.col_name)
+          if (mm3d.dim2?.col_name) dim3dCols.add(mm3d.dim2.col_name)
+        }
+
         const colMeta: ColumnMeta[] = schemaCols.map((c) => ({
           name: String(c?.name ?? ''),
           sql_type: c?.sql_type,
           display_name: c?.display_name || '',
           dtype: c?.dtype || '',
           number_format: c?.number_format || '',
+          is_dim: dim3dCols.has(String(c?.name ?? '')),
         })).filter((m) => m.name)
         let cols: string[] = []
         if (normalized.length > 0) cols = Object.keys(normalized[0])
@@ -1032,7 +1066,7 @@ export default function Workbench() {
         setColumnFormulas(cf)
         setRelatedConstants(Array.isArray(desc.related_constants) ? desc.related_constants : [])
 
-        // 写入 Univer 并切换到该 sheet（matrix 表不需要写入 Univer）
+        // 写入 Univer 并切换到该 sheet（传统 2D matrix 表不需要写入 Univer）
         if (!isMatrix) {
           populateSheet(selected, normalized, cols, cf, colMeta, displayName)
           activeTableRef.current = selected
@@ -1596,7 +1630,7 @@ export default function Workbench() {
               headers={headers}
               onRefresh={() => void loadAllConstants()}
             />
-          ) : selected && selectedMatrixMeta != null ? (
+          ) : selected && selectedIsMatrix && selectedMatrixMeta != null ? (
             <>
               {/* 暴露参数 banner（仅 gameplay_landing_tables.* 子步） */}
               {exposedParams.length > 0 && (
@@ -1618,7 +1652,7 @@ export default function Workbench() {
                 glossary={glossary}
               />
             </>
-          ) : selected !== '__constants__' && selectedMatrixMeta == null ? (
+          ) : selected !== '__constants__' && !selectedIsMatrix ? (
           <>
           {/* 暴露参数 banner */}
           {exposedParams.length > 0 && (
@@ -1707,9 +1741,9 @@ export default function Workbench() {
           <div
             className="wb-univer-host"
             ref={univerHostRef}
-            style={{ display: (selected === '__constants__' || selectedMatrixMeta != null) ? 'none' : undefined }}
+            style={{ display: (selected === '__constants__' || selectedIsMatrix) ? 'none' : undefined }}
           />
-          {readOnly && selected !== '__constants__' && selectedMatrixMeta == null && (
+          {readOnly && selected !== '__constants__' && !selectedIsMatrix && (
             <div className="wb-readonly-overlay" title="只读模式">
               🔒 只读模式（在 Agent 进程页中查看，请回到完整工作台编辑）
             </div>

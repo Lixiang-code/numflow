@@ -182,10 +182,18 @@ def _common_system(mode_norm: str) -> str:
             "③英文 term_en 必须为 snake_case 全小写（例：equip_base, gem_synth）；"
             "④客户端会按列的 display_lang 自动渲染 $name$，禁止手工硬编码语言混用。",
             "【matrix 表使用规则】"
-            "①创建 matrix 表用 create_matrix_table（kind=attr_alloc 或 res_alloc）；"
+            "①创建 2D 分配矩阵用 create_matrix_table（kind=attr_alloc 或 res_alloc）；"
             "②写入用 write_matrix_cells（行=玩法子系统，列=属性或资源）；"
             "③创建后必须调用 register_calculator 注册 fun(level, gameplay, attr|res[, grain])，"
             "brief 必须 ≥8 字符；下游一律用 call_calculator 取值，避免硬编码。",
+            "【三维矩阵表（create_3d_table）】"
+            "当一张表需要两个行维度时（如 等级×宝石类型、等级×装备部位），用 create_3d_table。\n"
+            "典型场景：宝石属性表（dim1=等级1~N, dim2=宝石类型atk/def/…, cols=atk_bonus/def_bonus/…）。\n"
+            "dim1 通常为数字等级（key 填整数字符串'1','2'…），dim2 为分类（key 填英文标识符）。\n"
+            "属性列（cols[]）可附 formula 字段，公式可用 @dim1列名/@dim2列名 同行引用：\n"
+            "  例：atk_bonus 公式 = @level * ${gem_base_atk}（需先注册常量 gem_base_atk）\n"
+            "若公式含外部 ${常量} 引用则注册为 row_template，需用 recalculate_table 执行。\n"
+            "create_3d_table 同样必须传 display_name（中文）、directory、tags（≥1个）。",
             "【表命名与标签规范（严格）】"
             "①每张表的 display_name 必须为中文，如「基础属性表」，不得省略或留空；"
             "②每次调用 create_table 或 create_matrix_table 必须传 tags 参数（数组，至少1个标签），"

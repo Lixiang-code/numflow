@@ -207,6 +207,166 @@ def meta_map_to_list(meta_map: Dict[str, Dict[str, str]]) -> List[Dict[str, str]
     return out
 
 
+def create_3d_table(
+    conn: sqlite3.Connection,
+    *,
+    table_name: str,
+    display_name: str,
+    dim1: Dict[str, Any],    # {col_name, display_name, keys: [{key, display_name}]}
+    dim2: Dict[str, Any],    # {col_name, display_name, keys: [{key, display_name}]}
+    cols: List[Dict[str, Any]],   # [{key, display_name, dtype, number_format, formula?}]
+    readme: str = "",
+    purpose: str = "",
+    directory: str = "",
+    tags: Union[List[str], None] = None,
+) -> Dict[str, Any]:
+    """创建三维矩阵表（行有两个维度，列是属性，可为每列注册公式）。
+
+    物理存储为普通动态表（layer='dynamic'），行用 row_id="{dim1_key}_{dim2_key}"，
+    并预插所有 (dim1 × dim2) 组合行。
+    公式可引用 @dim1_col_name 与 @dim2_col_name（同行语法）。
+    matrix_meta_json 中记录 kind='3d_matrix'，供前端高亮维度列。
+    """
+    t = assert_english_ident(table_name, field="表名")
+    if t in _SYSTEM_TABLES:
+        raise ValueError(f"表名 {t!r} 是系统保留名")
+    cur = conn.execute("SELECT 1 FROM _table_registry WHERE table_name = ?", (t,))
+    if cur.fetchone():
+        raise ValueError(f"表 {t!r} 已存在")
+    cur2 = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,))
+    if cur2.fetchone():
+        raise ValueError(f"表 {t!r} 已存在于数据库中")
+
+    dim1_col = assert_english_ident(dim1["col_name"], field="dim1 列名")
+    dim2_col = assert_english_ident(dim2["col_name"], field="dim2 列名")
+    dim1_keys = [str(k["key"]) for k in dim1.get("keys", [])]
+    dim2_keys = [str(k["key"]) for k in dim2.get("keys", [])]
+    if not dim1_keys:
+        raise ValueError("dim1.keys 不能为空")
+    if not dim2_keys:
+        raise ValueError("dim2.keys 不能为空")
+
+    # 推断 dim1 SQL type（全部为整数则用 INTEGER，否则 TEXT）
+    def _all_int(keys: List[str]) -> bool:
+        return all(k.isdigit() or (k.startswith("-") and k[1:].isdigit()) for k in keys)
+    dim1_sql = "INTEGER" if _all_int(dim1_keys) else "TEXT"
+    dim2_sql = "INTEGER" if _all_int(dim2_keys) else "TEXT"
+
+    # 构建 DDL
+    attr_defs: List[Tuple[str, str]] = []
+    for c in cols:
+        cn = assert_english_ident(c["key"], field="attr 列名")
+        dtype = str(c.get("dtype") or "float").lower()
+        sql_t = "INTEGER" if dtype == "int" else "REAL"
+        attr_defs.append((cn, sql_t))
+
+    schema_cols: List[Dict[str, str]] = [
+        {"name": "row_id", "sql_type": "TEXT", "display_name": "ID", "dtype": "id", "number_format": "", "display_lang": ""},
+        {"name": dim1_col, "sql_type": dim1_sql, "display_name": dim1.get("display_name", dim1_col), "dtype": "int" if dim1_sql == "INTEGER" else "text", "number_format": "", "display_lang": ""},
+        {"name": dim2_col, "sql_type": dim2_sql, "display_name": dim2.get("display_name", dim2_col), "dtype": "text", "number_format": "", "display_lang": ""},
+    ]
+    for c in cols:
+        cn = assert_english_ident(c["key"], field="attr 列名")
+        dtype = str(c.get("dtype") or "float").lower()
+        sql_t = "INTEGER" if dtype == "int" else "REAL"
+        schema_cols.append({
+            "name": cn,
+            "sql_type": sql_t,
+            "display_name": str(c.get("display_name") or cn),
+            "dtype": dtype,
+            "number_format": str(c.get("number_format") or ""),
+            "display_lang": "",
+        })
+
+    ddl_parts = [
+        "row_id TEXT PRIMARY KEY",
+        f'"{dim1_col}" {dim1_sql}',
+        f'"{dim2_col}" {dim2_sql}',
+    ] + [f'"{cn}" {st} NULL' for cn, st in attr_defs]
+    conn.execute(f'CREATE TABLE "{t}" ({", ".join(ddl_parts)})')
+
+    # 预插所有 (dim1 × dim2) 行
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    row_count = 0
+    for d1 in dim1_keys:
+        for d2 in dim2_keys:
+            rid = f"{d1}_{d2}"
+            d1_val = int(d1) if dim1_sql == "INTEGER" else d1
+            d2_val = int(d2) if dim2_sql == "INTEGER" else d2
+            conn.execute(
+                f'INSERT INTO "{t}" (row_id, "{dim1_col}", "{dim2_col}") VALUES (?,?,?)',
+                (rid, d1_val, d2_val),
+            )
+            row_count += 1
+
+    # 构建 matrix_meta_json（供前端识别 3d_matrix）
+    matrix_meta = {
+        "kind": "3d_matrix",
+        "dim1": {
+            "col_name": dim1_col,
+            "display_name": dim1.get("display_name", dim1_col),
+            "keys": list(dim1.get("keys", [])),
+        },
+        "dim2": {
+            "col_name": dim2_col,
+            "display_name": dim2.get("display_name", dim2_col),
+            "keys": list(dim2.get("keys", [])),
+        },
+        "cols": [
+            {
+                "key": c["key"],
+                "display_name": c.get("display_name", c["key"]),
+                "dtype": c.get("dtype", "float"),
+                "number_format": c.get("number_format", ""),
+                "formula": c.get("formula", ""),
+            }
+            for c in cols
+        ],
+    }
+
+    schema_payload = {"columns": schema_cols, "display_name": display_name or ""}
+    conn.execute(
+        """
+        INSERT INTO _table_registry
+            (table_name, layer, purpose, readme, schema_json, validation_status, directory, matrix_meta_json, tags)
+        VALUES (?,?,?,?,?, 'unknown', ?, ?, ?)
+        """,
+        (
+            t, "dynamic", purpose, readme,
+            json.dumps(schema_payload, ensure_ascii=False),
+            directory or "",
+            json.dumps(matrix_meta, ensure_ascii=False),
+            json.dumps(tags or [], ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+
+    # 术语注册
+    _glossary_register_terms(conn, table_name=t, display_name=display_name or "", column_meta=schema_cols[1:])
+
+    # 注册公式（有 formula 字段的属性列）
+    formula_errors: List[str] = []
+    from app.services.formula_exec import register_row_formula  # lazy import
+    for c in cols:
+        formula_str = str(c.get("formula") or "").strip()
+        if not formula_str:
+            continue
+        try:
+            register_row_formula(conn, t, c["key"], formula_str)
+        except Exception as fe:  # noqa: BLE001
+            formula_errors.append(f"{c['key']}: {fe}")
+
+    return {
+        "ok": True,
+        "table_name": t,
+        "display_name": display_name,
+        "row_count": row_count,
+        "formula_errors": formula_errors,
+        "directory": directory or "",
+    }
+
+
+
 def delete_dynamic_table(conn: sqlite3.Connection, *, table_name: str, confirm: Union[bool, str, int]) -> Dict[str, Any]:
     """删除动态表及元数据；若有公式依赖本表列则拒绝。"""
     if confirm not in (True, "true", "True", 1, "1"):
