@@ -616,6 +616,7 @@ def run_agent_sse(
         route = {
             "hit": False,
             "prompt": "",
+            "gather_hint": "",
             "rationale": f"route_exception: {e!r}",
         }
     yield _emit(
@@ -635,6 +636,8 @@ def run_agent_sse(
         "【5/4 路由提示词】" + routed_prompt if routed_prompt else ""
     )
 
+    gather_hint = (route.get("gather_hint") or "").strip()
+
     exposed_block = _build_exposed_params_block(p, step_id)
     if exposed_block:
         yield _emit("route", {"type": "log", "message": "已注入父系统暴露参数到 prompt"})
@@ -643,10 +646,11 @@ def run_agent_sse(
     yield _emit("meta", {"type": "user_message", "content": user_message, "model": _model})
 
     # ---- 0) gather: AI reads project info before designing ----
+    # 注意：gather 阶段只注入步骤目标提示（去掉写操作指令），防止 AI 在收集阶段执行写操作
     yield _emit("gather", {"type": "log", "message": "gather 阶段开始（只读工具，AI 主动收集项目信息）"})
     gather_gen = _run_gather_phase(
         client, user_message, p,
-        model=_model, routed_block=routed_block,
+        model=_model, routed_block=gather_hint,  # 只传步骤目标 hint，不含写操作指令
     )
     gather_context: List[Dict[str, Any]] = yield from gather_gen
     yield _emit("gather", {"type": "log", "message": f"gather 阶段结束（收集 {len(gather_context)} 条上下文消息）"})

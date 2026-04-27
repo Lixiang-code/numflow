@@ -233,6 +233,23 @@ def pipeline_step_readme_put(
     return {"ok": True, "step_id": step_id, "length": len(body.text)}
 
 
+@router.get("/design-history")
+def pipeline_design_history(p: ProjectDB = Depends(get_project_read)):
+    """返回所有已完成步骤的 README / design_text，用于前端只读抽屉展示。"""
+    st = get_pipeline_state(p.conn)
+    raw_done = list(st.get("completed_steps") or [])
+    expanded = _expand_pipeline_steps(p.conn)
+    done = _normalize_completed(raw_done, expanded)
+    entries = []
+    for step_id in done:
+        stored = get_setting(p.conn, _readme_setting_key(step_id))
+        text = ""
+        if isinstance(stored, dict):
+            text = stored.get("text") or ""
+        entries.append({"step_id": step_id, "design_text": text})
+    return {"entries": entries}
+
+
 @router.get("/specs")
 def pipeline_specs(p: ProjectDB = Depends(get_project_read)):
     return {"specs": [s.to_dict() for s in list_step_specs()]}

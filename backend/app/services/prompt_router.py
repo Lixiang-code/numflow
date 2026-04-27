@@ -31,6 +31,37 @@ _NAMING_HEADER = (
 )
 
 
+def _extract_gather_hint(prompt: str) -> str:
+    """从完整路由提示词中提取 gather 阶段轻量上下文。
+
+    只保留步骤编号标题行、目标说明行、必产出表名信息（「必产出」/「验收」行），
+    去掉 _NAMING_HEADER 和所有写操作指令（const_register/glossary_register/
+    setup_level_table/write_cells/create_table 等），防止 gather 阶段 AI 执行写操作。
+    """
+    if not prompt:
+        return ""
+    # 去掉 _NAMING_HEADER 前缀
+    stripped = prompt.replace(_NAMING_HEADER, "")
+    # 只保留 目标/步骤/必产出/验收/先读/read 相关行；排除含写操作关键词的行
+    write_keywords = (
+        "const_register", "glossary_register", "setup_level_table",
+        "write_cells", "create_table", "update_global_readme",
+        "update_table_readme", "set_project_setting", "bulk_register",
+        "register_formula", "execute_formula", "glossary_register",
+        "const_tag_register", "glossary_batch", "update_rows",
+    )
+    kept: list[str] = []
+    for line in stripped.splitlines():
+        low = line.lower()
+        if any(kw in low for kw in write_keywords):
+            continue
+        kept.append(line)
+    result = "\n".join(kept).strip()
+    if result:
+        result = "【gather 阶段步骤参考（仅供了解需读取哪些信息，禁止任何写操作）】\n" + result
+    return result
+
+
 # 与 routers/pipeline.py PIPELINE_STEPS 一一对应的默认提示词模板。
 # 每段简短描述：本步必产出（表名/列名/接受标准），便于 design 阶段对齐。
 DEFAULT_STEP_PROMPTS: Dict[str, str] = {
@@ -270,10 +301,11 @@ def route_prompt(
         raw = (resp.choices[0].message.content or "").strip()
         verdict = json.loads(raw)
     except Exception as e:  # noqa: BLE001
+        fallback_prompt = default_prompt or "（路由失败且无默认模板，按通用 Numflow 数值策划助手处理本任务。）"
         return {
             "hit": bool(default_prompt),
-            "prompt": default_prompt
-            or "（路由失败且无默认模板，按通用 Numflow 数值策划助手处理本任务。）",
+            "prompt": fallback_prompt,
+            "gather_hint": _extract_gather_hint(fallback_prompt),
             "rationale": f"router_fallback: {e!r}",
         }
 
@@ -281,7 +313,7 @@ def route_prompt(
     rationale = str(verdict.get("rationale") or "")[:400]
 
     if hit:
-        return {"hit": True, "prompt": default_prompt, "rationale": rationale}
+        return {"hit": True, "prompt": default_prompt, "gather_hint": _extract_gather_hint(default_prompt), "rationale": rationale}
 
     # 未命中：让千问现写一段对应本步骤的提示词（仍套上命名纪律前缀）
     try:
@@ -324,5 +356,6 @@ def route_prompt(
     return {
         "hit": False,
         "prompt": custom,
+        "gather_hint": _extract_gather_hint(custom),
         "rationale": rationale or "default_template_not_matched",
     }

@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from 'react'
+import React from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import { apiFetch, projectHeaders } from '../api'
@@ -8,12 +9,41 @@ import type { FUniver } from '@univerjs/core/lib/facade'
 import { UniverSheetsCorePreset, type FWorkbook } from '@univerjs/preset-sheets-core'
 import UniverZhCN from '@univerjs/preset-sheets-core/locales/zh-CN'
 import '@univerjs/preset-sheets-core/lib/index.css'
+import MatrixEditor from './MatrixEditor'
 
 type TableInfo = { table_name: string; validation_status: string; layer: string; purpose?: string; display_name?: string; directory?: string; is_matrix?: boolean }
 type ColumnMeta = { name: string; sql_type?: string; display_name?: string; dtype?: string; number_format?: string }
 /** 列公式信息（含类型：sql / row / row_template） */
 type FormulaInfo = { formula: string; type: string }
 type FormulaMap = Record<string, FormulaInfo>
+
+type CalculatorAxis = { name: string; source: string; default?: string }
+type CalculatorItem = {
+  name: string
+  kind: string
+  table_name: string
+  axes: CalculatorAxis[]
+  value_column: string
+  brief: string
+  updated_at?: string
+}
+
+type ExposedParam = {
+  owner_step: string
+  target_step: string
+  key: string
+  value: unknown
+  brief: string
+}
+
+type GlossaryItem = { term_en: string; term_zh: string }
+
+/** AI 设计文档历史条目（来自 /pipeline/design-history 或 completed_steps） */
+type DesignEntry = {
+  step_id: string
+  design_text?: string
+  completed_at?: string
+}
 
 type RuleSummary = {
   table?: string
@@ -175,6 +205,123 @@ function ConstantsPanel({
   )
 }
 
+/** 把文本中 $name$ 替换为词汇表中文（或英文）显示，找不到时标红 */
+function renderGlossaryText(
+  text: string,
+  glossaryMap: Map<string, GlossaryItem>,
+  lang: 'zh' | 'en' = 'zh',
+): React.ReactNode[] {
+  const parts = text.split(/(\$[a-zA-Z0-9_]+\$)/g)
+  return parts.map((part, i) => {
+    const m = part.match(/^\$([a-zA-Z0-9_]+)\$$/)
+    if (!m) return part
+    const key = m[1]
+    const g = glossaryMap.get(key)
+    if (g) return <span key={i} title={key} style={{ color: '#4fc3f7', fontWeight: 500 }}>{lang === 'en' ? g.term_en : g.term_zh}</span>
+    return <span key={i} title={`未找到术语：${key}`} style={{ color: '#ef9a9a', textDecoration: 'underline dotted' }}>{part}</span>
+  })
+}
+
+// ---- CalculatorsPanel ----
+function CalculatorsPanel({
+  calculators,
+  headers,
+  onRefresh,
+}: {
+  calculators: CalculatorItem[]
+  headers: Record<string, string>
+  onRefresh: () => void
+}) {
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const [trialArgs, setTrialArgs] = useState<Record<string, Record<string, string>>>({})
+  const [trialResult, setTrialResult] = useState<Record<string, unknown>>({})
+  const [trialLoading, setTrialLoading] = useState<string | null>(null)
+
+  async function runTrial(name: string) {
+    const args = trialArgs[name] || {}
+    setTrialLoading(name)
+    try {
+      const r = (await apiFetch('/compute/call-calculator', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ name, args }),
+      })) as Record<string, unknown>
+      setTrialResult((prev) => ({ ...prev, [name]: r }))
+    } catch (e) {
+      setTrialResult((prev) => ({ ...prev, [name]: { error: String(e) } }))
+    }
+    setTrialLoading(null)
+  }
+
+  return (
+    <div style={{ padding: '0.5rem 0.25rem', overflow: 'auto', height: '100%' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.75rem' }}>
+        <h3 style={{ margin: 0 }}>🧮 Calculators（{calculators.length}）</h3>
+        <button type="button" className="btn tiny" onClick={onRefresh}>刷新</button>
+      </div>
+      {calculators.length === 0 ? (
+        <p className="muted small">暂无 Calculator。AI 在 matrix 表创建或 register_calculator 后会出现在这里。</p>
+      ) : (
+        calculators.map((c) => (
+          <details
+            key={c.name}
+            open={expanded === c.name}
+            onToggle={(e) => {
+              if ((e.target as HTMLDetailsElement).open) setExpanded(c.name)
+              else if (expanded === c.name) setExpanded(null)
+            }}
+            style={{ marginBottom: '0.5rem', border: '1px solid #2a2a2a', borderRadius: 6, padding: '0.4rem 0.6rem' }}
+          >
+            <summary style={{ cursor: 'pointer' }}>
+              <strong style={{ fontFamily: 'monospace' }}>{c.name}</strong>{' '}
+              <span className="muted small">({c.kind}) → {c.table_name}</span>
+            </summary>
+            <p className="small" style={{ margin: '0.3rem 0' }}>{c.brief}</p>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginBottom: '0.5rem' }}>
+              {c.axes.filter((a) => a.name !== 'grain').map((a) => (
+                <label key={a.name} style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.8rem' }}>
+                  <span className="muted">{a.name}:</span>
+                  <input
+                    type="text"
+                    value={(trialArgs[c.name] || {})[a.name] ?? ''}
+                    onChange={(e) =>
+                      setTrialArgs((prev) => ({
+                        ...prev,
+                        [c.name]: { ...prev[c.name], [a.name]: e.target.value },
+                      }))
+                    }
+                    placeholder={a.source}
+                    style={{ width: 80, fontSize: '0.8rem', padding: '0.15rem 0.3rem' }}
+                  />
+                </label>
+              ))}
+            </div>
+            <button
+              type="button"
+              className="btn tiny primary"
+              disabled={trialLoading === c.name}
+              onClick={() => void runTrial(c.name)}
+            >
+              {trialLoading === c.name ? '计算中…' : '试算'}
+            </button>
+            {trialResult[c.name] != null && (() => {
+              const res = trialResult[c.name] as Record<string, unknown>
+              if (res.error) return <span className="err small" style={{ marginLeft: 8 }}>{String(res.error)}</span>
+              return (
+                <span style={{ marginLeft: 8, fontSize: '0.85rem' }}>
+                  结果：<strong>{res.value == null ? '—' : String(res.value)}</strong>
+                  {res.found === false && <span className="muted small"> (未匹配)</span>}
+                  {Boolean(res.fallback) && <span className="muted small"> (fallback)</span>}
+                </span>
+              )
+            })()}
+          </details>
+        ))
+      )}
+    </div>
+  )
+}
+
 export default function Workbench() {
   const { projectId } = useParams()
   const pid = Number(projectId)
@@ -190,7 +337,7 @@ export default function Workbench() {
   const [, setRows] = useState<Record<string, unknown>[]>([])
   const [tableReadmeDraft, setTableReadmeDraft] = useState('')
   const [globalReadmeDraft, setGlobalReadmeDraft] = useState('')
-  const [readmeTab, setReadmeTab] = useState<'table' | 'global'>('table')
+  const [readmeTab, setReadmeTab] = useState<'table' | 'global' | 'calculators' | 'design'>('table')
   /** README 编辑/预览模式（每个 tab 独立） */
   const [readmeViewMode, setReadmeViewMode] = useState<'preview' | 'edit'>('preview')
   const [canWrite, setCanWrite] = useState(false)
@@ -254,6 +401,26 @@ export default function Workbench() {
   /** 可用 AI 模型列表 */
   const [aiModels, setAiModels] = useState<string[]>([])
   const [modelSwitching, setModelSwitching] = useState(false)
+
+  // -------- 第4轮新增状态 --------
+  /** Calculators 列表 */
+  const [calculators, setCalculators] = useState<CalculatorItem[]>([])
+  /** 词汇表 */
+  const [glossary, setGlossary] = useState<GlossaryItem[]>([])
+  /** 目录树折叠状态 */
+  const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set())
+  /** 拖拽中的表名 */
+  const [draggingTable, setDraggingTable] = useState<string | null>(null)
+  /** 拖拽悬停的目录 */
+  const [dragOverDir, setDragOverDir] = useState<string | null>(null)
+  /** 当前选中表的暴露参数（仅 gameplay_landing_tables.* 时加载） */
+  const [exposedParams, setExposedParams] = useState<ExposedParam[]>([])
+  /** 设计文档历史（completed_steps 对应的 design_text） */
+  const [designHistory, setDesignHistory] = useState<DesignEntry[]>([])
+  /** 设计文档抽屉选中步骤 */
+  const [designStep, setDesignStep] = useState<string | null>(null)
+  /** 当前选中表的 matrix_meta_json（已解析） */
+  const [selectedMatrixMeta, setSelectedMatrixMeta] = useState<Record<string, unknown> | null>(null)
 
   // -------- Univer 相关 --------
   const univerHostRef = useRef<HTMLDivElement | null>(null)
@@ -357,6 +524,60 @@ export default function Workbench() {
     } catch { /* ignore */ }
     setModelSwitching(false)
   }, [headers])
+
+  const loadCalculators = useCallback(async () => {
+    try {
+      const r = (await apiFetch('/meta/calculators', { headers })) as { calculators?: unknown[] }
+      setCalculators(Array.isArray(r.calculators) ? (r.calculators as CalculatorItem[]) : [])
+    } catch { /* ignore */ }
+  }, [headers])
+
+  const loadGlossary = useCallback(async () => {
+    try {
+      const r = (await apiFetch('/meta/glossary', { headers })) as { glossary?: GlossaryItem[] }
+      setGlossary(Array.isArray(r.glossary) ? r.glossary : [])
+    } catch { /* ignore */ }
+  }, [headers])
+
+  const loadExposedParams = useCallback(async (stepId: string) => {
+    if (!stepId.startsWith('gameplay_landing_tables.')) {
+      setExposedParams([])
+      return
+    }
+    try {
+      const r = (await apiFetch(
+        `/meta/exposed-params?target_step=${encodeURIComponent(stepId)}`,
+        { headers },
+      )) as { items?: ExposedParam[] }
+      setExposedParams(Array.isArray(r.items) ? r.items : [])
+    } catch { setExposedParams([]) }
+  }, [headers])
+
+  const loadDesignHistory = useCallback(async () => {
+    try {
+      const r = (await apiFetch('/pipeline/design-history', { headers })) as { entries?: DesignEntry[] }
+      const entries = Array.isArray(r.entries) ? r.entries : []
+      setDesignHistory(entries)
+      if (entries.length > 0 && !designStep) {
+        setDesignStep(entries[entries.length - 1].step_id)
+      }
+    } catch { /* design history may not exist yet */ }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [headers])
+
+  /** 更新表的 directory（拖拽落点） */
+  const updateTableDirectory = useCallback(async (tableName: string, newDir: string) => {
+    try {
+      await apiFetch(`/meta/tables/${encodeURIComponent(tableName)}/directory`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ directory: newDir }),
+      })
+      await loadTables()
+    } catch (e) {
+      setErr(String(e))
+    }
+  }, [headers, loadTables])
 
   const loadValidation = useCallback(async () => {
     try {
@@ -504,6 +725,11 @@ export default function Workbench() {
     setCompareSnapshotId(null)
     setCompareText('')
     setPipeline(null)
+    setCalculators([])
+    setGlossary([])
+    setExposedParams([])
+    setDesignHistory([])
+    setSelectedMatrixMeta(null)
     void Promise.all([
       loadTables(),
       loadProjectConfig(),
@@ -512,13 +738,16 @@ export default function Workbench() {
       loadSnapshots(),
       loadAiModel(),
       loadAiModels(),
+      loadCalculators(),
+      loadGlossary(),
+      loadDesignHistory(),
     ]).catch((e) => {
       if (!cancelled) setErr(String(e))
     })
     return () => {
       cancelled = true
     }
-  }, [pid, loadTables, loadProjectConfig, loadPipeline, loadValidation, loadSnapshots, loadAiModel, loadAiModels])
+  }, [pid, loadTables, loadProjectConfig, loadPipeline, loadValidation, loadSnapshots, loadAiModel, loadAiModels, loadCalculators, loadGlossary, loadDesignHistory])
 
   /** 把一张表的数据写入对应 Univer sheet（首次或刷新调用） */
   const populateSheet = useCallback(
@@ -632,7 +861,13 @@ export default function Workbench() {
     if (selected === '__constants__') {
       void loadAllConstants()
     }
-  }, [selected, loadAllConstants])
+    // 加载暴露参数（仅 gameplay_landing_tables.* 步骤）
+    if (selected && selected.startsWith('gameplay_landing_tables.')) {
+      void loadExposedParams(selected)
+    } else {
+      setExposedParams([])
+    }
+  }, [selected, loadAllConstants, loadExposedParams])
 
   useEffect(() => {
     if (!selected || selected === '__constants__') {
@@ -646,9 +881,14 @@ export default function Workbench() {
       setFormulaBarCol(null)
       setFormulaBarText('')
       setFormulaBarDirty(false)
+      setSelectedMatrixMeta(null)
       activeTableRef.current = null
       return
     }
+    // 查找表是否 matrix
+    const tableInfo = tables.find((t) => t.table_name === selected)
+    const isMatrix = Boolean(tableInfo?.is_matrix)
+
     let cancelled = false
     ;(async () => {
       try {
@@ -666,8 +906,23 @@ export default function Workbench() {
           schema?: { columns?: { name?: string; sql_type?: string; display_name?: string; dtype?: string; number_format?: string }[] }
           display_name?: string
           related_constants?: Array<{ name_en: string; name_zh: string; value: unknown; brief?: string; scope_table?: string | null }>
+          matrix_meta_json?: string | null
         }
         if (cancelled) return
+
+        // 如果是 matrix 表，解析 matrix_meta_json
+        if (isMatrix) {
+          try {
+            const mm = typeof desc.matrix_meta_json === 'string'
+              ? JSON.parse(desc.matrix_meta_json)
+              : null
+            setSelectedMatrixMeta(mm)
+          } catch {
+            setSelectedMatrixMeta({})
+          }
+        } else {
+          setSelectedMatrixMeta(null)
+        }
         const rawRows = Array.isArray(r.rows) ? r.rows : []
         const normalized = rawRows.filter(
           (row): row is Record<string, unknown> =>
@@ -705,18 +960,22 @@ export default function Workbench() {
         setColumnFormulas(cf)
         setRelatedConstants(Array.isArray(desc.related_constants) ? desc.related_constants : [])
 
-        // 写入 Univer 并切换到该 sheet
-        populateSheet(selected, normalized, cols, cf, colMeta, displayName)
-        activeTableRef.current = selected
-        const wb = workbookRef.current
-        if (wb) {
-          try {
-            const sheetTitle = displayName ? `${displayName}（${selected}）` : selected
-            const sh = wb.getSheetByName(sheetTitle) ?? wb.getSheetByName(selected)
-            if (sh) wb.setActiveSheet(sh)
-          } catch {
-            /* ignore */
+        // 写入 Univer 并切换到该 sheet（matrix 表不需要写入 Univer）
+        if (!isMatrix) {
+          populateSheet(selected, normalized, cols, cf, colMeta, displayName)
+          activeTableRef.current = selected
+          const wb = workbookRef.current
+          if (wb) {
+            try {
+              const sheetTitle = displayName ? `${displayName}（${selected}）` : selected
+              const sh = wb.getSheetByName(sheetTitle) ?? wb.getSheetByName(selected)
+              if (sh) wb.setActiveSheet(sh)
+            } catch {
+              /* ignore */
+            }
           }
+        } else {
+          activeTableRef.current = null
         }
       } catch (e) {
         if (!cancelled) setErr(String(e))
@@ -725,7 +984,7 @@ export default function Workbench() {
     return () => {
       cancelled = true
     }
-  }, [selected, headers, populateSheet])
+  }, [selected, headers, populateSheet, tables])
 
   /** 重新拉取并刷新当前活动 sheet 的数据（写失败时回退用） */
   const reloadActiveTable = useCallback(async () => {
@@ -1136,22 +1395,25 @@ export default function Workbench() {
 
       <div className="wb-body">
         <aside className="wb-left">
-          <h3>表</h3>
-          <button
-            type="button"
-            className="linkish"
-            onClick={() => {
-              void Promise.all([
-                loadTables(),
-                loadProjectConfig(),
-                loadPipeline(),
-                loadValidation(),
-                loadSnapshots(),
-              ]).catch((e) => setErr(String(e)))
-            }}
-          >
-            刷新
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <h3 style={{ margin: 0 }}>表</h3>
+            <button
+              type="button"
+              className="linkish"
+              onClick={() => {
+                void Promise.all([
+                  loadTables(),
+                  loadProjectConfig(),
+                  loadPipeline(),
+                  loadValidation(),
+                  loadSnapshots(),
+                  loadCalculators(),
+                ]).catch((e) => setErr(String(e)))
+              }}
+            >
+              刷新
+            </button>
+          </div>
           <ul>
             <li key="__constants__">
               <button
@@ -1171,39 +1433,74 @@ export default function Workbench() {
                 ;(groups[dir] ||= []).push(t)
               })
               const dirNames = Object.keys(groups).sort()
-              return dirNames.map((dir) => (
-                <li key={`__dir__${dir}`} className="dir-group">
-                  <div className="dir-name">{dir}</div>
-                  <ul className="dir-children">
-                    {groups[dir].map((t) => {
-                      const warn = validateReport?.per_table?.[t.table_name] === 'warn'
-                      const cls = [selected === t.table_name ? 'sel' : '', warn ? 'row-warn' : ''].filter(Boolean).join(' ')
-                      const tag = t.is_matrix ? '⇆ ' : ''
-                      return (
-                        <li key={t.table_name}>
-                          <button type="button" className={cls || undefined} onClick={() => setSelected(t.table_name)}>
-                            <span className="tbl-name">{tag}{t.display_name || t.table_name}</span>
-                            {t.display_name ? (
-                              <small className="tbl-en" title={t.table_name}>{t.table_name}</small>
-                            ) : null}
-                            {t.purpose ? (
-                              <small className="tbl-purpose" title={t.purpose}>
-                                {t.purpose}
-                              </small>
-                            ) : null}
-                            <small>{t.validation_status}</small>
-                          </button>
-                        </li>
-                      )
-                    })}
-                  </ul>
-                </li>
-              ))
+              return dirNames.map((dir) => {
+                const collapsed = collapsedDirs.has(dir)
+                const isDragTarget = dragOverDir === dir
+                return (
+                  <li
+                    key={`__dir__${dir}`}
+                    className={`dir-group${isDragTarget ? ' dir-drag-over' : ''}`}
+                    onDragOver={(e: DragEvent<HTMLLIElement>) => { e.preventDefault(); setDragOverDir(dir) }}
+                    onDragLeave={() => setDragOverDir(null)}
+                    onDrop={(e: DragEvent<HTMLLIElement>) => {
+                      e.preventDefault()
+                      setDragOverDir(null)
+                      if (draggingTable) void updateTableDirectory(draggingTable, dir === '（未分组）' ? '' : dir)
+                    }}
+                  >
+                    <button
+                      type="button"
+                      className="dir-name"
+                      onClick={() => setCollapsedDirs((prev) => {
+                        const next = new Set(prev)
+                        if (next.has(dir)) next.delete(dir)
+                        else next.add(dir)
+                        return next
+                      })}
+                      title={collapsed ? '展开' : '折叠'}
+                    >
+                      <span>{collapsed ? '▶' : '▼'} {dir}</span>
+                      <small className="muted">{groups[dir].length}</small>
+                    </button>
+                    {!collapsed && (
+                      <ul className="dir-children">
+                        {groups[dir].map((t) => {
+                          const warn = validateReport?.per_table?.[t.table_name] === 'warn'
+                          const cls = [selected === t.table_name ? 'sel' : '', warn ? 'row-warn' : ''].filter(Boolean).join(' ')
+                          const tag = t.is_matrix ? '⇆ ' : ''
+                          return (
+                            <li
+                              key={t.table_name}
+                              draggable
+                              onDragStart={() => setDraggingTable(t.table_name)}
+                              onDragEnd={() => { setDraggingTable(null); setDragOverDir(null) }}
+                              title="拖拽到其他目录"
+                            >
+                              <button type="button" className={cls || undefined} onClick={() => setSelected(t.table_name)}>
+                                <span className="tbl-name">{tag}{t.display_name || t.table_name}</span>
+                                {t.display_name ? (
+                                  <small className="tbl-en" title={t.table_name}>{t.table_name}</small>
+                                ) : null}
+                                {t.purpose ? (
+                                  <small className="tbl-purpose" title={t.purpose}>
+                                    {t.purpose}
+                                  </small>
+                                ) : null}
+                                <small>{t.validation_status}</small>
+                              </button>
+                            </li>
+                          )
+                        })}
+                      </ul>
+                    )}
+                  </li>
+                )
+              })
             })()}
           </ul>
           {pipeline && (
             <div className="pipe-box">
-              <h4>流水线（03）</h4>
+              <h4>流水线</h4>
               <p className="muted small">已完成: {pipeline.completed_steps.length} 步</p>
               <p className="small pipe-next-title">{pipelineStepLabel(pipeline.next_expected_step)}</p>
               <p className="muted small mono">{pipeline.next_expected_step || '—'}</p>
@@ -1224,8 +1521,42 @@ export default function Workbench() {
               tags={allConstTags}
               onRefresh={() => void loadAllConstants()}
             />
+          ) : selected && selectedMatrixMeta != null ? (
+            <>
+              {/* 暴露参数 banner（仅 gameplay_landing_tables.* 子步） */}
+              {exposedParams.length > 0 && (
+                <div className="exposed-params-banner">
+                  <strong>📎 本子系统继承的参数 {exposedParams.length} 项：</strong>{' '}
+                  {exposedParams.map((p, i) => (
+                    <span key={i} className="exposed-param-chip" title={p.brief}>
+                      <code>{p.key}</code>
+                      {p.value != null && <span className="muted"> = {JSON.stringify(p.value)}</span>}
+                      <span className="muted small"> ({p.owner_step})</span>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <MatrixEditor
+                tableName={selected}
+                matrixMeta={selectedMatrixMeta}
+                headers={headers}
+                glossary={glossary}
+              />
+            </>
           ) : (
           <>
+          {/* 暴露参数 banner */}
+          {exposedParams.length > 0 && (
+            <div className="exposed-params-banner">
+              <strong>📎 本子系统继承的参数 {exposedParams.length} 项：</strong>{' '}
+              {exposedParams.map((p, i) => (
+                <span key={i} className="exposed-param-chip" title={p.brief}>
+                  <code>{p.key}</code>
+                  {p.value != null && <span className="muted"> = {JSON.stringify(p.value)}</span>}
+                </span>
+              ))}
+            </div>
+          )}
           <h3>{selected || '未选择表'}</h3>
           <div className="wb-formula-bar">
             <span className="wb-formula-bar-label">
@@ -1308,35 +1639,64 @@ export default function Workbench() {
           <div className="wb-right-pane">
             <div className="readme-tabs readme-tab-btns">
               <button type="button" className={readmeTab === 'table' ? 'active' : ''} onClick={() => setReadmeTab('table')}>
-                当前表 README
+                表 README
               </button>
               <button
                 type="button"
                 className={readmeTab === 'global' ? 'active' : ''}
                 onClick={() => setReadmeTab('global')}
               >
-                全局 README
+                全局
+              </button>
+              <button
+                type="button"
+                className={readmeTab === 'calculators' ? 'active' : ''}
+                onClick={() => setReadmeTab('calculators')}
+              >
+                🧮
+              </button>
+              <button
+                type="button"
+                className={readmeTab === 'design' ? 'active' : ''}
+                onClick={() => { setReadmeTab('design'); void loadDesignHistory() }}
+                title="AI 设计文档"
+              >
+                📄
               </button>
             </div>
-            <div className="readme-mode-row">
-              <button type="button"
-                className={`btn tiny${readmeViewMode === 'preview' ? ' primary' : ''}`}
-                onClick={() => setReadmeViewMode('preview')}>预览</button>
-              <button type="button"
-                className={`btn tiny${readmeViewMode === 'edit' ? ' primary' : ''}`}
-                onClick={() => setReadmeViewMode('edit')} disabled={!canWrite || readOnly}>编辑</button>
-              {(!canWrite || readOnly) && <span className="muted small">（只读）</span>}
-            </div>
+            {(readmeTab === 'table' || readmeTab === 'global') && (
+              <div className="readme-mode-row">
+                <button type="button"
+                  className={`btn tiny${readmeViewMode === 'preview' ? ' primary' : ''}`}
+                  onClick={() => setReadmeViewMode('preview')}>预览</button>
+                <button type="button"
+                  className={`btn tiny${readmeViewMode === 'edit' ? ' primary' : ''}`}
+                  onClick={() => setReadmeViewMode('edit')} disabled={!canWrite || readOnly}>编辑</button>
+                {(!canWrite || readOnly) && <span className="muted small">（只读）</span>}
+              </div>
+            )}
             {readmeTab === 'table' && (
               <>
                 {!selected && <p className="muted small">请在左侧选择一张表。</p>}
-                {selected && readmeViewMode === 'preview' && (
-                  <div className="markdown-preview">
-                    {tableReadmeDraft.trim()
-                      ? <ReactMarkdown>{tableReadmeDraft}</ReactMarkdown>
-                      : <p className="muted small">（此表暂无 README）</p>}
-                  </div>
-                )}
+                {selected && readmeViewMode === 'preview' && (() => {
+                  const glossaryMap = new Map(glossary.map((g) => [g.term_en, g]))
+                  const hasGlossaryRefs = tableReadmeDraft.includes('$')
+                  return (
+                    <div className="markdown-preview">
+                      {tableReadmeDraft.trim() ? (
+                        hasGlossaryRefs ? (
+                          <div>
+                            {tableReadmeDraft.split('\n').map((line, i) => (
+                              <p key={i}>{renderGlossaryText(line, glossaryMap)}</p>
+                            ))}
+                          </div>
+                        ) : (
+                          <ReactMarkdown>{tableReadmeDraft}</ReactMarkdown>
+                        )
+                      ) : <p className="muted small">（此表暂无 README）</p>}
+                    </div>
+                  )
+                })()}
                 {selected && readmeViewMode === 'edit' && (
                   <>
                     <textarea
@@ -1359,13 +1719,25 @@ export default function Workbench() {
             )}
             {readmeTab === 'global' && (
               <>
-                {readmeViewMode === 'preview' && (
-                  <div className="markdown-preview">
-                    {globalReadmeDraft.trim()
-                      ? <ReactMarkdown>{globalReadmeDraft}</ReactMarkdown>
-                      : <p className="muted small">（暂无全局 README）</p>}
-                  </div>
-                )}
+                {readmeViewMode === 'preview' && (() => {
+                  const glossaryMap = new Map(glossary.map((g) => [g.term_en, g]))
+                  const hasRefs = globalReadmeDraft.includes('$')
+                  return (
+                    <div className="markdown-preview">
+                      {globalReadmeDraft.trim() ? (
+                        hasRefs ? (
+                          <div>
+                            {globalReadmeDraft.split('\n').map((line, i) => (
+                              <p key={i}>{renderGlossaryText(line, glossaryMap)}</p>
+                            ))}
+                          </div>
+                        ) : (
+                          <ReactMarkdown>{globalReadmeDraft}</ReactMarkdown>
+                        )
+                      ) : <p className="muted small">（暂无全局 README）</p>}
+                    </div>
+                  )
+                })()}
                 {readmeViewMode === 'edit' && (
                   <>
                     <textarea
@@ -1385,6 +1757,53 @@ export default function Workbench() {
                   </>
                 )}
               </>
+            )}
+            {readmeTab === 'calculators' && (
+              <CalculatorsPanel
+                calculators={calculators}
+                headers={headers}
+                onRefresh={() => void loadCalculators()}
+              />
+            )}
+            {readmeTab === 'design' && (
+              <div style={{ overflow: 'auto', height: '100%', padding: '0.25rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                  <h4 style={{ margin: 0 }}>📄 AI 设计文档</h4>
+                  <button type="button" className="btn tiny" onClick={() => void loadDesignHistory()}>刷新</button>
+                </div>
+                {designHistory.length === 0 ? (
+                  <p className="muted small">暂无设计文档。流水线步骤完成后会在此展示。</p>
+                ) : (
+                  <>
+                    <div className="design-step-tabs">
+                      {designHistory.map((e) => (
+                        <button
+                          key={e.step_id}
+                          type="button"
+                          className={`btn tiny${designStep === e.step_id ? ' primary' : ''}`}
+                          onClick={() => setDesignStep(e.step_id)}
+                          style={{ marginRight: 3, marginBottom: 3 }}
+                        >
+                          {pipelineStepLabel(e.step_id)}
+                        </button>
+                      ))}
+                    </div>
+                    {designStep && (() => {
+                      const entry = designHistory.find((e) => e.step_id === designStep)
+                      if (!entry) return null
+                      return (
+                        <div className="markdown-preview" style={{ marginTop: '0.5rem' }}>
+                          {entry.design_text ? (
+                            <ReactMarkdown>{entry.design_text}</ReactMarkdown>
+                          ) : (
+                            <p className="muted small">（此步骤暂无 design_text）</p>
+                          )}
+                        </div>
+                      )
+                    })()}
+                  </>
+                )}
+              </div>
             )}
 
             <details className="wb-adv-section">

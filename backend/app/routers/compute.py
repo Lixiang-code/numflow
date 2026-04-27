@@ -139,6 +139,21 @@ def recalculate_column_formula(
         raise _http_from_formula_error(e) from e
 
 
+class CallCalculatorBody(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    args: Dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/call-calculator")
+def call_calculator_api(body: CallCalculatorBody, p: ProjectDB = Depends(get_project_read)):
+    """调用一个已注册的 calculator，返回计算结果。"""
+    from app.services.calculator_ops import call_calculator
+    result = call_calculator(p.conn, name=body.name, kwargs=body.args)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "计算失败"))
+    return result
+
+
 @router.post("/column-formula/recalculate-table")
 def recalculate_table_row_formulas(
     table_name: str = Query(...),

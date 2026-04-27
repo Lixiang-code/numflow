@@ -1,24 +1,20 @@
-/** 与 backend `PIPELINE_STEPS`（文档 03）顺序与 id 一致 */
+/** 与 backend `PIPELINE_STEPS_BASE`（第3轮精简 6 步）顺序与 id 一致 */
 export const PIPELINE_STEP_LABELS: Record<string, string> = {
-  environment_global_readme: '整体环境确认与全局 README',
-  base_attribute_framework: '基本属性基础框架表',
-  gameplay_attribute_scheme: '玩法系统属性方案',
-  gameplay_allocation_tables: '玩法系统属性分配表',
-  second_order_framework: '基本属性二阶框架表',
-  gameplay_attribute_tables: '玩法系统属性表',
-  cultivation_resource_design: '养成资源设计',
-  cultivation_resource_framework: '养成资源基础框架表',
-  cultivation_allocation_tables: '养成资源分配表',
-  cultivation_quant_tables: '养成资源定量表',
-  gameplay_landing_tables: '玩法系统落地表',
-  // step 11 per-system 子步
-  'gameplay_landing_tables.equip': '11.装备 落地表',
-  'gameplay_landing_tables.gem': '11.宝石 落地表',
-  'gameplay_landing_tables.mount': '11.坐骑 落地表',
-  'gameplay_landing_tables.wing': '11.翅膀 落地表',
-  'gameplay_landing_tables.fashion': '11.时装 落地表',
-  'gameplay_landing_tables.dungeon': '11.副本 落地表',
-  'gameplay_landing_tables.skill': '11.技能 落地表',
+  environment_global_readme: '环境与全局说明',
+  base_attribute_framework: '基础属性框架',
+  hp_formula_derivation: 'HP 反推公式',
+  gameplay_allocation: '玩法属性分配（matrix）',
+  cultivation_resource_framework: '养成资源框架',
+  cultivation_allocation: '养成属性分配（matrix）',
+  gameplay_landing_tables: '落地表（子系统）',
+  // per-system 子步
+  'gameplay_landing_tables.equip': '落地：装备',
+  'gameplay_landing_tables.gem': '落地：宝石',
+  'gameplay_landing_tables.mount': '落地：坐骑',
+  'gameplay_landing_tables.wing': '落地：翅膀',
+  'gameplay_landing_tables.fashion': '落地：时装',
+  'gameplay_landing_tables.dungeon': '落地：副本',
+  'gameplay_landing_tables.skill': '落地：技能',
 }
 
 export function pipelineStepLabel(stepId: string | null | undefined): string {
@@ -27,7 +23,7 @@ export function pipelineStepLabel(stepId: string | null | undefined): string {
   // 未注册的子步：根据 ID 推导
   if (stepId.startsWith('gameplay_landing_tables.')) {
     const sub = stepId.slice('gameplay_landing_tables.'.length)
-    return `11.${sub} 落地表`
+    return `落地：${sub}`
   }
   return stepId
 }

@@ -86,7 +86,7 @@ def describe_table(table_name: str, p: ProjectDB = Depends(get_project_read)):
     conn = p.conn
     cur = conn.execute(
         """
-        SELECT readme, schema_json, validation_status, validation_rules_json
+        SELECT readme, schema_json, validation_status, validation_rules_json, matrix_meta_json
         FROM _table_registry WHERE table_name = ?
         """,
         (t,),
@@ -136,6 +136,15 @@ def describe_table(table_name: str, p: ProjectDB = Depends(get_project_read)):
     except Exception:  # noqa: BLE001
         related_constants = []
 
+    # matrix_meta_json: 解析并附带 row/col 明细（供前端 MatrixEditor 使用）
+    matrix_meta_raw = md.get("matrix_meta_json") or ""
+    matrix_meta_parsed = None
+    if matrix_meta_raw:
+        try:
+            matrix_meta_parsed = json.loads(matrix_meta_raw)
+        except Exception:  # noqa: BLE001
+            matrix_meta_parsed = {}
+
     return {
         "table_name": t,
         "readme": meta["readme"],
@@ -145,6 +154,7 @@ def describe_table(table_name: str, p: ProjectDB = Depends(get_project_read)):
         "column_formulas": column_formulas,
         "display_name": (json.loads(meta["schema_json"] or "{}") or {}).get("display_name", ""),
         "related_constants": related_constants,
+        "matrix_meta_json": matrix_meta_parsed,
     }
 
 

@@ -246,6 +246,63 @@ def get_snapshot_compare(snapshot_id: int, p: ProjectDB = Depends(get_project_re
         raise HTTPException(status_code=404, detail=str(e)) from e
 
 
+class DirectoryBody(BaseModel):
+    directory: str = Field(default="", max_length=200)
+
+
+@router.put("/tables/{table_name}/directory")
+def update_table_directory(
+    table_name: str,
+    body: DirectoryBody,
+    p: ProjectDB = Depends(get_project_write),
+):
+    """更新表的 directory 字段（目录拖拽）。"""
+    conn = p.conn
+    cur = conn.execute("SELECT 1 FROM _table_registry WHERE table_name = ?", (table_name,))
+    if not cur.fetchone():
+        raise HTTPException(status_code=404, detail="未知表")
+    conn.execute(
+        "UPDATE _table_registry SET directory = ? WHERE table_name = ?",
+        (body.directory.strip(), table_name),
+    )
+    conn.commit()
+    return {"ok": True, "table_name": table_name, "directory": body.directory.strip()}
+
+
+@router.get("/calculators")
+def get_calculators(p: ProjectDB = Depends(get_project_read)):
+    """返回项目内所有 calculator 列表（name / kind / table / axes / brief）。"""
+    from app.services.calculator_ops import list_calculators
+    return {"calculators": list_calculators(p.conn)}
+
+
+@router.get("/exposed-params")
+def get_exposed_params(
+    target_step: str = Query(..., description="目标步骤 ID"),
+    p: ProjectDB = Depends(get_project_read),
+):
+    """返回 _step_exposed_params 中针对 target_step 的暴露参数。"""
+    from app.services.agent_tools import _list_exposed_params
+    result = _list_exposed_params(p.conn, target_step)
+    return result
+
+
+@router.get("/glossary")
+def get_glossary(p: ProjectDB = Depends(get_project_read)):
+    """返回项目词汇表（term_en → term_zh / term_en），用于前端 $name$ 替换。"""
+    conn = p.conn
+    items: List[Dict[str, Any]] = []
+    try:
+        cur = conn.execute(
+            "SELECT term_en, term_zh FROM _glossary ORDER BY term_en"
+        )
+        for r in cur.fetchall():
+            items.append({"term_en": r[0], "term_zh": r[1] or r[0]})
+    except Exception:  # noqa: BLE001
+        items = []
+    return {"glossary": items}
+
+
 class ValidationRulesBody(BaseModel):
     """MVP：{ \"rules\": [ { \"id\": \"r1\", \"type\": \"not_null\", \"column\": \"atk\" } ] }"""
 
