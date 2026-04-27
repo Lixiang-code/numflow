@@ -262,6 +262,9 @@ _ROUTE_SYSTEM = (
     "若用户描述明显偏离默认（提出新机制、跨步骤、特殊定制），返回 hit=false。"
 )
 
+# Public alias for agent_runner to embed in SSE events
+ROUTE_SYSTEM = _ROUTE_SYSTEM
+
 
 def route_prompt(
     step_id: str,

@@ -31,7 +31,16 @@ type ToolEntry = {
   expanded: boolean
 }
 
-type RouteInfo = { step: string | null; template_key: string | null; log: string | null }
+type RouteInfo = {
+  step: string | null
+  template_key: string | null
+  log: string | null
+  hit: boolean | null
+  prompt: string | null
+  gatherHint: string | null
+  routeSystem: string | null
+  rationale: string | null
+}
 
 // ─── 完整对话类型 ──────────────────────────────────────────────────────────
 type LlmMessage = {
@@ -706,9 +715,14 @@ export default function AgentTest() {
             setLivePhase('')
           } else if (type === 'prompt_route') {
             setRouteInfo({
-              step: String(raw.step ?? ''),
+              step: String(raw.step_id ?? raw.step ?? ''),
               template_key: String(raw.template_key ?? ''),
               log: msg,
+              hit: raw.hit != null ? Boolean(raw.hit) : null,
+              prompt: raw.prompt ? String(raw.prompt) : null,
+              gatherHint: raw.gather_hint ? String(raw.gather_hint) : null,
+              routeSystem: raw.route_system ? String(raw.route_system) : null,
+              rationale: raw.rationale ? String(raw.rationale) : null,
             })
           }
         }
@@ -999,9 +1013,29 @@ export default function AgentTest() {
           {routeInfo && activeView === 'phases' && (
             <div className="am-route-block">
               <h4>🔀 提示词路由</h4>
-              {routeInfo.step && <p>当前步骤：<code>{routeInfo.step}</code></p>}
-              {routeInfo.template_key && <p>路由结果：<code>{routeInfo.template_key}</code></p>}
-              {routeInfo.log && <p>{routeInfo.log}</p>}
+              {routeInfo.step && <p>步骤：<code>{routeInfo.step}</code></p>}
+              {routeInfo.hit != null && (
+                <p>命中默认模板：<code style={{ color: routeInfo.hit ? '#388e3c' : '#e65100' }}>{routeInfo.hit ? '✅ 是' : '❌ 否（LLM 生成）'}</code></p>
+              )}
+              {routeInfo.rationale && <p style={{ fontSize: '0.85rem', color: '#666' }}>理由：{routeInfo.rationale}</p>}
+              {routeInfo.routeSystem && (
+                <details style={{ marginTop: '0.4rem' }}>
+                  <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: '0.85rem' }}>🤖 路由 Agent System Prompt</summary>
+                  <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '0.8rem', background: '#f8f8f8', padding: '0.6rem', borderRadius: '4px', marginTop: '0.3rem' }}>{routeInfo.routeSystem}</pre>
+                </details>
+              )}
+              {routeInfo.prompt && routeInfo.prompt !== 'recovery' && (
+                <details style={{ marginTop: '0.4rem' }}>
+                  <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: '0.85rem' }}>📋 注入 execute/design/review 的路由提示词</summary>
+                  <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '0.8rem', background: '#f8f8f8', padding: '0.6rem', borderRadius: '4px', marginTop: '0.3rem' }}>{routeInfo.prompt}</pre>
+                </details>
+              )}
+              {routeInfo.gatherHint && (
+                <details style={{ marginTop: '0.4rem' }}>
+                  <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: '0.85rem' }}>🔍 注入 gather 的轻量提示（已过滤写操作）</summary>
+                  <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '0.8rem', background: '#f0f8ff', padding: '0.6rem', borderRadius: '4px', marginTop: '0.3rem' }}>{routeInfo.gatherHint}</pre>
+                </details>
+              )}
             </div>
           )}
 

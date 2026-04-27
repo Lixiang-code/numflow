@@ -628,7 +628,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "value 必须为 number 或可转 number 的字符串。"
                 "★ tags 必填且至少 1 个：用于在前端常量页按『主系统/分类』聚合展示，"
                 "可使用 const_tag_register 预先创建标签；通常至少包含所属主系统名。"
-                "★ brief 描述常数语义/单位/取值范围，但禁止包含具体数值（如『=10』、『为 0.5』）。"
+                "★ brief 描述常数语义/单位/取值范围，可以包含具体数值（如『起始值=100』）方便阅读。"
             ),
             "parameters": {
                 "type": "object",
@@ -1920,23 +1920,11 @@ def _coerce_value_json(v: Any) -> str:
     return json.dumps(v)
 
 
-_BRIEF_NUMBER_RE = __import__("re").compile(r"\d")
+_BRIEF_NUMBER_RE = None  # 已移除：brief 允许包含阿拉伯数字
 
 
 def _validate_brief_no_value(brief: str) -> Optional[str]:
-    """常数 brief 不得包含具体数值（防止 AI 把"=10"写进去）。
-
-    允许的情形：纯文本说明、英文标识、单位词。
-    禁止：任何阿拉伯数字、`= 10` `为 0.5` 等数值表达。
-    """
-    if not brief:
-        return None
-    if _BRIEF_NUMBER_RE.search(brief):
-        return (
-            "brief 不得包含具体数值（任何阿拉伯数字均禁止）。"
-            "应仅描述语义、用途、单位、取值范围的语义类别（如\"百分比\"、\"秒数\"），"
-            "数值由 value 字段承载。"
-        )
+    """已废弃（brief 允许包含数值，无需校验）。"""
     return None
 
 

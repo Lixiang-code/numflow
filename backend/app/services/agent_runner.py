@@ -10,7 +10,7 @@ from app.config import QWEN_MODEL
 from app.db.project_schema import get_pipeline_state
 from app.deps import ProjectDB
 from app.services.agent_tools import TOOLS_OPENAI, dispatch_tool, _get_project_config
-from app.services.prompt_router import route_prompt
+from app.services.prompt_router import route_prompt, ROUTE_SYSTEM as _ROUTE_SYSTEM_PROMPT
 from app.services.qwen_client import get_client_for_model
 
 
@@ -331,9 +331,8 @@ _EXECUTE_SYSTEM_TAIL = (
     "const_register 必填 tags（数组，至少 1 个）：常数会按 tags 分组在前端常量页中展示。\n"
     "  - 标签通常是『主系统名』(如 combat / economy / mount / wing) 或语义类别 (如 level_curve / drop_rate)。\n"
     "  - 若标签未注册可直接传，系统会自动登记；建议先用 const_tag_register 显式定义层级。\n"
-    "brief 字段**严禁出现任何阿拉伯数字**：只描述含义/单位/取值范围语义，不写具体值；\n"
-    "  ✗ 'HP 基础值=100' / '默认 0.85'\n"
-    "  ✓ '玩家 HP 初始值（生命点数）' / '暴击伤害放大倍率（小数表示）'\n\n"
+    "brief 字段描述常数的含义/单位/用途；数值本身已由 value 字段承载，brief 无需重复写出来。\n"
+    "  ✓ 'HP 基础值，生命点数' / '暴击伤害放大倍率（小数表示）' / '基础攻击力起始值=100'\n\n"
 
     "═══ ★ 收尾操作限制（每个 session 仅允许一次）★ ═══\n"
     "create_snapshot：整个 execute 阶段只允许调用 **1次**（最终收尾时），严禁在循环中多次调用。\n"
@@ -625,6 +624,8 @@ def run_agent_sse(
             "type": "prompt_route",
             "hit": bool(route.get("hit")),
             "prompt": route.get("prompt", ""),
+            "gather_hint": route.get("gather_hint", ""),
+            "route_system": _ROUTE_SYSTEM_PROMPT,
             "rationale": route.get("rationale", ""),
             "step_id": step_id,
         },
@@ -1132,6 +1133,8 @@ def _run_recovery_sse(
         "type": "prompt_route",
         "hit": True,
         "prompt": "recovery",
+        "gather_hint": "",
+        "route_system": "",
         "rationale": f"失败步骤={step_id}，错误={error_msg[:200]}",
         "step_id": step_id,
     })
