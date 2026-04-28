@@ -1131,6 +1131,50 @@ def _list_table_columns(conn: sqlite3.Connection, table_name: str) -> List[str]:
         return []
 
 
+_PROJECT_DOC_PREVIEW_CHARS = 1600
+_PROJECT_DOC_HEADING_LIMIT = 12
+
+
+def _doc_excerpt(text: str) -> Dict[str, Any]:
+    normalized = str(text or "")
+    headings = [
+        line.strip()
+        for line in normalized.splitlines()
+        if line.lstrip().startswith("#")
+    ][:_PROJECT_DOC_HEADING_LIMIT]
+    excerpt = normalized[:_PROJECT_DOC_PREVIEW_CHARS]
+    out: Dict[str, Any] = {
+        "excerpt": excerpt,
+        "text_length": len(normalized),
+        "headings": headings,
+        "truncated": len(normalized) > _PROJECT_DOC_PREVIEW_CHARS,
+    }
+    if not excerpt and normalized:
+        out["excerpt"] = normalized
+    return out
+
+
+def _compact_project_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
+    compact: Dict[str, Any] = {}
+    step_readme_keys: List[str] = []
+
+    for key, value in settings.items():
+        if key.startswith("step_readme."):
+            step_readme_keys.append(key.removeprefix("step_readme."))
+            continue
+        if key == "global_readme" and isinstance(value, dict) and isinstance(value.get("text"), str):
+            compact[key] = _doc_excerpt(value.get("text") or "")
+            continue
+        compact[key] = value
+
+    if step_readme_keys:
+        compact["step_readmes"] = {
+            "count": len(step_readme_keys),
+            "steps": sorted(step_readme_keys),
+        }
+    return compact
+
+
 def _get_project_config(conn: sqlite3.Connection) -> Dict[str, Any]:
     cur = conn.execute("SELECT key, value_json FROM project_settings")
     settings: Dict[str, Any] = {}
@@ -1139,7 +1183,7 @@ def _get_project_config(conn: sqlite3.Connection) -> Dict[str, Any]:
             settings[k] = json.loads(v)
         except json.JSONDecodeError:
             settings[k] = v
-    return {"settings": settings}
+    return {"settings": _compact_project_settings(settings)}
 
 
 def _get_table_list(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -1354,7 +1398,17 @@ def _dependency_edges(
             )
     else:
         cur = conn.execute("SELECT * FROM _dependency_graph")
-    return {"edges": [dict(r) for r in cur.fetchall()]}
+    edges = [
+        {
+            "from_table": r["from_table"],
+            "from_column": r["from_column"],
+            "to_table": r["to_table"],
+            "to_column": r["to_column"],
+            "edge_type": r["edge_type"],
+        }
+        for r in cur.fetchall()
+    ]
+    return {"edge_count": len(edges), "edges": edges}
 
 
 def _get_table_readme(conn: sqlite3.Connection, table_name: str) -> Dict[str, Any]:
@@ -1401,6 +1455,46 @@ def _update_global_readme(conn: sqlite3.Connection, content: str) -> Dict[str, A
 
 
 _PROTECTED_SETTINGS = frozenset({"fixed_layer_config"})
+
+
+def _compact_compare_snapshot_result(raw: Dict[str, Any]) -> Dict[str, Any]:
+    changed_tables: List[Dict[str, Any]] = []
+    for item in raw.get("changed_tables") or []:
+        if not isinstance(item, dict):
+            continue
+        compact: Dict[str, Any] = {
+            "table_name": item.get("table_name"),
+            "row_count_previous": item.get("row_count_previous"),
+            "row_count_current": item.get("row_count_current"),
+        }
+        for key in ("changed_columns", "added_columns", "removed_columns"):
+            val = item.get(key)
+            if val:
+                compact[key] = val
+        note = item.get("column_diff_note")
+        if note:
+            compact["column_diff_note"] = note
+        changed_tables.append(compact)
+    return {
+        "snapshot_id": raw.get("snapshot_id"),
+        "label": raw.get("label"),
+        "changed_count": len(changed_tables),
+        "changed_tables": changed_tables,
+        "legacy_compare": bool(raw.get("legacy_compare")),
+    }
+
+
+def _compact_call_calculator_result(raw: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "ok": bool(raw.get("ok")),
+        "value": raw.get("value"),
+        "found": bool(raw.get("found")),
+    }
+    if raw.get("fallback") is not None:
+        out["fallback"] = bool(raw.get("fallback"))
+    if raw.get("error"):
+        out["error"] = raw.get("error")
+    return out
 
 
 def _set_project_setting(conn: sqlite3.Connection, key: str, value: Any) -> Dict[str, Any]:
@@ -1803,7 +1897,7 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
         out = {"snapshots": list_snapshots(conn)}
     elif name == "compare_snapshot":
         try:
-            out = compare_snapshot(conn, int(args.get("snapshot_id", 0)))
+            out = _compact_compare_snapshot_result(compare_snapshot(conn, int(args.get("snapshot_id", 0))))
         except (ValueError, TypeError) as e:
             out = {"error": str(e)}
     elif name == "run_balance_check":
@@ -1941,7 +2035,9 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
         out = {"items": _lc(conn)}
     elif name == "call_calculator":
         from app.services.calculator_ops import call_calculator as _cc
-        out = _cc(conn, name=str(args.get("name", "")), kwargs=args.get("kwargs") or {})
+        out = _compact_call_calculator_result(
+            _cc(conn, name=str(args.get("name", "")), kwargs=args.get("kwargs") or {})
+        )
     elif name == "expose_param_to_subsystems":
         if not p.can_write:
             out = {"error": "无写权限"}
