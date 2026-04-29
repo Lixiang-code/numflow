@@ -326,7 +326,7 @@ def pipeline_revision_request_update_status(
     p.conn.commit()
     if cur.rowcount == 0:
         raise HTTPException(status_code=404, detail=f"找不到修订请求 id={request_id}")
-    # 若标记为 done，也尝试将对应的表状态从 需修订 → 已完成（若当前还是需修订）
+    # 若标记为 done，也尝试将对应的表状态从 待修订 → 已完成（若当前还是待修订）
     if body.status == "done":
         row = p.conn.execute(
             "SELECT table_id FROM _table_revision_requests WHERE id=?", (request_id,)
@@ -335,7 +335,7 @@ def pipeline_revision_request_update_status(
             table_id = row[0]
             p.conn.execute(
                 "UPDATE _gameplay_table_registry SET status='已完成', updated_at=? "
-                "WHERE table_id=? AND status='需修订'",
+                "WHERE table_id=? AND status='待修订'",
                 (now, table_id),
             )
             p.conn.commit()

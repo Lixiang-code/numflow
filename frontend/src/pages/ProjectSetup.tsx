@@ -67,7 +67,7 @@ type GameplayTable = {
   table_id: string
   display_name: string
   readme: string
-  status: '未开始' | '进行中' | '已完成' | '需修订'
+  status: '未开始' | '进行中' | '已完成' | '待修订'
   order_num: number
   dependencies: string[]
 }
@@ -1052,12 +1052,12 @@ export default function ProjectSetup() {
                 {gameplayTables.map(t => {
                   const cls = t.status === '已完成' ? 'done'
                     : t.status === '进行中' ? 'active'
-                    : t.status === '需修订' ? 'revision'
+                    : t.status === '待修订' ? 'revision'
                     : 'pending'
                   return (
                     <li key={t.table_id} className={`ps-gameplay-table-item ps-gt-${cls}`}>
                       <span className="ps-gt-icon">
-                        {t.status === '已完成' ? '✓' : t.status === '进行中' ? '⟳' : t.status === '需修订' ? '↺' : String(t.order_num)}
+                        {t.status === '已完成' ? '✓' : t.status === '进行中' ? '⟳' : t.status === '待修订' ? '↺' : String(t.order_num)}
                       </span>
                       <span className="ps-gt-name" title={t.table_id}>{t.display_name}</span>
                       <span className={`ps-gt-badge ${cls}`}>

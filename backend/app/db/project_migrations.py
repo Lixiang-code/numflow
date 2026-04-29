@@ -288,4 +288,12 @@ def ensure_project_migrations(conn: sqlite3.Connection) -> None:
     except Exception:  # noqa: BLE001
         pass
 
+    # 状态迁移：需修订 → 待修订（语义更准确）
+    try:
+        conn.execute(
+            "UPDATE _gameplay_table_registry SET status='待修订' WHERE status='需修订'"
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
     conn.commit()
