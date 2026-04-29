@@ -191,6 +191,8 @@ export default function SkillLibrary() {
   const [promptSaving, setPromptSaving] = useState(false)
   const [promptResetting, setPromptResetting] = useState(false)
   const [showAllPromptModules, setShowAllPromptModules] = useState(false)
+  const [skillBasicCollapsed,  setSkillBasicCollapsed]  = useState(false)
+  const [promptBasicCollapsed, setPromptBasicCollapsed] = useState(false)
 
   const [err, setErr] = useState<string | null>(null)
   const [toasts, setToasts] = useState<ToastItem[]>([])
@@ -611,6 +613,52 @@ export default function SkillLibrary() {
     [promptDraft, tab],
   )
 
+  // ── Per-module and section dirty detection ────────────────────────────────
+  const dirtySkillModuleIndices = useMemo((): Set<number> => {
+    if (!editingSkillId || !skillDraft) return new Set()
+    const entry = skillCache.current.get(skillCacheKey(editingSkillId))
+    if (!entry) return new Set()
+    const result = new Set<number>()
+    const bMods = entry.baseline.modules
+    skillDraft.modules.forEach((mod, i) => {
+      if (i >= bMods.length || !deepEqual(mod, bMods[i])) result.add(i)
+    })
+    return result
+  }, [editingSkillId, skillDraft])
+
+  const dirtyPromptModuleIndices = useMemo((): Set<number> => {
+    if (!editingPromptKey || !promptDraft || tab === 'skill') return new Set()
+    const entry = promptCache.current.get(promptCacheKey(tab, editingPromptKey))
+    if (!entry) return new Set()
+    const result = new Set<number>()
+    const bMods = entry.baseline.modules
+    promptDraft.modules.forEach((mod, i) => {
+      if (i >= bMods.length || !deepEqual(mod, bMods[i])) result.add(i)
+    })
+    return result
+  }, [editingPromptKey, promptDraft, tab])
+
+  const skillBasicDirty = useMemo(() => {
+    if (!editingSkillId || !skillDraft) return false
+    const entry = skillCache.current.get(skillCacheKey(editingSkillId))
+    if (!entry) return false
+    const b = entry.baseline
+    return skillDraft.title !== b.title || skillDraft.slug !== b.slug ||
+      skillDraft.step_id !== b.step_id || skillDraft.source !== b.source ||
+      skillDraft.summary !== b.summary || skillDraft.description !== b.description ||
+      skillDraft.default_exposed !== b.default_exposed || skillDraft.enabled !== b.enabled
+  }, [editingSkillId, skillDraft])
+
+  const promptBasicDirty = useMemo(() => {
+    if (!editingPromptKey || !promptDraft || tab === 'skill') return false
+    const entry = promptCache.current.get(promptCacheKey(tab, editingPromptKey))
+    if (!entry) return false
+    const b = entry.baseline
+    return promptDraft.title !== b.title || promptDraft.summary !== b.summary ||
+      promptDraft.description !== b.description || promptDraft.reference_note !== b.reference_note ||
+      promptDraft.enabled !== b.enabled
+  }, [editingPromptKey, promptDraft, tab])
+
   const loading = tab === 'skill' ? skillLoading : promptLoading
   const isMac = typeof navigator !== 'undefined' && navigator.platform.toLowerCase().includes('mac')
   const shortcut = isMac ? '⌘S' : 'Ctrl+S'
@@ -622,10 +670,12 @@ export default function SkillLibrary() {
     t === 'skill'
       ? dirtySkillIds.size > 0
       : [...dirtyPromptKeys].some((k) => k.startsWith(t + '::'))
-  const currentDirty   =
+  // currentDirty retained for potential future use (sidebar highlights etc.)
+  const _currentDirty =
     tab === 'skill'
       ? (editingSkillId != null && isSkillDirty(editingSkillId))
       : (editingPromptKey != null && isPromptDirty(editingPromptKey))
+  void _currentDirty
 
   const canSave = tab === 'skill' ? !!skillDraft && !skillSaving : !!promptDraft && !promptSaving
   const saving = tab === 'skill' ? skillSaving : promptSaving
@@ -763,74 +813,92 @@ export default function SkillLibrary() {
           </div>
         </aside>
 
-        <main className={`sl-main${currentDirty ? ' sl-item-dirty' : ''}`}>
+        <main className="sl-main">
           {tab === 'skill' ? (
             <>
-              <div className="sl-preview-pane">
-                <div className="sl-preview-head">
-                  <div className="sl-preview-title">
-                    📄 实际 SKILL 文件
-                    <span className="sl-preview-pinbadge">置顶</span>
-                  </div>
-                  <div className="sl-preview-meta">{skillDraft?.generated_file_path || '保存后将自动生成 Markdown + YAML'}</div>
-                </div>
-                <pre className={`sl-preview-body${skillDraft?.generated_content ? '' : ' empty'}`}>
-                  {skillDraft?.generated_content || '尚未生成。点击右上角"生成实际文件"按钮即可生成。'}
-                </pre>
-              </div>
               <div className="sl-editor-pane">
                 <div className="sl-main-inner">
                   {skillDraft ? (
                     <>
-                      <section className="sl-card">
+                      {/* ── 基本信息（可收起） ───────────────────────── */}
+                      <section className={`sl-card${skillBasicDirty ? ' sl-section-dirty' : ''}`}>
                         <div className="sl-card-head">
                           <div>
                             <h3>基本信息<span className="sl-vis-tag dev">仅开发者</span></h3>
-                            <div className="sl-sub">SKILL 元数据，将作为 Markdown 头部 YAML 写入；不会单独发送给 AI。</div>
+                            {!skillBasicCollapsed && (
+                              <div className="sl-sub">SKILL 元数据，将作为 Markdown 头部 YAML 写入；不会单独发送给 AI。</div>
+                            )}
+                          </div>
+                          <div className="sl-card-actions">
+                            <button type="button" className="btn tiny" onClick={() => setSkillBasicCollapsed((v) => !v)}>
+                              {skillBasicCollapsed ? '展开 ▾' : '收起 ▴'}
+                            </button>
                           </div>
                         </div>
-                        <div className="sl-grid cols-2">
-                          <label className="sl-field">
-                            <span className="sl-label">标题</span>
-                            <input className="sl-input-dev" value={skillDraft.title} onChange={(e) => updateSkillDraft('title', e.target.value)} placeholder="例如：表格补全规则" />
-                          </label>
-                          <label className="sl-field">
-                            <span className="sl-label">Slug</span>
-                            <input className="sl-input-dev" value={skillDraft.slug ?? ''} onChange={(e) => updateSkillDraft('slug', e.target.value)} placeholder="kebab-case-id" />
-                          </label>
-                          <label className="sl-field">
-                            <span className="sl-label">绑定步骤 ID</span>
-                            <input className="sl-input-dev" value={skillDraft.step_id} onChange={(e) => updateSkillDraft('step_id', e.target.value)} placeholder="step.execute / step.review …" />
-                          </label>
-                          <label className="sl-field">
-                            <span className="sl-label">来源</span>
-                            <input className="sl-input-dev" value={skillDraft.source} onChange={(e) => updateSkillDraft('source', e.target.value)} placeholder="user / system" />
-                          </label>
-                        </div>
+                        {skillBasicCollapsed ? (
+                          <div className="sl-collapsed-summary">
+                            <span className="sl-cs-title">{skillDraft.title || '(未命名)'}</span>
+                            <span className="sl-cs-sep">·</span>
+                            <span className="sl-cs-meta">{skillDraft.step_id || '未绑定步骤'}</span>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="sl-grid cols-2">
+                              <label className="sl-field">
+                                <span className="sl-label">标题</span>
+                                <input className="sl-input-dev" value={skillDraft.title} onChange={(e) => updateSkillDraft('title', e.target.value)} placeholder="例如：表格补全规则" />
+                              </label>
+                              <label className="sl-field">
+                                <span className="sl-label">Slug</span>
+                                <input className="sl-input-dev" value={skillDraft.slug ?? ''} onChange={(e) => updateSkillDraft('slug', e.target.value)} placeholder="kebab-case-id" />
+                              </label>
+                              <label className="sl-field">
+                                <span className="sl-label">绑定步骤 ID</span>
+                                <input className="sl-input-dev" value={skillDraft.step_id} onChange={(e) => updateSkillDraft('step_id', e.target.value)} placeholder="step.execute / step.review …" />
+                              </label>
+                              <label className="sl-field">
+                                <span className="sl-label">来源</span>
+                                <input className="sl-input-dev" value={skillDraft.source} onChange={(e) => updateSkillDraft('source', e.target.value)} placeholder="user / system" />
+                              </label>
+                            </div>
 
-                        <div className="sl-field sl-field-row">
-                          <span className="sl-label">摘要</span>
-                          <AutoTextarea className="sl-input-dev" value={skillDraft.summary} onChange={(e) => updateSkillDraft('summary', e.target.value)} placeholder="一两句话说明这个 SKILL 解决的问题" />
-                        </div>
+                            <div className="sl-field sl-field-row">
+                              <span className="sl-label">摘要</span>
+                              <AutoTextarea className="sl-input-dev" value={skillDraft.summary} onChange={(e) => updateSkillDraft('summary', e.target.value)} placeholder="一两句话说明这个 SKILL 解决的问题" />
+                            </div>
 
-                        <div className="sl-field sl-field-row">
-                          <span className="sl-label">说明</span>
-                          <AutoTextarea className="sl-input-dev" value={skillDraft.description} onChange={(e) => updateSkillDraft('description', e.target.value)} placeholder="详细描述使用场景、输入输出约束等" />
-                        </div>
+                            <div className="sl-field sl-field-row">
+                              <span className="sl-label">说明</span>
+                              <AutoTextarea className="sl-input-dev" value={skillDraft.description} onChange={(e) => updateSkillDraft('description', e.target.value)} placeholder="详细描述使用场景、输入输出约束等" />
+                            </div>
 
-                        <div className="sl-checks">
-                          <label>
-                            <input type="checkbox" checked={skillDraft.default_exposed} onChange={(e) => updateSkillDraft('default_exposed', e.target.checked)} />
-                            默认暴露给 AI
-                          </label>
-                          <label>
-                            <input type="checkbox" checked={skillDraft.enabled} onChange={(e) => updateSkillDraft('enabled', e.target.checked)} />
-                            启用
-                          </label>
-                          <span className="muted">被调用次数：{skillDraft.usage_count}</span>
-                        </div>
+                            <div className="sl-checks">
+                              <label>
+                                <input type="checkbox" checked={skillDraft.default_exposed} onChange={(e) => updateSkillDraft('default_exposed', e.target.checked)} />
+                                默认暴露给 AI
+                              </label>
+                              <label>
+                                <input type="checkbox" checked={skillDraft.enabled} onChange={(e) => updateSkillDraft('enabled', e.target.checked)} />
+                                启用
+                              </label>
+                              <span className="muted">被调用次数：{skillDraft.usage_count}</span>
+                            </div>
+                          </>
+                        )}
                       </section>
 
+                      {/* ── SKILL 文件预览（基本信息后、模块前）────── */}
+                      <div className="sl-preview-inline">
+                        <div className="sl-preview-head">
+                          <div className="sl-preview-title">📄 实际 SKILL 文件</div>
+                          <div className="sl-preview-meta">{skillDraft.generated_file_path || '保存后将自动生成 Markdown + YAML'}</div>
+                        </div>
+                        <pre className={`sl-preview-body${skillDraft.generated_content ? '' : ' empty'}`}>
+                          {skillDraft.generated_content || '尚未生成。点击右上角"生成实际文件"按钮即可生成。'}
+                        </pre>
+                      </div>
+
+                      {/* ── 内容模块 ─────────────────────────────────── */}
                       <section className="sl-card">
                         <div className="sl-card-head">
                           <div>
@@ -854,8 +922,9 @@ export default function SkillLibrary() {
                         <div className="sl-modules">
                           {visibleSkillModules.map((module) => {
                             const realIndex = skillDraft.modules.indexOf(module)
+                            const modDirty = dirtySkillModuleIndices.has(realIndex)
                             return (
-                              <div key={`${module.id ?? 'new'}-${realIndex}`} className={`sl-module${module.required ? ' required' : ''}`}>
+                              <div key={`${module.id ?? 'new'}-${realIndex}`} className={`sl-module${module.required ? ' required' : ''}${modDirty ? ' sl-module-dirty' : ''}`}>
                                 <div className="sl-module-head">
                                   <input
                                     className="sl-mtitle sl-input-dev"
@@ -864,6 +933,7 @@ export default function SkillLibrary() {
                                     placeholder="模块标题（仅开发者）"
                                     title="模块标题仅供开发者识别，不会发送给 AI"
                                   />
+                                  {modDirty && <span className="sl-dirty-tag">编辑中</span>}
                                   <div className="sl-flags">
                                     <label>
                                       <input
@@ -930,46 +1000,63 @@ export default function SkillLibrary() {
                 <div className="sl-main-inner">
                   {promptDraft ? (
                     <>
-                      <section className="sl-card">
+                      <section className={`sl-card${promptBasicDirty ? ' sl-section-dirty' : ''}`}>
                         <div className="sl-card-head">
                           <div>
                             <h3>提示词信息<span className="sl-vis-tag dev">仅开发者</span></h3>
-                            <div className="sl-sub">{tab === 'system' ? '系统提示词' : '工具提示词'}的元数据与说明，仅用于团队协作记录。</div>
+                            {!promptBasicCollapsed && (
+                              <div className="sl-sub">{tab === 'system' ? '系统提示词' : '工具提示词'}的元数据与说明，仅用于团队协作记录。</div>
+                            )}
+                          </div>
+                          <div className="sl-card-actions">
+                            <button type="button" className="btn tiny" onClick={() => setPromptBasicCollapsed((v) => !v)}>
+                              {promptBasicCollapsed ? '展开 ▾' : '收起 ▴'}
+                            </button>
                           </div>
                         </div>
-                        <div className="sl-grid cols-2">
-                          <label className="sl-field">
-                            <span className="sl-label">标题</span>
-                            <input className="sl-input-dev" value={promptDraft.title} onChange={(e) => updatePromptDraft('title', e.target.value)} />
-                          </label>
-                          <label className="sl-field">
-                            <span className="sl-label">引用 Key</span>
-                            <input className="sl-input-dev" value={promptDraft.prompt_key} readOnly style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)' }} />
-                          </label>
-                        </div>
+                        {promptBasicCollapsed ? (
+                          <div className="sl-collapsed-summary">
+                            <span className="sl-cs-title">{promptDraft.title}</span>
+                            <span className="sl-cs-sep">·</span>
+                            <span className="sl-cs-meta">{promptDraft.prompt_key}</span>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="sl-grid cols-2">
+                              <label className="sl-field">
+                                <span className="sl-label">标题</span>
+                                <input className="sl-input-dev" value={promptDraft.title} onChange={(e) => updatePromptDraft('title', e.target.value)} />
+                              </label>
+                              <label className="sl-field">
+                                <span className="sl-label">引用 Key</span>
+                                <input className="sl-input-dev" value={promptDraft.prompt_key} readOnly style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)' }} />
+                              </label>
+                            </div>
 
-                        <div className="sl-field sl-field-row">
-                          <span className="sl-label">摘要</span>
-                          <AutoTextarea className="sl-input-dev" value={promptDraft.summary} onChange={(e) => updatePromptDraft('summary', e.target.value)} placeholder="简要说明此提示词的用途" />
-                        </div>
+                            <div className="sl-field sl-field-row">
+                              <span className="sl-label">摘要</span>
+                              <AutoTextarea className="sl-input-dev" value={promptDraft.summary} onChange={(e) => updatePromptDraft('summary', e.target.value)} placeholder="简要说明此提示词的用途" />
+                            </div>
 
-                        <div className="sl-field sl-field-row">
-                          <span className="sl-label">引用说明</span>
-                          <AutoTextarea className="sl-input-dev" value={promptDraft.reference_note} onChange={(e) => updatePromptDraft('reference_note', e.target.value)} placeholder="说明在哪些场景被引用、注入位置等" />
-                        </div>
+                            <div className="sl-field sl-field-row">
+                              <span className="sl-label">引用说明</span>
+                              <AutoTextarea className="sl-input-dev" value={promptDraft.reference_note} onChange={(e) => updatePromptDraft('reference_note', e.target.value)} placeholder="说明在哪些场景被引用、注入位置等" />
+                            </div>
 
-                        <div className="sl-field sl-field-row">
-                          <span className="sl-label">说明</span>
-                          <AutoTextarea className="sl-input-dev" value={promptDraft.description} onChange={(e) => updatePromptDraft('description', e.target.value)} placeholder="补充信息、注意事项" />
-                        </div>
+                            <div className="sl-field sl-field-row">
+                              <span className="sl-label">说明</span>
+                              <AutoTextarea className="sl-input-dev" value={promptDraft.description} onChange={(e) => updatePromptDraft('description', e.target.value)} placeholder="补充信息、注意事项" />
+                            </div>
 
-                        <div className="sl-checks">
-                          <label>
-                            <input type="checkbox" checked={promptDraft.enabled} onChange={(e) => updatePromptDraft('enabled', e.target.checked)} />
-                            启用
-                          </label>
-                          <span className="muted">{promptDraft.override ? '当前已覆盖默认内容' : '当前使用系统默认内容'}</span>
-                        </div>
+                            <div className="sl-checks">
+                              <label>
+                                <input type="checkbox" checked={promptDraft.enabled} onChange={(e) => updatePromptDraft('enabled', e.target.checked)} />
+                                启用
+                              </label>
+                              <span className="muted">{promptDraft.override ? '当前已覆盖默认内容' : '当前使用系统默认内容'}</span>
+                            </div>
+                          </>
+                        )}
                       </section>
 
                       <section className="sl-card">
@@ -998,8 +1085,9 @@ export default function SkillLibrary() {
                         <div className="sl-modules">
                           {visiblePromptModules.map((module) => {
                             const realIndex = promptDraft.modules.indexOf(module)
+                            const modDirty = dirtyPromptModuleIndices.has(realIndex)
                             return (
-                              <div key={`${module.id ?? 'default'}-${module.module_key ?? realIndex}`} className={`sl-module${module.required ? ' required' : ''}`}>
+                              <div key={`${module.id ?? 'default'}-${module.module_key ?? realIndex}`} className={`sl-module${module.required ? ' required' : ''}${modDirty ? ' sl-module-dirty' : ''}`}>
                                 <div className="sl-module-head">
                                   <input className="sl-mkey sl-input-dev" value={module.module_key ?? ''} readOnly title={module.module_key ?? ''} />
                                   <input
@@ -1008,6 +1096,7 @@ export default function SkillLibrary() {
                                     onChange={(e) => updatePromptModule(realIndex, { title: e.target.value })}
                                     placeholder="模块标题（仅开发者）"
                                   />
+                                  {modDirty && <span className="sl-dirty-tag">编辑中</span>}
                                   <div className="sl-flags">
                                     <label>
                                       <input type="checkbox" checked={module.required} disabled />

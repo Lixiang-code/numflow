@@ -2639,3 +2639,69 @@ textarea.sl-input-ai:focus {
 .sl-conflict-actions .btn.primary { background: var(--green); color: #fff; border-color: var(--green); }
 .sl-conflict-actions .btn.ghost { color: #64748b; background: transparent; border-color: transparent; }
 .sl-conflict-actions .btn:hover { filter: brightness(0.95); }
+
+/* ===== Skill Library: 分区级/模块级脏状态 ===== */
+
+/* Section-level dirty (basic info card) */
+.sl-section-dirty .sl-label::after {
+  content: " [编辑中]";
+  font-size: 0.63rem; font-weight: 600; color: #b45309; margin-left: 4px;
+}
+.sl-section-dirty input.sl-input-dev,
+.sl-section-dirty textarea.sl-input-dev {
+  border-color: #fbbf24 !important; box-shadow: 0 0 0 2px rgba(251,191,36,.12);
+}
+.sl-section-dirty input.sl-input-ai,
+.sl-section-dirty textarea.sl-input-ai {
+  border-color: #f59e0b !important; box-shadow: 0 0 0 2px rgba(245,158,11,.18);
+}
+
+/* Module-level dirty */
+.sl-module-dirty input.sl-input-dev,
+.sl-module-dirty textarea.sl-input-dev { border-color: #fbbf24 !important; }
+.sl-module-dirty input.sl-input-ai,
+.sl-module-dirty textarea.sl-input-ai {
+  border-color: #f59e0b !important; box-shadow: 0 0 0 2px rgba(245,158,11,.18);
+}
+.sl-module-dirty .sl-module-head { background: rgba(245,158,11,.06); }
+
+/* Collapsed basic info summary strip */
+.sl-collapsed-summary {
+  display: flex; align-items: baseline; gap: 0.5rem;
+  padding: 0.3rem 0.1rem; flex-wrap: wrap;
+}
+.sl-cs-title { font-weight: 600; font-size: 0.95rem; color: var(--text); }
+.sl-cs-sep   { color: #94a3b8; font-size: 0.85rem; }
+.sl-cs-meta  { font-size: 0.8rem; color: #64748b; font-family: var(--font-mono, ui-monospace, monospace); }
+
+/* Inline SKILL file preview (between basic info and modules) */
+.sl-preview-inline {
+  border-radius: 12px;
+  border: 1px solid #334155;
+  background: #1e293b;
+  color: #e2e8f0;
+  padding: 1rem 1.1rem 0.9rem;
+  margin-bottom: 1.5rem;
+}
+.sl-preview-inline .sl-preview-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 0.65rem; gap: 1rem;
+}
+.sl-preview-inline .sl-preview-title {
+  font-size: 0.8rem; font-weight: 600; color: #94a3b8; letter-spacing: 0.01em;
+}
+.sl-preview-inline .sl-preview-meta {
+  font-size: 0.72rem; color: #64748b;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sl-preview-inline .sl-preview-body {
+  margin: 0; font-size: 0.79rem; line-height: 1.58;
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 26vh; overflow-y: auto;
+  color: #e2e8f0; background: transparent;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.sl-preview-inline .sl-preview-body.empty {
+  color: #64748b; font-style: italic; font-family: inherit;
+}
