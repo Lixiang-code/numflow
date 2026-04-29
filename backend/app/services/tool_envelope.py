@@ -11,6 +11,21 @@ _STRIP_KEYS = frozenset({"created_at", "updated_at"})
 
 # 小数精度：保留 4 位有效小数（忽略小数点后的前导零）
 _DECIMAL_SIG = 4
+_PRUNE = object()
+_RETAIN_EMPTY_LIST_KEYS = frozenset({
+    "rows",
+    "tables",
+    "items",
+    "cells",
+    "edges",
+    "sheets",
+    "slices",
+    "history",
+    "sessions",
+    "snapshots",
+    "skills",
+    "violations",
+})
 
 
 def _round_float(v: float) -> float:
@@ -51,6 +66,47 @@ def _strip_timestamps(obj: Any) -> Any:
     return _clean_output(obj)
 
 
+def _prune_empty_values(obj: Any, *, parent_key: str = "") -> Any:
+    if isinstance(obj, dict):
+        out: Dict[str, Any] = {}
+        for key, value in obj.items():
+            pruned = _prune_empty_values(value, parent_key=str(key))
+            if pruned is _PRUNE:
+                continue
+            if isinstance(pruned, dict) and not pruned:
+                continue
+            if isinstance(pruned, list) and not pruned and str(key) not in _RETAIN_EMPTY_LIST_KEYS:
+                continue
+            out[key] = pruned
+        return out
+    if isinstance(obj, list):
+        out_list = [_prune_empty_values(item, parent_key=parent_key) for item in obj]
+        out_list = [item for item in out_list if item is not _PRUNE]
+        if not out_list and parent_key not in _RETAIN_EMPTY_LIST_KEYS:
+            return _PRUNE
+        return out_list
+    return obj
+
+
+def _finalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"status": payload["status"]}
+    data = payload.get("data")
+    if data is not None:
+        pruned_data = _prune_empty_values(data)
+        if pruned_data not in (None, {}):
+            result["data"] = pruned_data
+    warnings = payload.get("warnings")
+    if isinstance(warnings, list) and warnings:
+        result["warnings"] = warnings
+    blocked = payload.get("blocked_cells")
+    if isinstance(blocked, list) and blocked:
+        result["blocked_cells"] = blocked
+    fix = payload.get("fix")
+    if fix:
+        result["fix"] = fix
+    return result
+
+
 def wrap_tool_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     """
     将内部裸字典规范为:
@@ -73,7 +129,7 @@ def wrap_tool_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
         }
         if fix_hint:
             result["fix"] = fix_hint
-        return result
+        return _finalize_payload(result)
 
     if "applied" in raw and "skipped" in raw:
         skipped = raw.get("skipped") or []
@@ -98,46 +154,46 @@ def wrap_tool_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
         warns: List[str] = []
         if skipped:
             warns.append(f"已跳过 {len(skipped)} 个受保护单元格（user_manual）")
-        return {
+        return _finalize_payload({
             "status": st,
             "data": {"applied": applied, "skipped": skipped},
             "warnings": warns,
             "blocked_cells": blocked,
-        }
+        })
 
     if "passed" in raw and "violations" in raw:
         vlist = raw.get("violations") or []
         warns = list(raw.get("warnings") or [])
         st = "success" if raw.get("passed") and not vlist and not warns else "partial"
-        return {
+        return _finalize_payload({
             "status": st,
             "data": _strip_timestamps(raw),
             "warnings": [str(w) for w in warns],
             "blocked_cells": [],
-        }
+        })
 
     if "executed" in raw and "errors" in raw:
         errs = raw.get("errors") or []
         if errs:
-            return {
+            return _finalize_payload({
                 "status": "partial",
                 "data": _strip_timestamps(raw),
                 "warnings": [str(e) for e in errs],
                 "blocked_cells": [],
-            }
-        return {
+            })
+        return _finalize_payload({
             "status": "success",
             "data": _strip_timestamps(raw),
             "warnings": [],
             "blocked_cells": [],
-        }
+        })
 
-    return {
+    return _finalize_payload({
         "status": "success",
         "data": _strip_timestamps(raw),
         "warnings": [],
         "blocked_cells": [],
-    }
+    })
 
 
 def _infer_fix_hint(error_msg: str) -> str:

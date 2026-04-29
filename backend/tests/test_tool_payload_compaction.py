@@ -163,3 +163,31 @@ def test_call_calculator_not_found_omits_sql_and_params():
 
     assert data == {"ok": True, "value": None, "found": False}
 
+
+def test_list_directories_empty_result_omits_empty_payload_fields():
+    conn = _new_conn()
+
+    result = json.loads(dispatch_tool("list_directories", {}, _project_db(conn)))
+
+    assert result == {"status": "success"}
+
+
+def test_read_table_empty_rows_are_retained_as_meaningful_result():
+    conn = _new_conn()
+    create_dynamic_table(
+        conn,
+        table_name="empty_read_demo",
+        display_name="空读取演示",
+        columns=[("level", "INTEGER"), ("value", "REAL")],
+    )
+    conn.commit()
+
+    result = json.loads(
+        dispatch_tool(
+            "read_table",
+            {"table_name": "empty_read_demo"},
+            _project_db(conn),
+        )
+    )
+
+    assert result == {"status": "success", "data": {"rows": []}}

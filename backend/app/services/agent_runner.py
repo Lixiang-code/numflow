@@ -12,7 +12,7 @@ from app.deps import ProjectDB
 from app.services.agent_tools import TOOLS_OPENAI, build_tools_openai, dispatch_tool, _get_project_config
 from app.services.prompt_overrides import (
     get_prompt_override,
-    merge_prompt_item,
+    merge_prompt_item_layers,
     render_prompt_text,
 )
 from app.services.prompt_router import route_prompt
@@ -432,43 +432,74 @@ def _agent_system_prompt_defaults() -> Dict[str, Dict[str, Any]]:
     }
 
 
-def get_agent_system_prompt_catalog(conn: Optional[sqlite3.Connection] = None) -> List[Dict[str, Any]]:
+def _override_scope(global_override: Optional[Dict[str, Any]], project_override: Optional[Dict[str, Any]]) -> str:
+    if project_override:
+        return "project"
+    if global_override:
+        return "global"
+    return "default"
+
+
+def get_agent_system_prompt_catalog(
+    conn: Optional[sqlite3.Connection] = None,
+    global_conn: Optional[sqlite3.Connection] = None,
+) -> List[Dict[str, Any]]:
     defaults = list(_agent_system_prompt_defaults().values())
-    if conn is None:
+    if conn is None and global_conn is None:
         return defaults
     items: List[Dict[str, Any]] = []
     for default in defaults:
-        override = get_prompt_override(conn, category="system", prompt_key=str(default["prompt_key"]))
-        items.append(merge_prompt_item(default, override))
+        prompt_key = str(default["prompt_key"])
+        global_override = get_prompt_override(global_conn, category="system", prompt_key=prompt_key) if global_conn is not None else None
+        project_override = get_prompt_override(conn, category="system", prompt_key=prompt_key) if conn is not None else None
+        merged = merge_prompt_item_layers(default, [global_override, project_override])
+        merged["override_scope"] = _override_scope(global_override, project_override)
+        items.append(merged)
     return items
 
 
-def _resolve_agent_system_prompt(conn: Optional[sqlite3.Connection], prompt_key: str) -> str:
-    return _resolve_agent_system_prompt_detail(conn, prompt_key)["content"]
+def _resolve_agent_system_prompt(
+    conn: Optional[sqlite3.Connection],
+    prompt_key: str,
+    global_conn: Optional[sqlite3.Connection] = None,
+) -> str:
+    return _resolve_agent_system_prompt_detail(conn, prompt_key, global_conn=global_conn)["content"]
 
 
-def _resolve_agent_system_prompt_detail(conn: Optional[sqlite3.Connection], prompt_key: str) -> Dict[str, Any]:
+def _resolve_agent_system_prompt_detail(
+    conn: Optional[sqlite3.Connection],
+    prompt_key: str,
+    *,
+    global_conn: Optional[sqlite3.Connection] = None,
+) -> Dict[str, Any]:
     default = _agent_system_prompt_defaults()[prompt_key]
-    if conn is None:
+    if conn is None and global_conn is None:
         return {
             "prompt_key": prompt_key,
             "title": str(default.get("title") or prompt_key),
             "override": False,
+            "override_scope": "default",
             "content": render_prompt_text(default),
         }
-    override = get_prompt_override(conn, category="system", prompt_key=prompt_key)
-    merged = merge_prompt_item(default, override)
+    global_override = get_prompt_override(global_conn, category="system", prompt_key=prompt_key) if global_conn is not None else None
+    project_override = get_prompt_override(conn, category="system", prompt_key=prompt_key) if conn is not None else None
+    merged = merge_prompt_item_layers(default, [global_override, project_override])
     return {
         "prompt_key": prompt_key,
         "title": str(merged.get("title") or prompt_key),
-        "override": bool(override),
+        "override": bool(global_override or project_override),
+        "override_scope": _override_scope(global_override, project_override),
         "content": render_prompt_text(merged),
     }
 
 
-def _common_system(mode_norm: str, conn: Optional[sqlite3.Connection] = None) -> str:
+def _common_system(
+    mode_norm: str,
+    conn: Optional[sqlite3.Connection] = None,
+    global_conn: Optional[sqlite3.Connection] = None,
+) -> str:
     prompt_key = "agent_common_init" if mode_norm == "init" else "agent_common_maintain"
-    return _resolve_agent_system_prompt(conn, prompt_key)
+    return _resolve_agent_system_prompt(conn, prompt_key, global_conn=global_conn)
 
 
 _GATHER_SYSTEM = (
@@ -777,13 +808,13 @@ def _run_gather_phase(
 
     # 发出初始消息快照（供监控查看 system prompt）
     yield _emit("gather", {"type": "phase_messages", "phase": "gather", "round": 0, "messages": list(gather_messages)})
-    gather_prompt = _resolve_agent_system_prompt_detail(p.conn, "agent_gather")
+    gather_prompt = _resolve_agent_system_prompt_detail(p.conn, "agent_gather", global_conn=p.server_conn)
     yield _emit("gather", {"type": "prompt_sources", "phase": "gather", "sources": [gather_prompt]})
     # 发出工具元信息（供监控查看可用工具与并行设置）
     yield _emit("gather", {
         "type": "tools_meta", "phase": "gather",
         "tools": sorted(READ_TOOLS),
-        "tool_schemas": _tool_schema_payload(build_tools_openai(p.conn), READ_TOOLS),
+        "tool_schemas": _tool_schema_payload(build_tools_openai(p.conn, global_conn=p.server_conn), READ_TOOLS),
         "parallel_tool_calls": True,
         "tool_choice": "auto",
     })
@@ -794,7 +825,7 @@ def _run_gather_phase(
             resp = client.chat.completions.create(
                 model=model,
                 messages=gather_messages,
-                tools=_filter_tools_openai(build_tools_openai(p.conn), READ_TOOLS),
+                tools=_filter_tools_openai(build_tools_openai(p.conn, global_conn=p.server_conn), READ_TOOLS),
                 tool_choice="auto",
                 parallel_tool_calls=True,
                 temperature=0.1,
@@ -887,7 +918,7 @@ def run_agent_sse(
     cfg_summary = _project_config_summary(p)
     yield _emit("route", {"type": "log", "message": f"提示词路由：step={step_id or '(none)'}"})
     try:
-        route = route_prompt(step_id, user_message, cfg_summary, model=_model, conn=p.conn)
+        route = route_prompt(step_id, user_message, cfg_summary, model=_model, conn=p.conn, global_conn=p.server_conn)
     except Exception as e:  # noqa: BLE001
         route = {
             "hit": False,
@@ -911,7 +942,7 @@ def run_agent_sse(
     )
 
     common_prompt_key = "agent_common_init" if mode_norm == "init" else "agent_common_maintain"
-    base_system_detail = _resolve_agent_system_prompt_detail(p.conn, common_prompt_key)
+    base_system_detail = _resolve_agent_system_prompt_detail(p.conn, common_prompt_key, global_conn=p.server_conn)
     base_system = str(base_system_detail["content"])
     routed_prompt = (route.get("prompt") or "").strip()
     routed_block = (
@@ -945,7 +976,7 @@ def run_agent_sse(
         design_messages.append({"role": "system", "content": routed_block})
     if exposed_block:
         design_messages.append({"role": "system", "content": exposed_block})
-    design_tail_detail = _resolve_agent_system_prompt_detail(p.conn, "agent_design_tail")
+    design_tail_detail = _resolve_agent_system_prompt_detail(p.conn, "agent_design_tail", global_conn=p.server_conn)
     design_messages.append({"role": "system", "content": str(design_tail_detail["content"])})
     design_messages.append({"role": "user", "content": user_message})
     # Inject gather phase context so design sees real project data
@@ -990,7 +1021,7 @@ def run_agent_sse(
         review_messages.append({"role": "system", "content": routed_block})
     if exposed_block:
         review_messages.append({"role": "system", "content": exposed_block})
-    review_tail_detail = _resolve_agent_system_prompt_detail(p.conn, "agent_review_tail")
+    review_tail_detail = _resolve_agent_system_prompt_detail(p.conn, "agent_review_tail", global_conn=p.server_conn)
     review_messages.append({"role": "system", "content": str(review_tail_detail["content"])})
     review_messages.append({"role": "user", "content": user_message})
     review_messages.append(
@@ -1035,7 +1066,7 @@ def run_agent_sse(
         execute_messages.append({"role": "system", "content": routed_block})
     if exposed_block:
         execute_messages.append({"role": "system", "content": exposed_block})
-    execute_tail_detail = _resolve_agent_system_prompt_detail(p.conn, "agent_execute_tail")
+    execute_tail_detail = _resolve_agent_system_prompt_detail(p.conn, "agent_execute_tail", global_conn=p.server_conn)
     execute_messages.append({"role": "system", "content": str(execute_tail_detail["content"])})
     execute_messages.append({"role": "user", "content": user_message})
     execute_messages.append(
@@ -1057,7 +1088,7 @@ def run_agent_sse(
     yield _emit("execute", {
         "type": "tools_meta", "phase": "execute",
         "tools": sorted(WRITE_TOOLS | READ_TOOLS),
-        "tool_schemas": _tool_schema_payload(build_tools_openai(p.conn), WRITE_TOOLS | READ_TOOLS),
+        "tool_schemas": _tool_schema_payload(build_tools_openai(p.conn, global_conn=p.server_conn), WRITE_TOOLS | READ_TOOLS),
         "parallel_tool_calls": True,
         "tool_choice": "auto",
     })
@@ -1133,7 +1164,7 @@ def run_agent_sse(
                 return client.chat.completions.create(
                     model=_model,
                     messages=execute_messages,
-                    tools=build_tools_openai(p.conn),
+                    tools=build_tools_openai(p.conn, global_conn=p.server_conn),
                     tool_choice="auto",
                     parallel_tool_calls=True,
                     temperature=0.2,
@@ -1363,7 +1394,7 @@ def run_agent_sse(
         # 注意：_ending_prompt_injected 确保只注入一次，避免循环
         if not _ending_prompt_injected:
             _ending_prompt_injected = True
-            ending_detail = _resolve_agent_system_prompt_detail(p.conn, "agent_ending_review")
+            ending_detail = _resolve_agent_system_prompt_detail(p.conn, "agent_ending_review", global_conn=p.server_conn)
             ending_text = str(ending_detail["content"])
             # 先把 AI 当前"完成"回复追加为 assistant 消息，再注入审核请求
             execute_messages.append(_build_assistant_msg(msg))
@@ -1536,7 +1567,7 @@ def _run_recovery_sse(
             resp = client.chat.completions.create(
                 model=_model,
                 messages=execute_messages,
-                tools=_filter_tools_openai(build_tools_openai(p.conn), RECOVERY_CLEANUP_TOOLS),
+                tools=_filter_tools_openai(build_tools_openai(p.conn, global_conn=p.server_conn), RECOVERY_CLEANUP_TOOLS),
                 tool_choice="auto",
                 parallel_tool_calls=True,
                 temperature=0.1,

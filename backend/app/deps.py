@@ -53,6 +53,14 @@ def require_user(
     return user
 
 
+def require_admin(
+    user: Dict[str, Any] = Depends(require_user),
+) -> Dict[str, Any]:
+    if not bool(user.get("is_admin")):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员可执行全局修改")
+    return user
+
+
 def get_project_row(conn: sqlite3.Connection, project_id: int) -> sqlite3.Row:
     cur = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
     row = cur.fetchone()
@@ -95,6 +103,7 @@ class ProjectDB:
     row: sqlite3.Row
     conn: sqlite3.Connection
     can_write: bool
+    server_conn: Optional[sqlite3.Connection] = None
 
 
 def get_project_read(
@@ -118,6 +127,7 @@ def get_project_read(
             row=row,
             conn=conn,
             can_write=compute_project_can_write(row, user),
+            server_conn=sconn,
         )
     finally:
         conn.close()
@@ -140,6 +150,6 @@ def get_project_write(
             ensure_default_skills(conn)
         except Exception:  # noqa: BLE001
             pass
-        yield ProjectDB(row=row, conn=conn, can_write=True)
+        yield ProjectDB(row=row, conn=conn, can_write=True, server_conn=sconn)
     finally:
         conn.close()

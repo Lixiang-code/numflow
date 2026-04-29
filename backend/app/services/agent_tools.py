@@ -17,7 +17,7 @@ from app.services.formula_exec import (
     recalculate_downstream,
     register_formula,
 )
-from app.services.prompt_overrides import get_prompt_override, merge_prompt_item
+from app.services.prompt_overrides import get_prompt_override, merge_prompt_item_layers
 from app.data.default_rules_02 import get_default_rules_payload
 from app.services.gameplay_table_registry import list_registered_gameplay_tables, utc_now_iso
 from app.services.skill_library import (
@@ -1657,15 +1657,20 @@ def _tool_prompt_default_item(tool: Dict[str, Any], display_order: int) -> Dict[
     }
 
 
-def get_tool_prompt_catalog(conn: Optional[sqlite3.Connection] = None) -> List[Dict[str, Any]]:
+def get_tool_prompt_catalog(
+    conn: Optional[sqlite3.Connection] = None,
+    global_conn: Optional[sqlite3.Connection] = None,
+) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     for idx, tool in enumerate(TOOLS_OPENAI, start=1):
         default = _tool_prompt_default_item(tool, idx)
-        if conn is None:
+        if conn is None and global_conn is None:
             items.append(default)
             continue
-        override = get_prompt_override(conn, category="tool", prompt_key=str(default["prompt_key"]))
-        items.append(merge_prompt_item(default, override))
+        prompt_key = str(default["prompt_key"])
+        global_override = get_prompt_override(global_conn, category="tool", prompt_key=prompt_key) if global_conn is not None else None
+        project_override = get_prompt_override(conn, category="tool", prompt_key=prompt_key) if conn is not None else None
+        items.append(merge_prompt_item_layers(default, [global_override, project_override]))
     items.sort(key=lambda item: (int(item.get("display_order") or 0), str(item.get("prompt_key") or "")))
     return items
 
@@ -1681,11 +1686,14 @@ def _set_nested_description(target: Dict[str, Any], path: str, content: str) -> 
         cur[parts[-1]] = content
 
 
-def build_tools_openai(conn: Optional[sqlite3.Connection] = None) -> List[Dict[str, Any]]:
+def build_tools_openai(
+    conn: Optional[sqlite3.Connection] = None,
+    global_conn: Optional[sqlite3.Connection] = None,
+) -> List[Dict[str, Any]]:
     tools = copy.deepcopy(TOOLS_OPENAI)
-    if conn is None:
+    if conn is None and global_conn is None:
         return tools
-    prompt_items = {str(item["prompt_key"]): item for item in get_tool_prompt_catalog(conn)}
+    prompt_items = {str(item["prompt_key"]): item for item in get_tool_prompt_catalog(conn, global_conn=global_conn)}
     for tool in tools:
         fn = tool.get("function") or {}
         name = str(fn.get("name") or "")

@@ -15,7 +15,7 @@ import sqlite3
 from typing import Any, Dict, List, Optional
 
 from app.config import QWEN_MODEL
-from app.services.prompt_overrides import get_prompt_override, merge_prompt_item, render_prompt_text
+from app.services.prompt_overrides import get_prompt_override, merge_prompt_item_layers, render_prompt_text
 from app.services.qwen_client import get_client_for_model
 from app.services.skill_library import build_default_skill_prompt
 
@@ -410,19 +410,29 @@ def _router_prompt_defaults() -> List[Dict[str, Any]]:
     return items
 
 
-def get_router_prompt_catalog(conn: Optional[sqlite3.Connection] = None) -> List[Dict[str, Any]]:
+def get_router_prompt_catalog(
+    conn: Optional[sqlite3.Connection] = None,
+    global_conn: Optional[sqlite3.Connection] = None,
+) -> List[Dict[str, Any]]:
     defaults = _router_prompt_defaults()
-    if conn is None:
+    if conn is None and global_conn is None:
         return defaults
     items: List[Dict[str, Any]] = []
     for default in defaults:
-        override = get_prompt_override(conn, category="system", prompt_key=str(default["prompt_key"]))
-        items.append(merge_prompt_item(default, override))
+        prompt_key = str(default["prompt_key"])
+        global_override = get_prompt_override(global_conn, category="system", prompt_key=prompt_key) if global_conn is not None else None
+        project_override = get_prompt_override(conn, category="system", prompt_key=prompt_key) if conn is not None else None
+        items.append(merge_prompt_item_layers(default, [global_override, project_override]))
     items.sort(key=lambda item: (int(item.get("display_order") or 0), str(item.get("title") or "")))
     return items
 
 
-def _resolve_router_prompt(conn: Optional[sqlite3.Connection], prompt_key: str) -> str:
+def _resolve_router_prompt(
+    conn: Optional[sqlite3.Connection],
+    prompt_key: str,
+    *,
+    global_conn: Optional[sqlite3.Connection] = None,
+) -> str:
     defaults = {str(item["prompt_key"]): item for item in _router_prompt_defaults()}
     prompt_keys = [prompt_key]
     default_keys = [prompt_key]
@@ -437,22 +447,36 @@ def _resolve_router_prompt(conn: Optional[sqlite3.Connection], prompt_key: str) 
             break
     if default is None:
         raise KeyError(prompt_key)
-    if conn is None:
+    if conn is None and global_conn is None:
         return render_prompt_text(default)
+    global_override = None
+    if global_conn is not None:
+        for key in prompt_keys:
+            global_override = get_prompt_override(global_conn, category="system", prompt_key=key)
+            if global_override is not None:
+                break
     override = None
-    for key in prompt_keys:
-        override = get_prompt_override(conn, category="system", prompt_key=key)
-        if override is not None:
-            break
-    return render_prompt_text(merge_prompt_item(default, override))
+    if conn is not None:
+        for key in prompt_keys:
+            override = get_prompt_override(conn, category="system", prompt_key=key)
+            if override is not None:
+                break
+    return render_prompt_text(merge_prompt_item_layers(default, [global_override, override]))
 
 
-def get_route_system_prompt(conn: Optional[sqlite3.Connection] = None) -> str:
-    return _resolve_router_prompt(conn, "router_system")
+def get_route_system_prompt(
+    conn: Optional[sqlite3.Connection] = None,
+    global_conn: Optional[sqlite3.Connection] = None,
+) -> str:
+    return _resolve_router_prompt(conn, "router_system", global_conn=global_conn)
 
 
-def get_default_step_prompt(step_id: str, conn: Optional[sqlite3.Connection] = None) -> str:
-    return _resolve_router_prompt(conn, f"route_step::{step_id}")
+def get_default_step_prompt(
+    step_id: str,
+    conn: Optional[sqlite3.Connection] = None,
+    global_conn: Optional[sqlite3.Connection] = None,
+) -> str:
+    return _resolve_router_prompt(conn, f"route_step::{step_id}", global_conn=global_conn)
 
 
 def route_prompt(
@@ -462,6 +486,7 @@ def route_prompt(
     *,
     model: str = None,
     conn: Optional[sqlite3.Connection] = None,
+    global_conn: Optional[sqlite3.Connection] = None,
 ) -> Dict[str, Any]:
     """决定本次对话使用哪段提示词。
 
@@ -487,16 +512,16 @@ def route_prompt(
                 "gather_hint": _extract_gather_hint(skill_prompt),
                 "rationale": "skill_library_default_exposure",
                 "skills": skill_items,
-                "route_system": get_route_system_prompt(conn),
+                "route_system": get_route_system_prompt(conn, global_conn=global_conn),
             }
 
     # 确定步骤默认提示词：精确匹配 → 父步骤 fallback（如 gameplay_table.equip_enhance → gameplay_table）
     normalized_step_id = _normalize_prompt_step_id(step_id)
     if normalized_step_id in DEFAULT_STEP_PROMPTS:
-        default_prompt = get_default_step_prompt(step_id, conn)
+        default_prompt = get_default_step_prompt(step_id, conn, global_conn=global_conn)
     else:
         base_id = normalized_step_id.split(".")[0] if "." in normalized_step_id else ""
-        default_prompt = get_default_step_prompt(base_id, conn) if base_id in DEFAULT_STEP_PROMPTS else ""
+        default_prompt = get_default_step_prompt(base_id, conn, global_conn=global_conn) if base_id in DEFAULT_STEP_PROMPTS else ""
     client = get_client_for_model(model or QWEN_MODEL)
 
     judge_user = (
@@ -511,7 +536,7 @@ def route_prompt(
         resp = client.chat.completions.create(
             model=model or QWEN_MODEL,
             messages=[
-                {"role": "system", "content": get_route_system_prompt(conn)},
+                {"role": "system", "content": get_route_system_prompt(conn, global_conn=global_conn)},
                 {"role": "user", "content": judge_user},
             ],
             temperature=0.1,
@@ -527,7 +552,7 @@ def route_prompt(
             "prompt": fallback_prompt,
             "gather_hint": _extract_gather_hint(fallback_prompt),
             "rationale": f"router_fallback: {e!r}",
-            "route_system": get_route_system_prompt(conn),
+            "route_system": get_route_system_prompt(conn, global_conn=global_conn),
         }
 
     hit = bool(verdict.get("hit")) and bool(default_prompt)
@@ -539,7 +564,7 @@ def route_prompt(
             "prompt": default_prompt,
             "gather_hint": _extract_gather_hint(default_prompt),
             "rationale": rationale,
-            "route_system": get_route_system_prompt(conn),
+            "route_system": get_route_system_prompt(conn, global_conn=global_conn),
         }
 
     # 未命中：让千问现写一段对应本步骤的提示词（仍套上命名纪律前缀）
@@ -549,7 +574,7 @@ def route_prompt(
             messages=[
                 {
                     "role": "system",
-                    "content": _resolve_router_prompt(conn, "router_writer"),
+                    "content": _resolve_router_prompt(conn, "router_writer", global_conn=global_conn),
                 },
                 {
                     "role": "user",
@@ -579,5 +604,5 @@ def route_prompt(
         "prompt": custom,
         "gather_hint": _extract_gather_hint(custom),
         "rationale": rationale or "default_template_not_matched",
-        "route_system": get_route_system_prompt(conn),
+        "route_system": get_route_system_prompt(conn, global_conn=global_conn),
     }

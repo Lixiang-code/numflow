@@ -147,30 +147,39 @@ def get_prompt_override(
 
 
 def merge_prompt_item(default_item: Dict[str, Any], override_item: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    return merge_prompt_item_layers(default_item, [override_item])
+
+
+def merge_prompt_item_layers(
+    default_item: Dict[str, Any],
+    override_items: Sequence[Optional[Dict[str, Any]]],
+) -> Dict[str, Any]:
     merged = {
         **default_item,
         "modules": _clone_modules(default_item.get("modules") or []),
     }
-    if not override_item:
-        merged["override"] = False
-        return merged
-    for key in ("title", "summary", "description", "reference_note", "enabled"):
-        if key in override_item:
-            merged[key] = override_item[key]
-    modules = override_item.get("modules")
-    if isinstance(modules, list) and modules:
-        merged_modules = {str(module["module_key"]): module for module in _clone_modules(merged["modules"])}
-        for module in _clone_modules(modules):
-            key = str(module["module_key"])
-            if key in merged_modules:
-                merged_modules[key] = {**merged_modules[key], **module}
-            else:
-                merged_modules[key] = module
-        merged["modules"] = sorted(
-            merged_modules.values(),
-            key=lambda item: (int(item.get("sort_order") or 0), str(item.get("module_key") or "")),
-        )
-    merged["override"] = True
+    applied = False
+    for override_item in override_items:
+        if not override_item:
+            continue
+        applied = True
+        for key in ("title", "summary", "description", "reference_note", "enabled"):
+            if key in override_item:
+                merged[key] = override_item[key]
+        modules = override_item.get("modules")
+        if isinstance(modules, list) and modules:
+            merged_modules = {str(module["module_key"]): module for module in _clone_modules(merged["modules"])}
+            for module in _clone_modules(modules):
+                key = str(module["module_key"])
+                if key in merged_modules:
+                    merged_modules[key] = {**merged_modules[key], **module}
+                else:
+                    merged_modules[key] = module
+            merged["modules"] = sorted(
+                merged_modules.values(),
+                key=lambda item: (int(item.get("sort_order") or 0), str(item.get("module_key") or "")),
+            )
+    merged["override"] = applied
     return merged
 
 

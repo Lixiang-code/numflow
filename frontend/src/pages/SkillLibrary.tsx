@@ -38,6 +38,10 @@ type PromptItem = {
   reference_note: string
   enabled: boolean
   override?: boolean
+  global_override?: boolean
+  project_override?: boolean
+  override_scope?: 'default' | 'global' | 'project'
+  scope?: 'project' | 'global'
   display_order?: number
   default_title?: string
   default_summary?: string
@@ -60,6 +64,7 @@ type PromptItem = {
 }
 
 type PromptTab = 'skill' | 'system' | 'tool'
+type PromptScope = 'project' | 'global'
 type ToolPromptGroup = {
   key: string
   label: string
@@ -181,7 +186,14 @@ function estimateTokens(text: string): number {
   return Math.max(1, Math.round(text.length / 3.5))
 }
 function skillCacheKey(id: number | 'new'): string   { return String(id) }
-function promptCacheKey(tabKey: string, key: string): string { return `${tabKey}::${key}` }
+function promptCacheKey(tabKey: string, scope: PromptScope, key: string): string { return `${tabKey}::${scope}::${key}` }
+
+function promptOverrideLabel(item: PromptItem | null): string {
+  if (!item) return '默认'
+  if (item.override_scope === 'project') return '项目覆盖'
+  if (item.override_scope === 'global') return '全局覆盖'
+  return '默认'
+}
 
 export default function SkillLibrary() {
   const { projectId } = useParams()
@@ -189,6 +201,7 @@ export default function SkillLibrary() {
   const headers = useMemo(() => projectHeaders(pid), [pid])
 
   const [tab, setTab] = useState<PromptTab>('skill')
+  const [promptScope, setPromptScope] = useState<PromptScope>('project')
 
   const [skills, setSkills] = useState<SkillItem[]>([])
   const [editingSkillId, setEditingSkillId] = useState<number | 'new' | null>(null)
@@ -204,6 +217,8 @@ export default function SkillLibrary() {
   const [promptLoading, setPromptLoading] = useState(false)
   const [promptSaving, setPromptSaving] = useState(false)
   const [promptResetting, setPromptResetting] = useState(false)
+  const [promptCanWrite, setPromptCanWrite] = useState(true)
+  const [canGlobalWrite, setCanGlobalWrite] = useState(false)
   const [showAllPromptModules, setShowAllPromptModules] = useState(false)
   const [skillBasicCollapsed,  setSkillBasicCollapsed]  = useState(false)
   const [promptBasicCollapsed, setPromptBasicCollapsed] = useState(false)
@@ -372,12 +387,18 @@ export default function SkillLibrary() {
     if (!pid) return
     if (!fromEffect) { setPromptLoading(true); setErr(null) }
     try {
-      const data = (await apiFetch(`/prompts?category=${category}`, { headers })) as { items?: PromptItem[] }
+      const data = (await apiFetch(`/prompts?category=${category}&scope=${promptScope}`, { headers })) as {
+        items?: PromptItem[]
+        can_write?: boolean
+        can_global_write?: boolean
+      }
       const next = data.items ?? []
+      setPromptCanWrite(Boolean(data.can_write))
+      setCanGlobalWrite(Boolean(data.can_global_write))
       setPromptItems(next)
       // Update draft cache
       for (const item of next) {
-        const key = promptCacheKey(category, item.prompt_key)
+        const key = promptCacheKey(category, promptScope, item.prompt_key)
         const server = cloneValue(item)
         const entry = promptCache.current.get(key)
         if (!entry) {
@@ -394,13 +415,13 @@ export default function SkillLibrary() {
       }
       syncPromptCacheView()
       const resolvePromptDraft = (pk: string): PromptItem => {
-        const key = promptCacheKey(category, pk)
+        const key = promptCacheKey(category, promptScope, pk)
         const entry = promptCache.current.get(key)
         const found = next.find((i) => i.prompt_key === pk)!
         return entry ? cloneValue(entry.draft) : cloneValue(found)
       }
       const resolvePromptBaseline = (pk: string): PromptItem => {
-        const key = promptCacheKey(category, pk)
+        const key = promptCacheKey(category, promptScope, pk)
         const entry = promptCache.current.get(key)
         const found = next.find((i) => i.prompt_key === pk)!
         return entry ? cloneValue(entry.baseline) : cloneValue(found)
@@ -424,7 +445,7 @@ export default function SkillLibrary() {
     } finally {
       setPromptLoading(false)
     }
-  }, [applyPromptSelection, headers, pid, markPromptConflict, clearPromptConflict, syncPromptCacheView])
+  }, [applyPromptSelection, headers, pid, promptScope, markPromptConflict, clearPromptConflict, syncPromptCacheView])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -435,7 +456,7 @@ export default function SkillLibrary() {
       }
     }, 0)
     return () => window.clearTimeout(timer)
-  }, [loadPromptItems, loadSkills, tab])
+  }, [loadPromptItems, loadSkills, promptScope, tab])
 
   function createSkill() {
     const blank = blankSkill()
@@ -584,7 +605,7 @@ export default function SkillLibrary() {
     setErr(null)
     try {
       const category = tab
-      await apiFetch(`/prompts/${category}/${encodeURIComponent(promptDraft.prompt_key)}`, {
+      await apiFetch(`/prompts/${category}/${encodeURIComponent(promptDraft.prompt_key)}?scope=${promptScope}`, {
         method: 'PUT',
         headers,
         body: JSON.stringify({
@@ -603,13 +624,13 @@ export default function SkillLibrary() {
           })),
         }),
       })
-      const saved = (await apiFetch(`/prompts/${category}/${encodeURIComponent(promptDraft.prompt_key)}`, {
+      const saved = (await apiFetch(`/prompts/${category}/${encodeURIComponent(promptDraft.prompt_key)}?scope=${promptScope}`, {
         headers,
       })) as PromptItem
       if (!saved.override) {
-        throw new Error(`提示词「${promptDraft.prompt_key}」保存后未检测到覆盖记录，请确认当前项目是否正确`)
+        throw new Error(`提示词「${promptDraft.prompt_key}」保存后未检测到${promptScope === 'global' ? '全局' : '项目'}覆盖记录`)
       }
-      const savedPKey = promptCacheKey(category, promptDraft.prompt_key)
+      const savedPKey = promptCacheKey(category, promptScope, promptDraft.prompt_key)
       const savedSnap = cloneValue(saved)
       promptCache.current.set(savedPKey, { draft: savedSnap, baseline: cloneValue(saved) })
       syncPromptCacheView()
@@ -618,7 +639,7 @@ export default function SkillLibrary() {
       clearPromptDirty(savedPKey)
       clearPromptConflict(savedPKey)
       await loadPromptItems(category, promptDraft.prompt_key)
-      pushToast('success', `提示词「${promptDraft.title || promptDraft.prompt_key}」已保存`)
+      pushToast('success', `提示词「${promptDraft.title || promptDraft.prompt_key}」已保存到${promptScope === 'global' ? '全局默认' : '当前项目'}`)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       setErr(msg)
@@ -626,20 +647,20 @@ export default function SkillLibrary() {
     } finally {
       setPromptSaving(false)
     }
-  }, [headers, loadPromptItems, promptDraft, pushToast, tab, clearPromptDirty, clearPromptConflict, syncPromptCacheView])
+  }, [headers, loadPromptItems, promptDraft, promptScope, pushToast, tab, clearPromptDirty, clearPromptConflict, syncPromptCacheView])
 
   async function resetPrompt() {
     if (!promptDraft || tab === 'skill') return
-    if (!window.confirm('确认还原为系统默认内容？此操作不可撤销。')) return
+    if (!window.confirm(`确认还原${promptScope === 'global' ? '全局覆盖' : '项目覆盖'}？此操作不可撤销。`)) return
     setPromptResetting(true)
     setErr(null)
     try {
-      await apiFetch(`/prompts/${tab}/${encodeURIComponent(promptDraft.prompt_key)}`, {
+      await apiFetch(`/prompts/${tab}/${encodeURIComponent(promptDraft.prompt_key)}?scope=${promptScope}`, {
         method: 'DELETE',
         headers,
       })
       await loadPromptItems(tab, promptDraft.prompt_key)
-      pushToast('success', '已还原为系统默认内容')
+      pushToast('success', `已还原${promptScope === 'global' ? '全局' : '项目'}覆盖`)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       setErr(msg)
@@ -663,6 +684,7 @@ export default function SkillLibrary() {
           void saveSkill()
         } else {
           if (!promptDraft) { pushToast('error', '请先选择一个提示词'); return }
+          if (!promptCanWrite) { pushToast('error', promptScope === 'global' ? '当前账号没有全局保存权限' : '当前项目无写权限'); return }
           if (promptSaving) return
           if (!promptDraft.title.trim()) { pushToast('error', '请先填写标题再保存'); return }
           void savePrompt()
@@ -671,7 +693,7 @@ export default function SkillLibrary() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [promptDraft, promptSaving, savePrompt, saveSkill, skillDraft, skillSaving, tab, pushToast])
+  }, [promptCanWrite, promptDraft, promptSaving, promptScope, savePrompt, saveSkill, skillDraft, skillSaving, tab, pushToast])
 
   // 离开页面前警告：存在未保存草稿时阻止刷新/关闭
   useEffect(() => {
@@ -698,13 +720,13 @@ export default function SkillLibrary() {
 
   useEffect(() => {
     if (!promptDraft || !editingPromptKey || tab === 'skill') return
-    const key = promptCacheKey(tab, editingPromptKey)
+    const key = promptCacheKey(tab, promptScope, editingPromptKey)
     const entry = promptCache.current.get(key)
     if (!entry) return
     entry.draft = cloneValue(promptDraft)
     if (deepEqual(promptDraft, entry.baseline)) clearPromptDirty(key)
     else markPromptDirty(key)
-  }, [clearPromptDirty, editingPromptKey, markPromptDirty, promptDraft, tab])
+  }, [clearPromptDirty, editingPromptKey, markPromptDirty, promptDraft, promptScope, tab])
 
   const visibleSkillModules = useMemo(() => {
     if (!skillDraft) return []
@@ -783,7 +805,7 @@ export default function SkillLibrary() {
 
   // ── Dirty / conflict helpers (reactive off dirtySkillIds / dirtyPromptKeys) ──
   const isSkillDirty   = (id: number | 'new') => dirtySkillIds.has(skillCacheKey(id))
-  const isPromptDirty  = (pk: string) => dirtyPromptKeys.has(promptCacheKey(tab as 'system' | 'tool', pk))
+  const isPromptDirty  = (pk: string) => dirtyPromptKeys.has(promptCacheKey(tab as 'system' | 'tool', promptScope, pk))
   const tabHasDirty    = (t: PromptTab) =>
     t === 'skill'
       ? dirtySkillIds.size > 0
@@ -796,6 +818,7 @@ export default function SkillLibrary() {
   void _currentDirty
 
   const canSave = tab === 'skill' ? !!skillDraft && !skillSaving : !!promptDraft && !promptSaving
+  const effectiveCanSave = tab === 'skill' ? canSave : (canSave && promptCanWrite)
   const saving = tab === 'skill' ? skillSaving : promptSaving
   const handleSave = () => {
     if (tab === 'skill') {
@@ -804,6 +827,7 @@ export default function SkillLibrary() {
       void saveSkill()
     } else {
       if (!promptDraft) { pushToast('error', '请先选择一个提示词'); return }
+      if (!promptCanWrite) { pushToast('error', promptScope === 'global' ? '当前账号没有全局保存权限' : '当前项目无写权限'); return }
       if (!promptDraft.title.trim()) { pushToast('error', '请先填写标题再保存'); return }
       void savePrompt()
     }
@@ -850,6 +874,20 @@ export default function SkillLibrary() {
       .sort((a, b) => a.order - b.order || a.label.localeCompare(b.label, 'zh-CN'))
   }, [promptItems, tab])
 
+  const switchPromptScope = useCallback((nextScope: PromptScope) => {
+    if (tab === 'skill' || nextScope === promptScope) return
+    if (editingPromptKey && promptDraft && activePromptBaseline) {
+      const currentKey = promptCacheKey(tab as 'system' | 'tool', promptScope, editingPromptKey)
+      promptCache.current.set(currentKey, {
+        draft: cloneValue(promptDraft),
+        baseline: cloneValue(activePromptBaseline),
+        serverConflict: promptCache.current.get(currentKey)?.serverConflict,
+      })
+      syncPromptCacheView()
+    }
+    setPromptScope(nextScope)
+  }, [activePromptBaseline, editingPromptKey, promptDraft, promptScope, syncPromptCacheView, tab])
+
   return (
     <div className="sl-page">
       {/* 沉浸聚焦遮罩：当任意 AI 可见输入框获得焦点时由 CSS body:has() 控制显隐 */}
@@ -858,6 +896,25 @@ export default function SkillLibrary() {
         <Link to={`/workbench/${pid}`} className="link-btn">← 返回工作台</Link>
         <div className="sl-title">提示词库</div>
         <span className="muted">项目 #{pid}</span>
+        {tab !== 'skill' && (
+          <>
+            <button
+              type="button"
+              className={promptScope === 'project' ? 'link-btn primary' : 'link-btn'}
+              onClick={() => switchPromptScope('project')}
+            >
+              当前项目
+            </button>
+            <button
+              type="button"
+              className={promptScope === 'global' ? 'link-btn primary' : 'link-btn'}
+              onClick={() => switchPromptScope('global')}
+              title={canGlobalWrite ? '编辑全局默认值' : '可查看全局默认值；保存需管理员权限'}
+            >
+              全局默认
+            </button>
+          </>
+        )}
         <div className="sl-spacer" />
         <button
           type="button"
@@ -886,20 +943,20 @@ export default function SkillLibrary() {
           <button
             type="button"
             className="link-btn"
-            disabled={!promptDraft || promptResetting}
+            disabled={!promptDraft || promptResetting || !promptCanWrite}
             onClick={() => void resetPrompt()}
           >
-            {promptResetting ? '还原中…' : '还原默认'}
+            {promptResetting ? '还原中…' : (promptScope === 'global' ? '还原全局' : '还原项目覆盖')}
           </button>
         )}
         <button
           type="button"
           className="link-btn primary"
-          disabled={!canSave}
+          disabled={!effectiveCanSave}
           onClick={handleSave}
           title={`保存（${shortcut}）`}
         >
-          {saving ? '保存中…' : '保存'} <kbd>{shortcut}</kbd>
+          {saving ? '保存中…' : (tab === 'skill' ? '保存' : (promptScope === 'global' ? '保存为全局默认' : '保存到当前项目'))} <kbd>{shortcut}</kbd>
         </button>
       </header>
 
@@ -1018,7 +1075,7 @@ export default function SkillLibrary() {
                   const renderPrompt = (item: PromptItem) => {
                     const active = item.prompt_key === editingPromptKey
                     const dirty  = isPromptDirty(item.prompt_key)
-                    const conflict = conflictPromptKeys.has(promptCacheKey(tab as 'system' | 'tool', item.prompt_key))
+                    const conflict = conflictPromptKeys.has(promptCacheKey(tab as 'system' | 'tool', promptScope, item.prompt_key))
                     const displayTitle = (tab === 'tool' || tab === 'system')
                       ? (item.tool_name_zh || item.title)
                       : item.title
@@ -1032,7 +1089,7 @@ export default function SkillLibrary() {
                         onClick={() => {
                           const nextPromptCacheView = { ...promptCacheView }
                           if (editingPromptKey && promptDraft && activePromptBaseline) {
-                            const currentKey = promptCacheKey(tab as 'system' | 'tool', editingPromptKey)
+                            const currentKey = promptCacheKey(tab as 'system' | 'tool', promptScope, editingPromptKey)
                             nextPromptCacheView[currentKey] = {
                               draft: cloneValue(promptDraft),
                               baseline: cloneValue(activePromptBaseline),
@@ -1040,7 +1097,7 @@ export default function SkillLibrary() {
                             }
                             setPromptCacheView(nextPromptCacheView)
                           }
-                          const key = promptCacheKey(tab as 'system' | 'tool', item.prompt_key)
+                          const key = promptCacheKey(tab as 'system' | 'tool', promptScope, item.prompt_key)
                           const entry = nextPromptCacheView[key]
                           if (entry?.serverConflict) {
                             setConflictPrompt({ key, local: entry.draft, server: entry.serverConflict })
@@ -1058,14 +1115,15 @@ export default function SkillLibrary() {
                             {conflict && <span className="sl-conflict-icon-inline" title="存在未解决的服务端冲突">⚡</span>}
                             {displayTitle}
                           </span>
-                          <span className="sl-meta">{dirty ? <span className="sl-dirty-tag">编辑中</span> : (item.override ? '已覆盖' : '默认')}</span>
+                          <span className="sl-meta">{dirty ? <span className="sl-dirty-tag">编辑中</span> : promptOverrideLabel(item)}</span>
                         </div>
                         {displaySummary && <div className="sl-desc">{displaySummary}</div>}
                         <div className="sl-key">{item.prompt_key}</div>
                         {(tab === 'tool' || tab === 'system') && (
                           <div className="sl-chips">
                             {!item.enabled && <span className="sl-chip amber">未启用</span>}
-                            {item.override && <span className="sl-chip">已覆盖默认</span>}
+                            {item.override_scope === 'project' && <span className="sl-chip">项目覆盖</span>}
+                            {item.override_scope === 'global' && <span className="sl-chip">全局覆盖</span>}
                           </div>
                         )}
                       </button>
@@ -1327,7 +1385,7 @@ export default function SkillLibrary() {
                           <input type="checkbox" checked={promptDraft.enabled} onChange={(e) => updatePromptDraft('enabled', e.target.checked)} />
                           启用
                         </label>
-                        <span className="sl-pc-meta">{promptDraft.override ? '已覆盖默认内容' : '使用系统默认内容'}</span>
+                        <span className="sl-pc-meta">当前作用域：{promptScope === 'global' ? '全局默认' : '当前项目'} · 当前生效：{promptOverrideLabel(promptDraft)}</span>
                       </div>
 
                       <section className={`sl-card${promptBasicDirty ? ' sl-section-dirty' : ''}`}>
@@ -1409,11 +1467,13 @@ export default function SkillLibrary() {
                         <details className="sl-card">
                           <summary style={{ cursor: 'pointer', fontWeight: 600 }}>查看系统默认版本</summary>
                           <div className="sl-sub" style={{ marginTop: '0.65rem' }}>
-                            这里展示未覆盖时真正会发送给 AI 的默认内容，用来对照当前草稿是否偏离。
+                            {promptScope === 'project'
+                              ? '这里展示项目覆盖之下的基线内容：若存在全局覆盖，则这里显示全局覆盖后的版本；否则显示代码默认版本。'
+                              : '这里展示代码内置的默认版本，用来对照当前全局覆盖改了什么。'}
                           </div>
                           <div className="sl-preview-inline" style={{ marginTop: '0.75rem' }}>
                             <div className="sl-preview-head">
-                              <div className="sl-preview-title">默认版本</div>
+                              <div className="sl-preview-title">{promptScope === 'project' ? '项目基线版本' : '代码默认版本'}</div>
                               <div className="sl-preview-meta">
                                 {promptDraft.prompt_key || '—'}
                                 {defaultRuntimePreview && (
