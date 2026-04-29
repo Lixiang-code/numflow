@@ -3,7 +3,7 @@ import React from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import { apiFetch, projectHeaders } from '../api'
-import { getInitAgentPrompt, pipelineStepLabel } from '../data/pipelineSteps'
+import { pipelineStepLabel } from '../data/pipelineSteps'
 import { createUniver, LocaleType, defaultTheme, type Univer } from '@univerjs/presets'
 import type { FUniver } from '@univerjs/core/lib/facade'
 import { UniverSheetsCorePreset, type FWorkbook } from '@univerjs/preset-sheets-core'
@@ -1424,12 +1424,10 @@ export default function Workbench() {
 
   const agentPlaceholder = useMemo(() => {
     if (agentMode === 'init' && pipeline?.next_expected_step) {
-      return `例如：完成「${pipelineStepLabel(pipeline.next_expected_step)}」…`
+      return `例如：完成「${pipelineStepLabel(pipeline.next_expected_step)}」；相关默认 SKILL 会自动暴露`
     }
     return '自然语言指令（需 DASHSCOPE_API_KEY）'
   }, [agentMode, pipeline?.next_expected_step])
-
-  const initHintStep = pipeline?.next_expected_step
 
   return (
     <div className="workbench">
@@ -1444,6 +1442,9 @@ export default function Workbench() {
           title="查看 / 继续 Agent 初始化进程"
         >
           ⚙ Agent 进程{pipeline && !pipeline.finished ? '（未完成）' : ''}
+        </Link>
+        <Link to={`/skills/${pid}`} className="link-btn">
+          [SKILL] 库
         </Link>
         <button
           type="button"
@@ -2029,19 +2030,6 @@ export default function Workbench() {
       </div>
 
       <footer className="wb-agent">
-        {agentMode === 'init' && initHintStep && (
-          <div className="pipe-agent-hint muted small" style={{ marginBottom: '0.35rem' }}>
-            <span>与流水线「下一步」联动：</span>
-            <button
-              type="button"
-              className="btn tiny"
-              disabled={agentBusy}
-              onClick={() => setAgentInput(getInitAgentPrompt(initHintStep))}
-            >
-              插入初始化模板
-            </button>
-          </div>
-        )}
         <form className="wb-agent-form" onSubmit={runAgent}>
           <select
             className="agent-mode"

@@ -16,6 +16,11 @@ from app.services.formula_exec import (
     register_formula,
 )
 from app.data.default_rules_02 import get_default_rules_payload
+from app.services.skill_library import (
+    get_skill_detail as _get_skill_detail,
+    list_skills as _list_skills,
+    render_skill_file as _render_skill_file,
+)
 from app.services.snapshot_ops import compare_snapshot, create_snapshot, list_snapshots
 from app.services.table_ops import create_dynamic_table, delete_dynamic_table, create_3d_table
 from app.services.tool_envelope import wrap_tool_payload
@@ -125,6 +130,51 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "type": "object",
                 "properties": {"table_name": {"type": "string"}},
                 "required": ["table_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_skills",
+            "description": "列出当前项目可用的 SKILL（可按 step_id 过滤）；返回 slug、标题、摘要、默认暴露与调用次数",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "step_id": {"type": "string"},
+                    "include_disabled": {"type": "boolean", "default": False},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_skill_detail",
+            "description": "读取指定 SKILL 的完整详情：基础信息、模块列表、启用状态、生成结果摘要",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill_slug": {"type": "string", "description": "SKILL 的 slug，建议先通过 list_skills 获取"},
+                },
+                "required": ["skill_slug"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "render_skill_file",
+            "description": "查看指定 SKILL 按当前用户配置生成出的实际 Markdown 文件内容",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill_slug": {"type": "string", "description": "SKILL 的 slug，建议先通过 list_skills 获取"},
+                },
+                "required": ["skill_slug"],
+                "additionalProperties": False,
             },
         },
     },
@@ -1717,6 +1767,48 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
         out = _dependency_edges(conn, args.get("table_name"), str(args.get("direction", "full")))
     elif name == "get_table_readme":
         out = _get_table_readme(conn, str(args.get("table_name", "")))
+    elif name == "list_skills":
+        items = _list_skills(
+            conn,
+            include_disabled=bool(args.get("include_disabled", False)),
+            include_modules=False,
+            project_slug=str(p.row["slug"]),
+        )
+        step_filter = str(args.get("step_id", "")).strip()
+        if step_filter:
+            items = [it for it in items if str(it.get("step_id", "")) == step_filter]
+        out = {
+            "items": [
+                {
+                    "id": it["id"],
+                    "slug": it["slug"],
+                    "title": it["title"],
+                    "step_id": it.get("step_id", ""),
+                    "summary": it.get("summary", ""),
+                    "default_exposed": bool(it.get("default_exposed")),
+                    "enabled": bool(it.get("enabled")),
+                    "usage_count": int(it.get("usage_count", 0)),
+                    "generated_file_path": it.get("generated_file_path", ""),
+                }
+                for it in items
+            ]
+        }
+    elif name == "get_skill_detail":
+        detail = _get_skill_detail(
+            conn,
+            str(args.get("skill_slug", "")),
+            project_slug=str(p.row["slug"]),
+            record_usage_event="tool_detail",
+        )
+        out = detail or {"error": "SKILL 不存在"}
+    elif name == "render_skill_file":
+        rendered = _render_skill_file(
+            conn,
+            str(args.get("skill_slug", "")),
+            project_slug=str(p.row["slug"]),
+            record_usage_event="render_file",
+        )
+        out = rendered or {"error": "SKILL 不存在"}
     elif name == "update_table_readme":
         if not p.can_write:
             out = {"error": "无写权限"}

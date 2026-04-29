@@ -11,10 +11,12 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict
+import sqlite3
+from typing import Any, Dict, Optional
 
 from app.config import QWEN_MODEL
 from app.services.qwen_client import get_client_for_model
+from app.services.skill_library import build_default_skill_prompt
 
 
 # === 全部步骤通用前缀（命名 + 术语 + 常数纪律），插在每段提示词最前 ===
@@ -282,6 +284,7 @@ def route_prompt(
     project_config_summary: str,
     *,
     model: str = None,
+    conn: Optional[sqlite3.Connection] = None,
 ) -> Dict[str, Any]:
     """决定本次对话使用哪段提示词。
 
@@ -289,6 +292,26 @@ def route_prompt(
       - hit=True：使用 DEFAULT_STEP_PROMPTS[step_id]
       - hit=False：让千问现编一段提示词
     """
+    if conn is not None:
+        try:
+            skill_bundle = build_default_skill_prompt(
+                conn,
+                step_id,
+                record_usage_events=True,
+            )
+        except Exception:
+            skill_bundle = {"skills": [], "prompt": ""}
+        skill_prompt = str(skill_bundle.get("prompt") or "").strip()
+        if skill_prompt:
+            skill_items = skill_bundle.get("skills") or []
+            return {
+                "hit": True,
+                "prompt": skill_prompt,
+                "gather_hint": _extract_gather_hint(skill_prompt),
+                "rationale": "skill_library_default_exposure",
+                "skills": skill_items,
+            }
+
     default_prompt = DEFAULT_STEP_PROMPTS.get(step_id, "")
     client = get_client_for_model(model or QWEN_MODEL)
 

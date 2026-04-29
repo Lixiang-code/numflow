@@ -89,6 +89,60 @@ def ensure_project_migrations(conn: sqlite3.Connection) -> None:
         """
     )
 
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS _skills (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slug TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            step_id TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT 'user',
+            template_key TEXT UNIQUE,
+            default_exposed INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            display_order INTEGER NOT NULL DEFAULT 9999,
+            usage_count INTEGER NOT NULL DEFAULT 0,
+            generated_file_path TEXT NOT NULL DEFAULT '',
+            generated_content TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS _skill_modules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            skill_id INTEGER NOT NULL,
+            module_key TEXT NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL DEFAULT '',
+            required INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(skill_id, module_key),
+            FOREIGN KEY(skill_id) REFERENCES _skills(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS _skill_usage_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            skill_id INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            step_id TEXT NOT NULL DEFAULT '',
+            meta_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(skill_id) REFERENCES _skills(id) ON DELETE CASCADE
+        )
+        """
+    )
+
     # 第三轮优化：表目录管理 / Matrix 表 / Calculator 注册
     _add_column_if_missing(conn, "_table_registry", "directory", "TEXT NOT NULL DEFAULT ''")
     _add_column_if_missing(conn, "_table_registry", "matrix_meta_json", "TEXT NOT NULL DEFAULT ''")

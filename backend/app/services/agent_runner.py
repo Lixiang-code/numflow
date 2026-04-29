@@ -71,6 +71,9 @@ READ_TOOLS = {
     "get_protected_cells",
     "get_dependency_graph",
     "get_table_readme",
+    "list_skills",
+    "get_skill_detail",
+    "render_skill_file",
     "get_algorithm_api_list",
     "run_validation",
     "list_snapshots",
@@ -105,6 +108,9 @@ _TOOL_LABELS: Dict[str, str] = {
     "update_table_readme": "更新表 README",
     "update_global_readme": "更新全局 README",
     "get_readme": "读取 README",
+    "list_skills": "列出 SKILL",
+    "get_skill_detail": "读取 SKILL 详情",
+    "render_skill_file": "查看 SKILL 文件",
     "validate_table": "校验表数据",
     "get_validation_report": "获取校验报告",
     "create_snapshot": "创建快照",
@@ -203,6 +209,8 @@ def _common_system(mode_norm: str) -> str:
             "【表目录管理】调用 create_table / create_matrix_table 时必须传 directory 参数（"
             "如 '基础/属性'、'分配/玩法属性'、'落地/装备'）以便目录化管理；"
             "可用 list_directories / set_table_directory 查询和移动。",
+            "【SKILL 库使用】当前步骤可能已自动暴露默认 SKILL；当你需要核对更细的玩法制作说明时，"
+            "优先使用 list_skills / get_skill_detail / render_skill_file 查询，不要凭空补写玩法规则。",
             "【2/4 项目上下文】信息收集（gather）阶段已主动读取了项目配置与现有表结构；"
             "design/review 阶段直接引用已收集信息，**无需**再重复调用读取工具。"
             "新建或修改「*系统_落地」、各子系统**行轴**、消耗与属性投放时，**须先** "
@@ -630,13 +638,14 @@ def run_agent_sse(
     cfg_summary = _project_config_summary(p)
     yield _emit("route", {"type": "log", "message": f"提示词路由：step={step_id or '(none)'}"})
     try:
-        route = route_prompt(step_id, user_message, cfg_summary, model=_model)
+        route = route_prompt(step_id, user_message, cfg_summary, model=_model, conn=p.conn)
     except Exception as e:  # noqa: BLE001
         route = {
             "hit": False,
             "prompt": "",
             "gather_hint": "",
             "rationale": f"route_exception: {e!r}",
+            "skills": [],
         }
     yield _emit(
         "route",
@@ -648,6 +657,7 @@ def run_agent_sse(
             "route_system": _ROUTE_SYSTEM_PROMPT,
             "rationale": route.get("rationale", ""),
             "step_id": step_id,
+            "skills": route.get("skills", []),
         },
     )
 
@@ -1326,4 +1336,3 @@ def _run_recovery_sse(
                 })
             except Exception as e:  # noqa: BLE001
                 yield _emit("execute", {"type": "log", "message": f"工具循环异常: {e!r}"})
-
