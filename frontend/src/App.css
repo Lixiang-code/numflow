@@ -2150,6 +2150,85 @@ pre {
 .ps-step-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ps-step-time { font-size: 0.68rem; color: var(--text-muted); flex-shrink: 0; }
 
+/* 玩法规划表清单（gameplay_planning 步骤完成后在侧边栏展示） */
+.ps-sidebar-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.45rem 0.9rem 0.3rem;
+  font-size: 0.73rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+  margin-top: 0.1rem;
+  flex-shrink: 0;
+}
+.ps-gameplay-tables {
+  flex-shrink: 0;
+  overflow: hidden;
+}
+.ps-gameplay-table-list {
+  list-style: none;
+  margin: 0;
+  padding: 0.2rem 0 0.5rem;
+  overflow-y: auto;
+  max-height: 280px;
+}
+.ps-gameplay-table-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.32rem 0.9rem;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  border-left: 3px solid transparent;
+  transition: background 0.1s;
+}
+.ps-gameplay-table-item:hover { background: var(--green-light); }
+.ps-gameplay-table-item.ps-gt-done {
+  color: var(--text-muted);
+  border-left-color: var(--green);
+}
+.ps-gameplay-table-item.ps-gt-active {
+  color: var(--text);
+  font-weight: 600;
+  border-left-color: var(--green);
+  background: var(--green-light);
+}
+.ps-gt-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--border);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.65rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.ps-gameplay-table-item.ps-gt-done .ps-gt-icon { background: var(--green); color: #fff; }
+.ps-gameplay-table-item.ps-gt-active .ps-gt-icon { background: var(--green-dark, #1b5e20); color: #fff; }
+.ps-gt-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ps-gt-badge {
+  font-size: 0.62rem;
+  padding: 0.05rem 0.32rem;
+  border-radius: 8px;
+  background: var(--border);
+  color: var(--text-muted);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.ps-gt-badge.done { background: var(--green); color: #fff; }
+.ps-gt-badge.active { background: var(--green-dark, #1b5e20); color: #fff; }
+
 /* ── 主体 ── */
 .ps-main {
   flex: 1;

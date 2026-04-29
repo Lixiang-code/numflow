@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import time
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -29,65 +31,65 @@ def _readme_setting_key(step_id: str) -> str:
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
-# 与第3轮优化文档对齐的稳定 ID（顺序约束）—— 第3.5轮：HP 单独成步
+# 稳定 ID 顺序（不含动态展开的 gameplay_table.* 子步）
 PIPELINE_STEPS_BASE: List[str] = [
     "environment_global_readme",
+    "gameplay_planning",
     "base_attribute_framework",
     "hp_formula_derivation",
     "gameplay_allocation",
     "cultivation_resource_framework",
     "cultivation_allocation",
-    "gameplay_landing_tables",
+    # gameplay_table.<id> 步骤由 _gameplay_table_registry 动态生成
 ]
-# Backward compat alias（部分老代码引用 PIPELINE_STEPS）
+
+# Backward compat alias
 PIPELINE_STEPS: List[str] = PIPELINE_STEPS_BASE
 
-# step 11 默认子系统集合（可被项目 game_systems 覆盖）
-LANDING_SUBSYSTEMS_DEFAULT: List[str] = [
-    "equip", "gem", "mount", "wing", "fashion", "dungeon", "skill",
-]
 
-
-def _enabled_landing_subsystems(conn) -> List[str]:
-    """从 fixed_layer_config.game_systems 推导启用的子系统列表。"""
+def _get_registered_gameplay_tables(conn) -> List[Dict[str, Any]]:
+    """从 _gameplay_table_registry 读取所有已注册的玩法表，按 order_num 排序。"""
     try:
-        flc = get_setting(conn, "fixed_layer_config") or {}
-        gs = (flc or {}).get("game_systems") or {}
+        rows = conn.execute(
+            "SELECT table_id, display_name, readme, status, order_num, dependencies "
+            "FROM _gameplay_table_registry ORDER BY order_num, table_id"
+        ).fetchall()
+        result = []
+        for row in rows:
+            result.append({
+                "table_id": row[0],
+                "display_name": row[1],
+                "readme": row[2] or "",
+                "status": row[3] or "未开始",
+                "order_num": row[4] or 0,
+                "dependencies": json.loads(row[5] or "[]"),
+            })
+        return result
     except Exception:  # noqa: BLE001
-        gs = {}
-    enabled: List[str] = []
-    # gs 形如 {"equip": True, "gem": True, "ai_design_subsystems": True}
-    if isinstance(gs, dict):
-        for k, v in gs.items():
-            if k in ("ai_design_subsystems", "subsystemsByPath"):
-                continue
-            if v in (True, "true", 1, "1"):
-                enabled.append(str(k))
-    if not enabled:
-        return list(LANDING_SUBSYSTEMS_DEFAULT)
-    # 仅保留已知子系统（避免乱入）
-    out = [s for s in enabled if s in LANDING_SUBSYSTEMS_DEFAULT]
-    return out or list(LANDING_SUBSYSTEMS_DEFAULT)
+        return []
 
 
 def _expand_pipeline_steps(conn) -> List[str]:
-    """把 step 11 展开为 per-system 子步。"""
-    base = list(PIPELINE_STEPS_BASE[:-1])
-    subs = _enabled_landing_subsystems(conn)
-    return base + [f"gameplay_landing_tables.{s}" for s in subs]
+    """把基础步骤 + 动态玩法表步骤展开为完整列表。"""
+    base = list(PIPELINE_STEPS_BASE)
+    tables = _get_registered_gameplay_tables(conn)
+    if not tables:
+        return base
+    return base + [f"gameplay_table.{t['table_id']}" for t in tables]
 
 
 def _normalize_completed(done: List[str], expanded: List[str]) -> List[str]:
-    """兼容旧库：若 'gameplay_landing_tables' 在 done 中，则视为所有子步均已完成。"""
+    """兼容旧库：若 'gameplay_landing_tables' 在 done 中视为所有子步均已完成。
+    同时处理新的 gameplay_table.* 步骤。"""
     out: List[str] = []
     has_legacy = "gameplay_landing_tables" in done
-    sub_done = {s for s in done if s.startswith("gameplay_landing_tables.")}
     for s in expanded:
         if s in done:
             out.append(s)
-        elif s.startswith("gameplay_landing_tables.") and (has_legacy or s in sub_done):
-            out.append(s)
-        elif s in done:
+        elif s.startswith("gameplay_table.") and has_legacy:
+            # 旧库有 gameplay_landing_tables → 跳过（不追溯完成）
+            pass
+        elif s.startswith("gameplay_landing_tables.") and has_legacy:
             out.append(s)
     return out
 
@@ -125,8 +127,6 @@ def pipeline_advance(body: AdvanceBody, p: ProjectDB = Depends(get_project_write
         raise HTTPException(status_code=400, detail="流水线已完成")
     expected = expanded[n]
     if body.step != expected:
-        # 兼容客户端用旧 step 名 'gameplay_landing_tables' 推进的情况：
-        # 若 expected 是 gameplay_landing_tables.* 子步，且客户端送的是基名，提示错误。
         expected_id = expected.split(".")[0]
         expected_spec = get_step_spec(expected) or get_step_spec(expected_id)
         raise HTTPException(
@@ -142,7 +142,6 @@ def pipeline_advance(body: AdvanceBody, p: ProjectDB = Depends(get_project_write
     nxt = expanded[n + 1] if n + 1 < len(expanded) else ""
     set_pipeline_state(p.conn, current_step=nxt, completed_steps=done)
 
-    # 自动落 spec 模板：仅在没有人写过 step README 时回填
     spec = get_step_spec(expected) or get_step_spec(expected.split(".")[0])
     readme_seeded = False
     if spec is not None:
@@ -162,7 +161,6 @@ def pipeline_advance(body: AdvanceBody, p: ProjectDB = Depends(get_project_write
         note=f"流水线自动快照：完成步骤 {expected}",
     )
 
-    # 自动跑一次全表校验，把 unknown 状态收敛掉，并把违规数注入下一步上下文
     try:
         report = build_validation_report(p.conn)
         validation_summary = {
@@ -273,3 +271,10 @@ def pipeline_step_session_clear(step_id: str, p: ProjectDB = Depends(get_project
     except Exception:  # noqa: BLE001
         pass
     return {"ok": True, "step_id": step_id}
+
+
+@router.get("/gameplay-tables")
+def pipeline_gameplay_tables(p: ProjectDB = Depends(get_project_read)):
+    """返回已注册的玩法表清单（由 gameplay_planning 步骤的 Agent 注册）。"""
+    tables = _get_registered_gameplay_tables(p.conn)
+    return {"tables": tables}

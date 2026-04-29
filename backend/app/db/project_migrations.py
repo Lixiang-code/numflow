@@ -237,4 +237,29 @@ def ensure_project_migrations(conn: sqlite3.Connection) -> None:
     except Exception:  # noqa: BLE001
         pass
 
+    # 玩法规划：玩法表注册清单
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS _gameplay_table_registry (
+            table_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            readme TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '未开始',
+            order_num INTEGER NOT NULL DEFAULT 0,
+            dependencies TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+    # SKILL库迁移：gameplay_landing_tables* → gameplay_table*（动态流水线重构）
+    try:
+        conn.execute(
+            "UPDATE _skills SET step_id = REPLACE(step_id, 'gameplay_landing_tables', 'gameplay_table') "
+            "WHERE step_id LIKE 'gameplay_landing_tables%'"
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
     conn.commit()

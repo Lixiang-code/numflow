@@ -198,6 +198,17 @@ def init_project_db(conn: sqlite3.Connection, *, seed_readme: bool = True) -> No
             UNIQUE(prompt_override_id, module_key),
             FOREIGN KEY(prompt_override_id) REFERENCES _prompt_overrides(id) ON DELETE CASCADE
         );
+
+        CREATE TABLE IF NOT EXISTS _gameplay_table_registry (
+            table_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            readme TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '未开始',
+            order_num INTEGER NOT NULL DEFAULT 0,
+            dependencies TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         """
     )
     # 增量迁移：为旧库补 _constants.tags（JSON 数组字符串）

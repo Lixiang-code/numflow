@@ -52,6 +52,7 @@ def _extract_gather_hint(prompt: str) -> str:
         "update_table_readme", "set_project_setting", "bulk_register",
         "register_formula", "execute_formula", "glossary_register",
         "const_tag_register", "glossary_batch", "update_rows",
+        "register_gameplay_table", "set_gameplay_table_status",
     )
     kept: list[str] = []
     for line in stripped.splitlines():
@@ -189,6 +190,45 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
         "  4. README 列出 (玩法×资源) 切片示例。\n"
         "★ register_calculator 必须含 grain 形参；brief ≥8 字符。\n"
         "★ 留 0 的单元格在 README 注明设计原因（scope 隔离）。"
+    ),
+    "gameplay_planning": (
+        _NAMING_HEADER
+        + "【步骤 2/N 玩法规划】\n"
+        "目标：分析游戏配置，规划所有需要单独出落地表的玩法系统，注册到玩法表清单。\n"
+        "操作：\n"
+        "  1. `get_project_config` → 读取 fixed_layer_config.game_systems 了解启用的玩法系统；\n"
+        "  2. `get_default_system_rules` → 了解每个系统的默认子维度约束；\n"
+        "  3. 分析每个启用的父系统，拆分出需要单独建表的子维度（如 equip → equip_base + equip_enhance + equip_refine）；\n"
+        "  4. 规划依赖关系：有互相引用关系的表（如 equip_enhance 引用 equip_base 数值）需在 dependencies 中声明；\n"
+        "  5. 按合理顺序（依赖先行）设置 order_num（从 1 开始）；\n"
+        "  6. 逐个调用 `register_gameplay_table(table_id, display_name, readme, order_num, dependencies)` 完成注册；\n"
+        "     · table_id：英文 snake_case（如 equip_enhance）\n"
+        "     · display_name：中文（如「装备强化落地表」）\n"
+        "     · readme：至少 50 字，说明玩法目标、关键列、依赖关系\n"
+        "  7. 最后调用 `get_gameplay_table_list` 确认所有表均已注册且状态为「未开始」。\n"
+        "★ 本步严禁调用 create_table / write_cells / setup_level_table 等建表写数工具。\n"
+        "★ 每个启用的玩法系统（equip/gem/mount/wing/fashion/dungeon/skill）至少注册 1 张表；"
+        "根据系统复杂度和 02 默认细则决定是否拆子表。\n"
+        "验收：get_gameplay_table_list 返回非空列表，所有表状态均为「未开始」。"
+    ),
+    "gameplay_table": (
+        _NAMING_HEADER
+        + "【玩法落地表执行步骤】\n"
+        "目标：执行玩法规划中指定的某一张落地表的完整数值设计。\n"
+        "操作：\n"
+        "  1. `get_gameplay_table_list` → 查看本表的 readme 和依赖关系；\n"
+        "  2. `set_gameplay_table_status(table_id, '进行中')` → 标记开始；\n"
+        "  3. gather 阶段：读取 get_project_config / get_table_list / 相关已完成表；\n"
+        "     · 若有 dependencies，先通过 read_table / get_table_readme 了解被依赖表的结构；\n"
+        "     · list_exposed_params(本步骤 ID) → 看上游暴露的参数；\n"
+        "  4. design/execute：根据 readme 设计意图完成该表的完整数值（表结构/公式/属性/消耗）；\n"
+        "     · 所有属性值通过 call_calculator(gameplay_attr_alloc_lookup,...) 取，不硬编码；\n"
+        "     · 资源消耗通过 call_calculator(gameplay_res_alloc_lookup,...) 取；\n"
+        "     · 概率/百分比列：[0, 0.95] 小数 + 0.00% 格式；\n"
+        "  5. 完成后：`set_gameplay_table_status(table_id, '已完成')` → 标记完成；\n"
+        "  6. update_table_readme 更新表 README，说明数值设计决策。\n"
+        "★ 具体设计方法参考本步对应的 SKILL 和 readme 中的指引。\n"
+        "★ 若需向兄弟系统暴露参数，调用 expose_param_to_subsystems。"
     ),
     "gameplay_landing_tables": (
         _NAMING_HEADER
@@ -441,7 +481,12 @@ def route_prompt(
                 "route_system": get_route_system_prompt(conn),
             }
 
-    default_prompt = get_default_step_prompt(step_id, conn) if step_id in DEFAULT_STEP_PROMPTS else ""
+    # 确定步骤默认提示词：精确匹配 → 父步骤 fallback（如 gameplay_table.equip_enhance → gameplay_table）
+    if step_id in DEFAULT_STEP_PROMPTS:
+        default_prompt = get_default_step_prompt(step_id, conn)
+    else:
+        base_id = step_id.split(".")[0] if "." in step_id else ""
+        default_prompt = get_default_step_prompt(base_id, conn) if base_id in DEFAULT_STEP_PROMPTS else ""
     client = get_client_for_model(model or QWEN_MODEL)
 
     judge_user = (

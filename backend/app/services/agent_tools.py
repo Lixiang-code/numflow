@@ -1268,6 +1268,65 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
             },
         },
     },
+    # ─── 玩法规划：玩法表注册工具 ────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "register_gameplay_table",
+            "description": (
+                "在'玩法规划'步骤中注册一个玩法落地表到规划清单。\n"
+                "每个表仅注册一次（同名 upsert），注册后状态自动为'未开始'。\n"
+                "table_id 必须是英文 snake_case；display_name 必须是中文。\n"
+                "readme 需说明该表的玩法设计目标、关键列、与其他表的依赖关系。\n"
+                "order_num 决定执行顺序（越小越优先），dependencies 列出需要先完成的其他 table_id。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_id": {"type": "string", "description": "英文 snake_case 标识符，如 equip_enhance"},
+                    "display_name": {"type": "string", "description": "中文展示名，如 「装备强化落地表」"},
+                    "readme": {"type": "string", "description": "该玩法表的设计说明（玩法目标/关键列/依赖关系/验收标准），至少 50 字"},
+                    "order_num": {"type": "integer", "description": "推荐执行顺序编号（1开始，越小越优先）"},
+                    "dependencies": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "依赖的其他 table_id 列表（需在本表之前完成），如 ['equip_base']",
+                        "default": [],
+                    },
+                },
+                "required": ["table_id", "display_name", "readme", "order_num"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_gameplay_table_list",
+            "description": "读取所有已注册的玩法落地表及其当前状态（未开始/进行中/已完成）、设计说明和依赖关系。",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_gameplay_table_status",
+            "description": (
+                "更新玩法落地表的执行状态。\n"
+                "在开始设计某个玩法表前调用（状态=进行中），完成后调用（状态=已完成）。\n"
+                "状态只能向前推进：未开始 → 进行中 → 已完成。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_id": {"type": "string", "description": "玩法表的英文标识符"},
+                    "status": {"type": "string", "enum": ["进行中", "已完成"], "description": "新状态"},
+                },
+                "required": ["table_id", "status"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 
@@ -1338,6 +1397,9 @@ _TOOL_TITLE_ZH: Dict[str, str] = {
     "list_exposed_params": "列出已暴露参数",
     "sparse_sample": "均匀采样表数据",
     "create_3d_table": "创建三维数据表",
+    "register_gameplay_table": "注册玩法落地表",
+    "get_gameplay_table_list": "读取玩法表清单",
+    "set_gameplay_table_status": "更新玩法表状态",
 }
 
 _TOOL_GROUP_BY_NAME: Dict[str, str] = {
@@ -1397,6 +1459,9 @@ _TOOL_GROUP_BY_NAME: Dict[str, str] = {
     "list_exposed_params": "advanced_modeling",
     "sparse_sample": "advanced_modeling",
     "create_3d_table": "advanced_modeling",
+    "register_gameplay_table": "advanced_modeling",
+    "get_gameplay_table_list": "advanced_modeling",
+    "set_gameplay_table_status": "advanced_modeling",
 }
 
 
@@ -1457,6 +1522,9 @@ _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "list_exposed_params": "列出当前已暴露给子系统的参数清单。",
     "sparse_sample": "对大型表进行均匀采样，获取代表性数据子集。",
     "create_3d_table": "新建一个支持多维度切片的三维数据表。",
+    "register_gameplay_table": "在玩法规划步骤中将一个玩法落地表注册到规划清单。",
+    "get_gameplay_table_list": "列出所有已注册的玩法落地表及其执行状态。",
+    "set_gameplay_table_status": "将玩法落地表的状态更新为进行中或已完成。",
 }
 
 
@@ -2574,6 +2642,99 @@ def _setup_level_table(
     }
 
 
+def _register_gameplay_table(
+    conn,
+    table_id: str,
+    display_name: str,
+    readme: str,
+    order_num: int,
+    dependencies: list,
+) -> Dict[str, Any]:
+    """注册玩法落地表到 _gameplay_table_registry。"""
+    import time as _time
+    if not table_id or not table_id.replace("_", "").isalnum():
+        return {"status": "error", "data": None, "warnings": [f"table_id 必须为英文 snake_case: {table_id!r}"], "blocked_cells": []}
+    if not display_name:
+        return {"status": "error", "data": None, "warnings": ["display_name 不能为空"], "blocked_cells": []}
+    now = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
+    deps_json = json.dumps(dependencies or [], ensure_ascii=False)
+    try:
+        conn.execute(
+            """
+            INSERT INTO _gameplay_table_registry
+                (table_id, display_name, readme, status, order_num, dependencies, created_at, updated_at)
+            VALUES (?, ?, ?, '未开始', ?, ?, ?, ?)
+            ON CONFLICT(table_id) DO UPDATE SET
+                display_name=excluded.display_name,
+                readme=excluded.readme,
+                order_num=excluded.order_num,
+                dependencies=excluded.dependencies,
+                updated_at=excluded.updated_at
+            """,
+            (table_id, display_name, readme, order_num, deps_json, now, now),
+        )
+        conn.commit()
+        return {
+            "status": "success",
+            "data": {
+                "table_id": table_id,
+                "display_name": display_name,
+                "order_num": order_num,
+                "status": "未开始",
+            },
+            "warnings": [],
+            "blocked_cells": [],
+        }
+    except Exception as e:  # noqa: BLE001
+        return {"status": "error", "data": None, "warnings": [str(e)], "blocked_cells": []}
+
+
+def _get_gameplay_table_list(conn) -> Dict[str, Any]:
+    """读取所有已注册的玩法落地表。"""
+    try:
+        rows = conn.execute(
+            "SELECT table_id, display_name, readme, status, order_num, dependencies "
+            "FROM _gameplay_table_registry ORDER BY order_num, table_id"
+        ).fetchall()
+        items = []
+        for row in rows:
+            items.append({
+                "table_id": row[0],
+                "display_name": row[1],
+                "readme": (row[2] or "")[:500],
+                "status": row[3] or "未开始",
+                "order_num": row[4] or 0,
+                "dependencies": json.loads(row[5] or "[]"),
+            })
+        return {"status": "success", "data": {"tables": items, "total": len(items)}, "warnings": [], "blocked_cells": []}
+    except Exception as e:  # noqa: BLE001
+        return {"status": "error", "data": None, "warnings": [str(e)], "blocked_cells": []}
+
+
+def _set_gameplay_table_status(conn, table_id: str, status: str) -> Dict[str, Any]:
+    """更新玩法落地表的执行状态。"""
+    import time as _time
+    if status not in ("进行中", "已完成"):
+        return {"status": "error", "data": None, "warnings": [f"非法状态: {status!r}，只允许 '进行中' 或 '已完成'"], "blocked_cells": []}
+    now = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
+    try:
+        cur = conn.execute(
+            "UPDATE _gameplay_table_registry SET status=?, updated_at=? WHERE table_id=?",
+            (status, now, table_id),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            return {"status": "error", "data": None, "warnings": [f"找不到 table_id: {table_id!r}，请先 register_gameplay_table"], "blocked_cells": []}
+        return {
+            "status": "success",
+            "data": {"table_id": table_id, "new_status": status},
+            "warnings": [],
+            "blocked_cells": [],
+        }
+    except Exception as e:  # noqa: BLE001
+        return {"status": "error", "data": None, "warnings": [str(e)], "blocked_cells": []}
+
+
 def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: ProjectDB) -> str:
     conn = p.conn
     args: Dict[str, Any] = {}
@@ -3048,6 +3209,23 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
             out = _expose_param(conn, args)
     elif name == "list_exposed_params":
         out = _list_exposed_params(conn, str(args.get("target_step", "")))
+    elif name == "register_gameplay_table":
+        out = _register_gameplay_table(
+            conn,
+            table_id=str(args.get("table_id", "")),
+            display_name=str(args.get("display_name", "")),
+            readme=str(args.get("readme", "")),
+            order_num=int(args.get("order_num", 0)),
+            dependencies=args.get("dependencies") if isinstance(args.get("dependencies"), list) else [],
+        )
+    elif name == "get_gameplay_table_list":
+        out = _get_gameplay_table_list(conn)
+    elif name == "set_gameplay_table_status":
+        out = _set_gameplay_table_status(
+            conn,
+            table_id=str(args.get("table_id", "")),
+            status=str(args.get("status", "")),
+        )
     elif name == "sparse_sample":
         out = _sparse_sample(conn, args)
     elif name == "create_3d_table":

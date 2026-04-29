@@ -109,6 +109,51 @@ PIPELINE_STEP_SPECS: List[StepSpec] = [
         upstream_steps=[],
     ),
     StepSpec(
+        step_id="gameplay_planning",
+        title_zh="玩法规划",
+        goal=(
+            "在 environment_global_readme 完成后、基础属性框架开始前，由 AI 分析游戏配置，"
+            "规划出所有需要单独出落地表的玩法系统，确定表清单、执行顺序与依赖关系，"
+            "并通过 register_gameplay_table 工具将每张表注册为「未开始」状态。\n"
+            "本步骤产出的玩法表清单将在 cultivation_allocation 完成后依次执行。\n"
+            "每张表必须有明确的设计目标、关键列说明和与其他表的依赖关系。"
+        ),
+        inputs=[
+            "get_project_config（核心定义：游戏类型/玩法系统树/属性体系）",
+            "get_default_system_rules（02 默认细则与各系统子维度约束）",
+            "全局 README（上一步已写入）",
+        ],
+        outputs=[
+            "_gameplay_table_registry：所有玩法落地表注册条目（状态=未开始）",
+            "每个注册项含：table_id / display_name / readme / order_num / dependencies",
+        ],
+        required_tables=[],
+        required_columns={},
+        acceptance=[
+            "所有启用的玩法系统（equip/gem/mount/wing等）都有对应的落地表注册项",
+            "每张表的 readme 说明了玩法目标、关键列含义、与其他表的依赖关系",
+            "order_num 已合理排序（有依赖的表排在被依赖表之后）",
+            "get_gameplay_table_list 返回非空列表，所有状态均为「未开始」",
+            "本步不创建任何业务数值表，只调用 register_gameplay_table 完成注册",
+        ],
+        agent_hint=(
+            "gather 阶段：先 get_project_config + get_default_system_rules 了解游戏类型与启用的玩法系统。\n"
+            "design 阶段：分析每个启用的玩法系统（父系统可能对应多张落地表，如装备=基础+强化+精炼），"
+            "规划出完整表清单，明确每张表的设计目标、关键列、与其他表的关系。\n"
+            "execute 阶段：逐个调用 register_gameplay_table 注册所有表（可并行批量）；"
+            "最后调用 get_gameplay_table_list 确认注册成功。\n"
+            "本步严禁调用 create_table / write_cells 等建表写数工具。"
+        ),
+        common_pitfalls=[
+            "把父系统当一张表（应拆子系统：equip_base / equip_enhance / equip_refine）",
+            "忽略游戏配置中的启用状态，把未启用的玩法也注册进来",
+            "table_id 使用中文或非 snake_case（必须英文）",
+            "readme 太短（少于50字），没有说明关键列和依赖关系",
+            "dependencies 没有正确填写（有依赖的表必须在 dependencies 中列出被依赖的 table_id）",
+        ],
+        upstream_steps=["environment_global_readme"],
+    ),
+    StepSpec(
         step_id="base_attribute_framework",
         title_zh="基本属性基础框架表（除 HP）",
         goal=(
@@ -339,9 +384,11 @@ PIPELINE_STEP_SPECS: List[StepSpec] = [
         upstream_steps=["cultivation_resource_framework", "gameplay_allocation"],
     ),
     StepSpec(
-        step_id="gameplay_landing_tables",
+        step_id="gameplay_table",
         title_zh="玩法系统落地表",
         goal=(
+            "执行玩法规划中已注册的某一张落地表：先调用 set_gameplay_table_status 标记为「进行中」，"
+            "完成数值设计后标记为「已完成」。\n"
             "把每个玩法/子系统的具体机制（穿戴、合成、洗练、掉落、强化…）落到具体的"
             "属性投放、消耗、概率与权重。子步按子系统（equip_base / equip_enhance / "
             "gem_synth / mount_advance / dungeon_main 等）独立产出，每个子步只负责一张表。"
@@ -410,41 +457,41 @@ _LANDING_SUB_TITLES: Dict[str, str] = {
 }
 
 
-def _build_landing_sub_spec(sub: str) -> StepSpec:
-    base = _BY_ID.get("gameplay_landing_tables")
-    title = _LANDING_SUB_TITLES.get(sub, f"{sub} 落地表")
+def _build_gameplay_table_sub_spec(table_id: str) -> StepSpec:
+    base = _BY_ID.get("gameplay_table")
+    title = _LANDING_SUB_TITLES.get(table_id, f"{table_id} 落地表")
     extra_acceptance: List[str] = []
-    if sub == "dungeon":
+    if table_id == "dungeon":
         extra_acceptance = [
             "副本_落地 必含列：dungeon_id / open_level / ticket_cost / daily_max_count / cumulative_ticket / 性价比",
             "cumulative_ticket = CUMSUM_TO_HERE(@@同表[ticket_cost])，注册公式后必须 execute（无空值）",
             "性价比禁严格单调递增；通关门槛由 IFS 条件公式批量生成",
         ]
-    elif sub == "equip":
+    elif table_id == "equip":
         extra_acceptance = [
             "暴击/闪避/命中/抗性等百分比列存为 [0, 0.95] 小数，number_format='0.00%'",
             "暴伤存小数（150% → 1.5），上限 ≤10，number_format='0.00%'",
             "主属性覆盖比若为常量请用 const_register('equip_main_attr_ratio', 0.6) 后用 ${equip_main_attr_ratio} 引用",
         ]
-    elif sub == "gem":
+    elif table_id == "gem":
         extra_acceptance = [
             "宝石按品阶/合成轴（3 同阶→1 高 1 品），不要按 1..N 标准等级拉行",
             "若属性值同时受宝石类型与品阶/等级影响，必须用 create_3d_table 建三维数据表，不要用 level=1 伪装二维表",
             "颜色/属性绑定与解锁门槛在 README 写清",
         ]
-    elif sub == "mount":
+    elif table_id == "mount":
         extra_acceptance = ["开放等级 30 默认；进阶曲线非线性；列必须有玩法含义"]
     return StepSpec(
-        step_id=f"gameplay_landing_tables.{sub}",
+        step_id=f"gameplay_table.{table_id}",
         title_zh=title,
-        goal=(base.goal if base else "") + f"\n（本子步只产出 {sub} 子系统的落地表）",
+        goal=(base.goal if base else "") + f"\n（本子步只产出 {table_id} 子系统的落地表）",
         inputs=list(base.inputs) if base else [],
         outputs=list(base.outputs) if base else [],
         required_tables=list(base.required_tables) if base else [],
         required_columns=dict(base.required_columns) if base else {},
         acceptance=list(base.acceptance) + extra_acceptance if base else extra_acceptance,
         agent_hint=(base.agent_hint if base else "")
-        + f"\n本子步范围={sub}：禁止越界产出其他系统的表。",
+        + f"\n本子步范围={table_id}：禁止越界产出其他系统的表。",
         common_pitfalls=list(base.common_pitfalls) if base else [],
         upstream_steps=list(base.upstream_steps) if base else [],
     )
@@ -453,10 +500,13 @@ def _build_landing_sub_spec(sub: str) -> StepSpec:
 def get_step_spec(step_id: str) -> Optional[StepSpec]:
     if step_id in _BY_ID:
         return _BY_ID[step_id]
+    if step_id.startswith("gameplay_table."):
+        sub = step_id.split(".", 1)[1]
+        return _build_gameplay_table_sub_spec(sub)
+    # 向后兼容旧的 gameplay_landing_tables.* 前缀
     if step_id.startswith("gameplay_landing_tables."):
         sub = step_id.split(".", 1)[1]
-        if sub in _LANDING_SUB_TITLES:
-            return _build_landing_sub_spec(sub)
+        return _build_gameplay_table_sub_spec(sub)
     return None
 
 

@@ -1,26 +1,24 @@
-/** 与 backend `PIPELINE_STEPS_BASE`（第3轮精简 6 步）顺序与 id 一致 */
+/** 与 backend `PIPELINE_STEPS_BASE` 顺序与 id 一致 */
 export const PIPELINE_STEP_LABELS: Record<string, string> = {
   environment_global_readme: '环境与全局说明',
+  gameplay_planning: '玩法规划',
   base_attribute_framework: '基础属性框架',
   hp_formula_derivation: 'HP 反推公式',
   gameplay_allocation: '玩法属性分配（matrix）',
   cultivation_resource_framework: '养成资源框架',
   cultivation_allocation: '养成属性分配（matrix）',
-  gameplay_landing_tables: '落地表（子系统）',
-  // per-system 子步
-  'gameplay_landing_tables.equip': '落地：装备',
-  'gameplay_landing_tables.gem': '落地：宝石',
-  'gameplay_landing_tables.mount': '落地：坐骑',
-  'gameplay_landing_tables.wing': '落地：翅膀',
-  'gameplay_landing_tables.fashion': '落地：时装',
-  'gameplay_landing_tables.dungeon': '落地：副本',
-  'gameplay_landing_tables.skill': '落地：技能',
+  // gameplay_table.* 步骤由后端动态生成
 }
 
 export function pipelineStepLabel(stepId: string | null | undefined): string {
   if (!stepId) return '—'
   if (PIPELINE_STEP_LABELS[stepId]) return PIPELINE_STEP_LABELS[stepId]
-  // 未注册的子步：根据 ID 推导
+  // 动态玩法表步骤
+  if (stepId.startsWith('gameplay_table.')) {
+    const sub = stepId.slice('gameplay_table.'.length)
+    return `落地：${sub}`
+  }
+  // 向后兼容旧的 gameplay_landing_tables.* 前缀
   if (stepId.startsWith('gameplay_landing_tables.')) {
     const sub = stepId.slice('gameplay_landing_tables.'.length)
     return `落地：${sub}`

@@ -63,6 +63,14 @@ type PipelineStatus = {
   next_expected_step: string | null
   finished?: boolean
 }
+type GameplayTable = {
+  table_id: string
+  display_name: string
+  readme: string
+  status: '未开始' | '进行中' | '已完成'
+  order_num: number
+  dependencies: string[]
+}
 type ProjectInfo = {
   name: string
   game_type?: string
@@ -268,6 +276,7 @@ function PhaseProgress({ current, status }: { current: string; status: string })
 // ─── step init messages ───────────────────────────────────────────────────────
 const STEP_INIT_MESSAGES: Record<string, string> = {
   environment_global_readme: '请初始化本项目，阅读项目配置，建立全局 README，说明游戏数值体系的整体结构、设计目标与各模块关系。',
+  gameplay_planning: '请分析游戏配置，规划所有需要单独出落地表的玩法系统，使用 register_gameplay_table 工具注册每张表（含设计目标 README 和推荐顺序）。注意：本步仅注册规划，不创建任何数值表。',
   base_attribute_framework: '请根据游戏类型和属性配置，构建基本属性基础框架表（level_growth、stat_base 等），包含等级范围、成长系数基础定义。',
   gameplay_attribute_scheme: '请构建玩法系统属性方案表，明确各玩法子系统（战斗/养成/经济等）的属性分配策略，写出方案 README。',
   gameplay_allocation_tables: '请构建玩法系统属性分配表，将各玩法属性方案落地为具体数值，每个子系统一张表，含 README。',
@@ -278,10 +287,17 @@ const STEP_INIT_MESSAGES: Record<string, string> = {
   cultivation_allocation_tables: '请构建养成资源分配表，针对各养成路径（等级升级、技能升级、装备强化等）给出详细的资源消耗数值。',
   cultivation_quant_tables: '请构建养成资源定量表，整合所有养成路径的资源消耗，给出全生命周期的资源总量预算。',
   gameplay_landing_tables: '请构建玩法系统落地表，将各玩法属性表与养成数值整合，输出最终可供验证的完整数值落地表。',
+  gameplay_table: '请查看本步骤需要执行的玩法落地表（通过 get_gameplay_table_list 确认），先标记为「进行中」，完成完整数值设计后标记为「已完成」。',
 }
 
 function buildInitMessage(stepId: string, projectInfo: ProjectInfo, completedSteps: string[]): string {
-  const custom = STEP_INIT_MESSAGES[stepId]
+  let custom: string | undefined
+  if (stepId.startsWith('gameplay_table.')) {
+    const tableId = stepId.slice('gameplay_table.'.length)
+    custom = `请执行玩法规划中已注册的「${tableId}」落地表：\n1. 先调用 get_gameplay_table_list 查看该表的 readme 和依赖关系\n2. 调用 set_gameplay_table_status 标记为「进行中」\n3. 完成完整数值设计（参考该表 readme 中的设计目标和关键列）\n4. 完成后调用 set_gameplay_table_status 标记为「已完成」`
+  } else {
+    custom = STEP_INIT_MESSAGES[stepId]
+  }
   const prefix = [
     `【初始化 Agent｜流水线步骤：${pipelineStepLabel(stepId)}】`,
     `项目：${projectInfo.name}（${projectInfo.game_type ?? '未知类型'}）`,
@@ -329,6 +345,7 @@ export default function ProjectSetup() {
   // ── 当前正在运行的步骤 ────────────────────────────────────────────
   const [currentStep, setCurrentStep] = useState<string | null>(null)
   const [allDone, setAllDone] = useState(false)
+  const [gameplayTables, setGameplayTables] = useState<GameplayTable[]>([])
 
   // ── 每步历史（stepId → 阶段面板状态）────────────────────────────
   const [stepHistory, setStepHistory] = useState<Array<{
@@ -364,10 +381,20 @@ export default function ProjectSetup() {
         // Check if there's a persisted session for this step
         void checkExistingSession(plData.next_expected_step)
       }
+      void loadGameplayTables()
     } catch (e) {
       setLoadErr(String(e))
     }
   }, [headers, pid]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const loadGameplayTables = useCallback(async () => {
+    try {
+      const data = await apiFetch('/pipeline/gameplay-tables', { headers }) as { tables: GameplayTable[] }
+      setGameplayTables(data.tables ?? [])
+    } catch {
+      // 忽略（玩法表可能尚未规划）
+    }
+  }, [headers])
 
   /** Restore a server-persisted session for the current step */
   const checkExistingSession = useCallback(async (stepId: string) => {
@@ -477,6 +504,7 @@ export default function ProjectSetup() {
       console.warn('pipeline advance failed:', e)
     }
     await loadPipeline()
+    await loadGameplayTables()
   }
 
   // ── 通用 SSE 读取：返回 { localPhases, localTools, toolCount, hasError, recoveryStatus }
@@ -988,6 +1016,31 @@ export default function ProjectSetup() {
           {stepHistory.length > 0 && (
             <div className="ps-history-note muted small" style={{ padding: '0.5rem 0.75rem', borderTop: '1px solid var(--border)' }}>
               点击步骤查看详情
+            </div>
+          )}
+
+          {/* 玩法规划表清单（gameplay_planning 步骤完成后展示） */}
+          {gameplayTables.length > 0 && (
+            <div className="ps-gameplay-tables">
+              <div className="ps-sidebar-section-head">
+                <span>玩法落地表规划</span>
+                <span className="ps-progress-text">
+                  {gameplayTables.filter(t => t.status === '已完成').length}/{gameplayTables.length}
+                </span>
+              </div>
+              <ul className="ps-gameplay-table-list">
+                {gameplayTables.map(t => (
+                  <li key={t.table_id} className={`ps-gameplay-table-item ps-gt-${t.status === '已完成' ? 'done' : t.status === '进行中' ? 'active' : 'pending'}`}>
+                    <span className="ps-gt-icon">
+                      {t.status === '已完成' ? '✓' : t.status === '进行中' ? '⟳' : String(t.order_num)}
+                    </span>
+                    <span className="ps-gt-name" title={t.table_id}>{t.display_name}</span>
+                    <span className={`ps-gt-badge ${t.status === '已完成' ? 'done' : t.status === '进行中' ? 'active' : ''}`}>
+                      {t.status}
+                    </span>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
         </aside>

@@ -77,6 +77,8 @@ WRITE_TOOLS = {
     "const_set",
     "const_delete",
     "expose_param_to_subsystems",
+    "register_gameplay_table",
+    "set_gameplay_table_status",
 }
 
 # 只读工具白名单（gather 阶段只允许调用这些）
@@ -111,6 +113,7 @@ READ_TOOLS = {
     "list_calculators",
     "call_calculator",
     "list_exposed_params",
+    "get_gameplay_table_list",
 }
 
 # Recovery Agent 只允许用只读工具 + 清理类写工具（delete_table / delete_column 等）
@@ -149,6 +152,9 @@ _TOOL_LABELS: Dict[str, str] = {
     "set_project_setting": "更新项目配置",
     "global_search": "全局搜索",
     "suggest_action": "获取 Agent 建议",
+    "register_gameplay_table": "注册玩法表",
+    "get_gameplay_table_list": "读取玩法表清单",
+    "set_gameplay_table_status": "更新玩法表状态",
 }
 
 
