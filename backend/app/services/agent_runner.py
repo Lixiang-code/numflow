@@ -87,6 +87,7 @@ READ_TOOLS = {
     "read_table",
     "read_matrix",
     "read_3d_table",
+    "read_3d_table_full",
     "read_cell",
     "get_protected_cells",
     "get_dependency_graph",
@@ -233,15 +234,17 @@ def _base_common_system(mode_norm: str) -> str:
             "②写入用 write_matrix_cells（行=玩法子系统，列=属性或资源）；"
             "③创建后必须调用 register_calculator 注册 fun(level, gameplay, attr|res[, grain])，"
             "brief 必须 ≥8 字符；下游一律用 call_calculator 取值，避免硬编码。",
-            "【三维矩阵表（create_3d_table）】"
+            "【三维数据表（create_3d_table）】"
             "当一张表需要两个真实维度时（如 等级×宝石类型、等级×装备部位），必须用 create_3d_table，"
             "不要把其中一维硬塞成 level=1 或伪二维表。\n"
-            "典型场景：宝石属性表（dim1=等级1~N, dim2=宝石类型atk/def/…, cols=atk_bonus/def_bonus/…）。\n"
+            "典型场景：宝石属性表（dim1=等级1~N, dim2=宝石类型atk/def/…, cols=atk_bonus/def_bonus/…），"
+            "属性列只允许数值型。\n"
             "dim1 通常为数字等级（key 填整数字符串'1','2'…），dim2 为分类（key 填英文标识符）。\n"
             "属性列（cols[]）可附 formula 字段，公式可用 @dim1列名/@dim2列名 同行引用：\n"
             "  例：atk_bonus 公式 = @level * ${gem_base_atk}（需先注册常量 gem_base_atk）\n"
             "若公式含 ${常量}，先 const_register；常量就绪后再重算整表，确保不要手填展开值。\n"
-            "【matrix_resource 第三维规则】第三维轴值（如等级）可手填；限制的是内容："
+            "读完整三轴结构用 read_3d_table_full；按任意维度切片用 read_3d_table。\n"
+            "【伪三维表（matrix_resource）规则】第三维轴值（如等级）可手填；限制的是内容："
             "单切片允许常量，多切片必须全表 formula，不能混写。\n"
             "create_3d_table 同样必须传 display_name（中文）、directory、tags（≥1个）。",
             "【表命名与标签规范（严格）】"

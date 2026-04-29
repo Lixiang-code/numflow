@@ -225,7 +225,7 @@ export default function ThreeDimTableEditor({
   return (
     <div className="matrix-editor">
       <div className="matrix-topbar">
-        <span className="matrix-kind-badge">3d_matrix</span>
+        <span className="matrix-kind-badge">三维数据表</span>
         <span className="matrix-meta-chip muted">
           {snapshot.dim1.display_name || snapshot.dim1.col_name} × {snapshot.dim2.display_name || snapshot.dim2.col_name} × 属性列
         </span>

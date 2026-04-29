@@ -67,6 +67,7 @@ def test_tool_whitelists_expose_critical_existing_and_new_tools():
         "get_table_schema",
         "read_matrix",
         "read_3d_table",
+        "read_3d_table_full",
         "list_directories",
         "list_exposed_params",
         "const_tag_list",
@@ -141,3 +142,56 @@ def test_read_3d_table_returns_sheet_view_and_rounded_values():
     assert row["dim1_display_name"] == "1级"
     assert row["values"]["atk_bonus"] == 1.0565
     assert "created_at" not in json.dumps(data, ensure_ascii=False)
+
+
+def test_read_3d_table_supports_arbitrary_slice_and_formula_view():
+    conn = _new_conn()
+    _prepare_3d_table(conn)
+
+    result = json.loads(
+        dispatch_tool(
+            "read_3d_table",
+            {
+                "table_name": "gem_attr_3d",
+                "keep_axes": ["metric"],
+                "dim1_keys": ["1"],
+                "dim2_keys": ["atk"],
+            },
+            _project_db(conn),
+        )
+    )
+    data = result["data"]
+    slice0 = data["slices"][0]
+    item0 = slice0["items"][0]
+
+    assert result["status"] == "success"
+    assert data["view_mode"] == "list"
+    assert data["keep_axes"] == ["metric"]
+    assert data["axes"]["dim1"]["selected_keys"] == ["1"]
+    assert data["axes"]["dim2"]["selected_keys"] == ["atk"]
+    assert slice0["fixed"]["dim1"]["display_name"] == "1级"
+    assert slice0["fixed"]["dim2"]["display_name"] == "攻击宝石"
+    assert item0["key"] == "atk_bonus"
+    assert item0["value"] == 1.0565
+    assert item0["formula"]["formula"] == "@level * 1.056487454"
+
+
+def test_read_3d_table_full_returns_canonical_three_axis_payload():
+    conn = _new_conn()
+    _prepare_3d_table(conn)
+
+    result = json.loads(
+        dispatch_tool(
+            "read_3d_table_full",
+            {"table_name": "gem_attr_3d"},
+            _project_db(conn),
+        )
+    )
+    data = result["data"]
+
+    assert result["status"] == "success"
+    assert data["kind"] == "3d_matrix"
+    assert data["values_are_numeric_only"] is True
+    assert data["axes"]["metric"]["keys"][0]["display_name"] == "攻击加成"
+    assert data["column_formulas"]["atk_bonus"]["type"] == "row"
+    assert data["data"]["1"]["atk"]["atk_bonus"] == 1.0565

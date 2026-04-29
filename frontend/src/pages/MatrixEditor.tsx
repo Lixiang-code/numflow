@@ -1,5 +1,5 @@
 /**
- * Matrix 表只读可视化编辑器。
+ * Matrix / 伪三维表只读可视化编辑器。
  * matrix_resource 在 scale_mode='fallback' 下把第三维改为“公式维”：
  * 二维基准值仍直接展示；指定等级时，后端会优先返回公式计算结果。
  */
@@ -82,6 +82,7 @@ export default function MatrixEditor({
   const glossaryMap = new Map(glossary.map((g) => [g.term_en, g.term_zh]))
   const meta = matrixMeta as Partial<MatrixMeta>
   const kind = meta.kind || ''
+  const kindLabel = kind === 'matrix_resource' ? '伪三维表' : kind === 'matrix_attr' ? '矩阵表' : kind || '矩阵表'
   const valueFormat = meta.value_format || ''
   const valueDtype = meta.value_dtype || ''
   const directory = meta.directory || ''
@@ -179,7 +180,7 @@ export default function MatrixEditor({
   return (
     <div className="matrix-editor">
       <div className="matrix-topbar">
-        <span className="matrix-kind-badge">{kind}</span>
+        <span className="matrix-kind-badge">{kindLabel}</span>
         {valueDtype && <span className="matrix-meta-chip">{valueDtype}</span>}
         {valueFormat && <span className="matrix-meta-chip mono">{valueFormat}</span>}
         {directory && <span className="matrix-meta-chip muted">📁 {directory}</span>}

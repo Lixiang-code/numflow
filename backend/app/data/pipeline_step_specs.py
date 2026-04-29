@@ -60,7 +60,7 @@ _NAMING_RULE_HINT = (
 )
 
 _MATRIX_TABLE_HINT = (
-    "【matrix 表使用规则】"
+    "【matrix / 伪三维表使用规则】"
     "①使用 create_matrix_table 创建（kind=matrix_attr 或 matrix_resource）；"
     "②【避免写入爆炸】scale_mode 默认规则：\n"
     "   matrix_attr  → scale_mode='none'    纯 2D，无等级维，write_matrix_cells 不传 level；\n"
@@ -429,7 +429,7 @@ def _build_landing_sub_spec(sub: str) -> StepSpec:
     elif sub == "gem":
         extra_acceptance = [
             "宝石按品阶/合成轴（3 同阶→1 高 1 品），不要按 1..N 标准等级拉行",
-            "若属性值同时受宝石类型与品阶/等级影响，必须用 create_3d_table 建真实三维表，不要用 level=1 伪装二维表",
+            "若属性值同时受宝石类型与品阶/等级影响，必须用 create_3d_table 建三维数据表，不要用 level=1 伪装二维表",
             "颜色/属性绑定与解锁门槛在 README 写清",
         ]
     elif sub == "mount":

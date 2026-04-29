@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import sqlite3
+from itertools import product
 from typing import Any, Dict, List, Optional, Union
 
 from app.deps import ProjectDB
@@ -157,33 +158,73 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "function": {
             "name": "read_3d_table",
             "description": (
-                "读取真实三维表快照，返回按 dim2 分组的紧凑切片结果（便于模型快速查看）。"
-                "适合检查 dim1/dim2、属性列、公式结果与当前某一组切片；"
-                "默认会截断 dim1 行数，避免一次返回过大。"
+                "读取三维数据表切片。默认返回兼容旧行为的按 dim2 分组紧凑投影视图；"
+                "若传 keep_axes，则可按 dim1 / dim2 / metric 任意组合切片，例如"
+                " keep_axes=['dim1','metric'] + dim2_keys=['atk'] 查看“所有攻击宝石的属性”，"
+                " keep_axes=['metric'] + dim1_keys=['1'] + dim2_keys=['atk'] 查看“1级攻击宝石的全部属性”。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "table_name": {"type": "string", "description": "目标三维表名，必须由 create_3d_table 创建"},
+                    "table_name": {"type": "string", "description": "目标三维数据表名，必须由 create_3d_table 创建"},
                     "dim1_keys": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "可选，仅返回这些 dim1 key（如等级）",
+                        "description": "可选，筛选第一维 key（如等级）",
                     },
                     "dim2_keys": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "可选，仅返回这些 dim2 key（如宝石类型 / 装备部位）",
+                        "description": "可选，筛选第二维 key（如宝石类型 / 装备部位）",
+                    },
+                    "metric_keys": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "可选，筛选属性列 key（如 atk_bonus / hp_bonus）",
+                    },
+                    "keep_axes": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["dim1", "dim2", "metric"]},
+                        "description": "可选，指定保留为切片输出的轴；长度 1 或 2。未传时走兼容旧行为的紧凑投影。",
                     },
                     "limit_dim1": {
                         "type": "integer",
                         "default": 30,
-                        "description": "未指定 dim1_keys 时，最多返回多少个 dim1 行，避免结果过大",
+                        "description": "兼容旧行为：未指定 dim1_keys 且未使用 keep_axes 时，最多返回多少个 dim1 行",
+                    },
+                    "limit_per_axis": {
+                        "type": "integer",
+                        "default": 50,
+                        "description": "使用 keep_axes 时，未显式筛选的每个轴最多返回多少个 key，避免结果过大",
                     },
                     "include_formulas": {
                         "type": "boolean",
                         "default": True,
-                        "description": "是否附带列公式摘要",
+                        "description": "是否附带相关属性列公式",
+                    },
+                },
+                "required": ["table_name"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_3d_table_full",
+            "description": (
+                "完整读取三维数据表的 canonical 三轴结构。"
+                "会返回 dim1 / dim2 / metric 三个轴的全部 key、完整嵌套 data，以及属性列公式；"
+                "适合需要整体建模、推导或自行决定切片方式的场景。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "目标三维数据表名"},
+                    "include_formulas": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "是否附带属性列公式元信息",
                     },
                 },
                 "required": ["table_name"],
@@ -1134,11 +1175,11 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "function": {
             "name": "create_3d_table",
             "description": (
-                "创建三维矩阵表：行同时包含两个维度（如 等级 × 宝石类型），列是属性。\n"
+                "创建三维数据表：行同时包含两个维度（如 等级 × 宝石类型），列是属性。\n"
                 "典型场景：宝石属性表（dim1=等级1~30, dim2=宝石类型, cols=atk_bonus/def_bonus/...）。\n"
                 "系统自动预插所有 (dim1 × dim2) 组合行（row_id='{d1}_{d2}'）；\n"
                 "dim1/dim2 的轴值本身可以手填（例如等级 1..30、宝石类型 atk/def）。\n"
-                "属性列可设置 formula（支持 @dim1列名、@dim2列名 以及同行 @其他列）。\n"
+                "属性列只支持数值列，可设置 formula（支持 @dim1列名、@dim2列名 以及同行 @其他列）。\n"
                 "若公式只依赖维度列/同行列，系统会自动计算全表；若含未注册 ${常量}，会先保存为运行时模板，"
                 "需先 const_register 再 recalculate_table/重算。\n"
                 "前端使用三轴查看器：可自由选择行轴、列轴，并固定剩余第三维切片。"
@@ -1714,6 +1755,300 @@ def _get_table_readme(conn: sqlite3.Connection, table_name: str) -> Dict[str, An
     return {"table_name": table_name, "readme": row["readme"] or ""}
 
 
+_THREE_D_AXES = ("dim1", "dim2", "metric")
+
+
+def _round_tool_value(value: Any) -> Any:
+    if isinstance(value, bool) or value is None or isinstance(value, int) or isinstance(value, str):
+        return value
+    if isinstance(value, float):
+        return round(value, 4)
+    if isinstance(value, list):
+        return [_round_tool_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(k): _round_tool_value(v) for k, v in value.items()}
+    return value
+
+
+def _build_3d_axis_catalog(raw: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    dim1 = raw.get("dim1") or {}
+    dim2 = raw.get("dim2") or {}
+    cols = raw.get("cols") or []
+    data = raw.get("data") or {}
+
+    dim1_keys = [str(item.get("key")) for item in dim1.get("keys") or [] if isinstance(item, dict) and str(item.get("key") or "").strip()]
+    dim2_keys = [str(item.get("key")) for item in dim2.get("keys") or [] if isinstance(item, dict) and str(item.get("key") or "").strip()]
+    metric_keys = [str(item.get("key")) for item in cols if isinstance(item, dict) and str(item.get("key") or "").strip()]
+
+    if not dim1_keys:
+        dim1_keys = sorted(str(key) for key in data.keys())
+    if not dim2_keys:
+        dim2_seen = {str(dim2_key) for rows in data.values() if isinstance(rows, dict) for dim2_key in rows.keys()}
+        dim2_keys = sorted(dim2_seen)
+    if not metric_keys:
+        metric_seen = {
+            str(metric_key)
+            for rows in data.values()
+            if isinstance(rows, dict)
+            for metrics in rows.values()
+            if isinstance(metrics, dict)
+            for metric_key in metrics.keys()
+        }
+        metric_keys = sorted(metric_seen)
+
+    dim1_display = {str(item.get("key")): str(item.get("display_name") or item.get("key") or "") for item in dim1.get("keys") or [] if isinstance(item, dict)}
+    dim2_display = {str(item.get("key")): str(item.get("display_name") or item.get("key") or "") for item in dim2.get("keys") or [] if isinstance(item, dict)}
+    metric_display = {str(item.get("key")): str(item.get("display_name") or item.get("key") or "") for item in cols if isinstance(item, dict) and str(item.get("key") or "").strip()}
+
+    return {
+        "dim1": {
+            "label": str(dim1.get("display_name") or dim1.get("col_name") or "dim1"),
+            "col_name": str(dim1.get("col_name") or ""),
+            "keys": dim1_keys,
+            "display": dim1_display,
+        },
+        "dim2": {
+            "label": str(dim2.get("display_name") or dim2.get("col_name") or "dim2"),
+            "col_name": str(dim2.get("col_name") or ""),
+            "keys": dim2_keys,
+            "display": dim2_display,
+        },
+        "metric": {
+            "label": "属性列",
+            "col_name": "metric",
+            "keys": metric_keys,
+            "display": metric_display,
+        },
+    }
+
+
+def _select_3d_axis_keys(
+    axis: str,
+    requested: Optional[List[str]],
+    axis_catalog: Dict[str, Dict[str, Any]],
+    *,
+    limit: int,
+) -> tuple[List[str], bool]:
+    ordered = axis_catalog[axis]["keys"] or []
+    picked: List[str] = []
+    for item in requested or []:
+        key = str(item or "").strip()
+        if key and key not in picked:
+            picked.append(key)
+    unknown = [key for key in picked if key not in ordered]
+    if unknown:
+        raise ValueError(f"{axis}_keys 包含未知 key: {', '.join(unknown)}")
+    if picked:
+        return picked, False
+    return ordered[:limit], len(ordered) > limit
+
+
+def _lookup_3d_value(data: Dict[str, Any], *, dim1_key: str, dim2_key: str, metric_key: str) -> Any:
+    dim1_row = data.get(dim1_key)
+    if not isinstance(dim1_row, dict):
+        return None
+    dim2_row = dim1_row.get(dim2_key)
+    if not isinstance(dim2_row, dict):
+        return None
+    return dim2_row.get(metric_key)
+
+
+def _metric_formula_subset(raw: Dict[str, Any], metric_keys: List[str]) -> Dict[str, Any]:
+    all_formulas = raw.get("column_formulas") or {}
+    return {key: all_formulas[key] for key in metric_keys if key in all_formulas}
+
+
+def _axis_key_payload(axis: str, key: str, axis_catalog: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        "axis": axis,
+        "label": axis_catalog[axis]["label"],
+        "key": key,
+        "display_name": axis_catalog[axis]["display"].get(key, key),
+    }
+
+
+def _slice_3d_table_result(
+    raw: Dict[str, Any],
+    *,
+    keep_axes: Optional[List[str]] = None,
+    dim1_keys: Optional[List[str]] = None,
+    dim2_keys: Optional[List[str]] = None,
+    metric_keys: Optional[List[str]] = None,
+    limit_per_axis: int = 50,
+    include_formulas: bool = True,
+) -> Dict[str, Any]:
+    keep = [str(axis).strip() for axis in (keep_axes or ["dim1", "metric"]) if str(axis).strip()]
+    if len(keep) not in (1, 2):
+        raise ValueError("keep_axes 只能保留 1 个或 2 个轴，且仅支持 dim1 / dim2 / metric")
+    if any(axis not in _THREE_D_AXES for axis in keep):
+        raise ValueError("keep_axes 只能包含 dim1 / dim2 / metric")
+    if len(set(keep)) != len(keep):
+        raise ValueError("keep_axes 不能重复")
+
+    axis_catalog = _build_3d_axis_catalog(raw)
+    limit = max(1, min(int(limit_per_axis or 50), 200))
+    selected_dim1, truncated_dim1 = _select_3d_axis_keys("dim1", dim1_keys, axis_catalog, limit=limit)
+    selected_dim2, truncated_dim2 = _select_3d_axis_keys("dim2", dim2_keys, axis_catalog, limit=limit)
+    selected_metric, truncated_metric = _select_3d_axis_keys("metric", metric_keys, axis_catalog, limit=limit)
+    data = raw.get("data") or {}
+
+    selected_map = {
+        "dim1": selected_dim1,
+        "dim2": selected_dim2,
+        "metric": selected_metric,
+    }
+    truncated_map = {
+        "dim1": truncated_dim1,
+        "dim2": truncated_dim2,
+        "metric": truncated_metric,
+    }
+    fixed_axes = [axis for axis in _THREE_D_AXES if axis not in keep]
+    fixed_value_lists = [selected_map[axis] for axis in fixed_axes]
+    combinations = list(product(*fixed_value_lists)) if fixed_axes else [()]
+
+    slices: List[Dict[str, Any]] = []
+    if len(keep) == 2:
+        row_axis, col_axis = keep
+        for combo in combinations:
+            fixed = {axis: key for axis, key in zip(fixed_axes, combo)}
+            rows_out: List[Dict[str, Any]] = []
+            returned_cell_count = 0
+            for row_key in selected_map[row_axis]:
+                row_values: Dict[str, Any] = {}
+                for col_key in selected_map[col_axis]:
+                    selectors = dict(fixed)
+                    selectors[row_axis] = row_key
+                    selectors[col_axis] = col_key
+                    value = _lookup_3d_value(
+                        data,
+                        dim1_key=str(selectors["dim1"]),
+                        dim2_key=str(selectors["dim2"]),
+                        metric_key=str(selectors["metric"]),
+                    )
+                    if value is None:
+                        continue
+                    row_values[col_key] = _round_tool_value(value)
+                if row_values:
+                    returned_cell_count += len(row_values)
+                    rows_out.append(
+                        {
+                            "key": row_key,
+                            "display_name": axis_catalog[row_axis]["display"].get(row_key, row_key),
+                            "values": row_values,
+                        }
+                    )
+            if not rows_out:
+                continue
+            metric_scope = selected_map["metric"] if "metric" in keep else ([fixed["metric"]] if "metric" in fixed else [])
+            slice_payload: Dict[str, Any] = {
+                "fixed": {axis: _axis_key_payload(axis, key, axis_catalog) for axis, key in fixed.items()},
+                "row_axis": row_axis,
+                "row_axis_label": axis_catalog[row_axis]["label"],
+                "col_axis": col_axis,
+                "col_axis_label": axis_catalog[col_axis]["label"],
+                "row_keys": selected_map[row_axis],
+                "col_keys": selected_map[col_axis],
+                "returned_row_count": len(rows_out),
+                "returned_cell_count": returned_cell_count,
+                "rows": rows_out,
+            }
+            if include_formulas:
+                slice_payload["column_formulas"] = _metric_formula_subset(raw, metric_scope)
+            slices.append(slice_payload)
+    else:
+        keep_axis = keep[0]
+        for combo in combinations:
+            fixed = {axis: key for axis, key in zip(fixed_axes, combo)}
+            items: List[Dict[str, Any]] = []
+            for axis_key in selected_map[keep_axis]:
+                selectors = dict(fixed)
+                selectors[keep_axis] = axis_key
+                value = _lookup_3d_value(
+                    data,
+                    dim1_key=str(selectors["dim1"]),
+                    dim2_key=str(selectors["dim2"]),
+                    metric_key=str(selectors["metric"]),
+                )
+                if value is None:
+                    continue
+                item: Dict[str, Any] = {
+                    "key": axis_key,
+                    "display_name": axis_catalog[keep_axis]["display"].get(axis_key, axis_key),
+                    "value": _round_tool_value(value),
+                }
+                if include_formulas and keep_axis == "metric":
+                    formula_info = _metric_formula_subset(raw, [axis_key]).get(axis_key)
+                    if formula_info:
+                        item["formula"] = formula_info
+                items.append(item)
+            if not items:
+                continue
+            metric_scope = selected_map["metric"] if keep_axis == "metric" else ([fixed["metric"]] if "metric" in fixed else [])
+            slice_payload = {
+                "fixed": {axis: _axis_key_payload(axis, key, axis_catalog) for axis, key in fixed.items()},
+                "axis": keep_axis,
+                "axis_label": axis_catalog[keep_axis]["label"],
+                "returned_item_count": len(items),
+                "items": items,
+            }
+            if include_formulas:
+                slice_payload["column_formulas"] = _metric_formula_subset(raw, metric_scope)
+            slices.append(slice_payload)
+
+    return {
+        "table_name": raw.get("table_name"),
+        "display_name": raw.get("display_name"),
+        "view_mode": "grid" if len(keep) == 2 else "list",
+        "keep_axes": keep,
+        "axes": {
+            axis: {
+                "label": axis_catalog[axis]["label"],
+                "col_name": axis_catalog[axis]["col_name"],
+                "total_keys": len(axis_catalog[axis]["keys"]),
+                "selected_keys": selected_map[axis],
+                "truncated": truncated_map[axis],
+            }
+            for axis in _THREE_D_AXES
+        },
+        "slice_count": len(slices),
+        "slices": slices,
+    }
+
+
+def _full_3d_table_result(raw: Dict[str, Any], *, include_formulas: bool = True) -> Dict[str, Any]:
+    axis_catalog = _build_3d_axis_catalog(raw)
+    data = raw.get("data") or {}
+    cell_count = 0
+    for dim1_rows in data.values():
+        if not isinstance(dim1_rows, dict):
+            continue
+        for metrics in dim1_rows.values():
+            if isinstance(metrics, dict):
+                cell_count += len(metrics)
+    out: Dict[str, Any] = {
+        "table_name": raw.get("table_name"),
+        "display_name": raw.get("display_name"),
+        "kind": "3d_matrix",
+        "row_count": raw.get("row_count"),
+        "cell_count": cell_count,
+        "values_are_numeric_only": True,
+        "axes": {
+            axis: {
+                "label": axis_catalog[axis]["label"],
+                "col_name": axis_catalog[axis]["col_name"],
+                "keys": [_axis_key_payload(axis, key, axis_catalog) for key in axis_catalog[axis]["keys"]],
+            }
+            for axis in _THREE_D_AXES
+        },
+        "data": _round_tool_value(data),
+    }
+    if include_formulas:
+        out["column_formulas"] = raw.get("column_formulas") or {}
+    if cell_count > 2000:
+        out["warning"] = "当前返回的是完整三轴结构；若只需局部视图，优先改用 read_3d_table 做切片。"
+    return out
+
+
 def _compact_3d_table_result(
     raw: Dict[str, Any],
     *,
@@ -2097,15 +2432,41 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
         out = _get_table_readme(conn, str(args.get("table_name", "")))
     elif name == "read_3d_table":
         try:
-            out = _compact_3d_table_result(
+            raw = read_3d_table(conn, table_name=str(args.get("table_name", "")))
+            if "keep_axes" in args or isinstance(args.get("metric_keys"), list):
+                out = _slice_3d_table_result(
+                    raw,
+                    keep_axes=args.get("keep_axes") if isinstance(args.get("keep_axes"), list) else None,
+                    dim1_keys=args.get("dim1_keys") if isinstance(args.get("dim1_keys"), list) else None,
+                    dim2_keys=args.get("dim2_keys") if isinstance(args.get("dim2_keys"), list) else None,
+                    metric_keys=args.get("metric_keys") if isinstance(args.get("metric_keys"), list) else None,
+                    limit_per_axis=int(args.get("limit_per_axis", 50)),
+                    include_formulas=bool(args.get("include_formulas", True)),
+                )
+            else:
+                out = _compact_3d_table_result(
+                    raw,
+                    dim1_keys=args.get("dim1_keys") if isinstance(args.get("dim1_keys"), list) else None,
+                    dim2_keys=args.get("dim2_keys") if isinstance(args.get("dim2_keys"), list) else None,
+                    limit_dim1=int(args.get("limit_dim1", 30)),
+                    include_formulas=bool(args.get("include_formulas", True)),
+                )
+        except ValueError as e:
+            out = {
+                "error": str(e),
+                "fix": "read_3d_table 支持 keep_axes + dim1_keys/dim2_keys/metric_keys 做任意切片；若需要完整三轴结构，请改用 read_3d_table_full。",
+            }
+    elif name == "read_3d_table_full":
+        try:
+            out = _full_3d_table_result(
                 read_3d_table(conn, table_name=str(args.get("table_name", ""))),
-                dim1_keys=args.get("dim1_keys") if isinstance(args.get("dim1_keys"), list) else None,
-                dim2_keys=args.get("dim2_keys") if isinstance(args.get("dim2_keys"), list) else None,
-                limit_dim1=int(args.get("limit_dim1", 30)),
                 include_formulas=bool(args.get("include_formulas", True)),
             )
         except ValueError as e:
-            out = {"error": str(e)}
+            out = {
+                "error": str(e),
+                "fix": "确认目标表由 create_3d_table 创建；若只需某个切片，可改用 read_3d_table。",
+            }
     elif name == "list_skills":
         items = _list_skills(
             conn,
@@ -2504,7 +2865,7 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
             except Exception as e:  # noqa: BLE001
                 out = {
                     "error": str(e),
-                    "fix": "create_3d_table 中 dim1/dim2 是可手填的轴值集合；若数值变化本质上来自第三维展开，优先把变化写进 cols[].formula，而不是手填展开后的整表常量。",
+                    "fix": "create_3d_table 用于三维数据表：dim1/dim2 是可手填的轴值集合，但属性列只能存数值。若变化本质上来自维度展开，优先把变化写进 cols[].formula，而不是手填展开后的整表常量。",
                 }
     else:
         out = {"error": f"未知工具 {name}"}
