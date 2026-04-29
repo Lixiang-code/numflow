@@ -297,6 +297,42 @@ function deepEqual(a: unknown, b: unknown): boolean {
   return JSON.stringify(stable(a)) === JSON.stringify(stable(b))
 }
 
+/**
+ * 在前端复刻后端 render_skill_markdown 逻辑，用于"实际 SKILL 文件"的实时预览。
+ * 必须与 backend/app/services/skill_library.py::render_skill_markdown 保持一致。
+ */
+function renderSkillMarkdown(skill: SkillItem): string {
+  const chosen = skill.modules.filter((m) => m.required || m.enabled)
+  const yamlEscape = (s: string): string => {
+    if (s === '') return '""'
+    if (/[:#\-?&*!|>'"%@`{}\[\],\n]/.test(s) || /^\s|\s$/.test(s)) {
+      return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
+    }
+    return s
+  }
+  const meta: [string, string][] = [
+    ['skill_slug', yamlEscape(skill.slug ?? '')],
+    ['title', yamlEscape(skill.title ?? '')],
+    ['step_id', yamlEscape(skill.step_id ?? '')],
+    ['source', yamlEscape(skill.source || 'user')],
+    ['default_exposed', skill.default_exposed ? 'true' : 'false'],
+  ]
+  const lines: string[] = ['---']
+  for (const [k, v] of meta) lines.push(`${k}: ${v}`)
+  lines.push('enabled_module_keys:')
+  for (const m of chosen) lines.push(`  - ${yamlEscape(m.module_key || m.title)}`)
+  lines.push('---')
+  lines.push(`# ${skill.title || ''}`)
+  if (skill.summary) { lines.push(''); lines.push(`> ${skill.summary}`) }
+  if (skill.description) { lines.push(''); lines.push(skill.description) }
+  for (const m of chosen) {
+    lines.push('')
+    lines.push(`## ${m.title}`)
+    lines.push((m.content || '').trim())
+  }
+  return lines.join('\n').trim() + '\n'
+}
+
 /** 简易 token 估算：中英文混排时按 3.5 字符 ≈ 1 token 粗略估计。 */
 function estimateTokens(text: string): number {
   if (!text) return 0
@@ -584,10 +620,13 @@ export default function SkillLibrary() {
         body: JSON.stringify(body),
       })) as SkillItem
       await loadSkills(saved.id ?? null)
-      // Clear dirty state for the saved item
+      // 关键：保存成功后，强制把本地草稿与缓存基线同步为服务端返回值。
+      // 否则后端可能对字段做归一化（去空白、补默认 sort_order 等），
+      // 导致 useEffect 比较 draft ≠ baseline 又把"编辑中"标记重新点上。
       const savedKey = skillCacheKey(saved.id ?? 'new')
-      const savedEntry = skillCache.current.get(savedKey)
-      if (savedEntry) { savedEntry.baseline = cloneValue(saved); delete savedEntry.serverConflict }
+      const savedSnap = cloneValue(saved)
+      skillCache.current.set(savedKey, { draft: savedSnap, baseline: cloneValue(saved) })
+      setSkillDraft(cloneValue(saved))
       clearSkillDirty(savedKey)
       clearSkillConflict(savedKey)
       pushToast('success', `SKILL「${saved.title || skillDraft.title || '未命名'}」已保存`)
@@ -677,10 +716,14 @@ export default function SkillLibrary() {
         }),
       })
       await loadPromptItems(category, promptDraft.prompt_key)
-      // Clear dirty state for the saved prompt
+      // 关键：保存成功后，把本地草稿与缓存基线同步为服务端数据，避免归一化字段差异触发"编辑中"。
       const savedPKey = promptCacheKey(category, promptDraft.prompt_key)
       const savedPEntry = promptCache.current.get(savedPKey)
-      if (savedPEntry) { savedPEntry.baseline = cloneValue(promptDraft); delete savedPEntry.serverConflict }
+      // 优先使用 loadPromptItems 在缓存上写入的 serverConflict (即最新服务端值)，回退到 draft。
+      const serverItem = savedPEntry?.serverConflict ?? savedPEntry?.draft ?? promptDraft
+      const serverSnap = cloneValue(serverItem)
+      promptCache.current.set(savedPKey, { draft: serverSnap, baseline: cloneValue(serverItem) })
+      setPromptDraft(cloneValue(serverItem))
       clearPromptDirty(savedPKey)
       clearPromptConflict(savedPKey)
       pushToast('success', `提示词「${promptDraft.title || promptDraft.prompt_key}」已保存`)
@@ -1110,9 +1153,9 @@ export default function SkillLibrary() {
                       <section className={`sl-card${skillBasicDirty ? ' sl-section-dirty' : ''}`}>
                         <div className="sl-card-head">
                           <div>
-                            <h3>基本信息<span className="sl-vis-tag dev">仅开发者</span></h3>
+                            <h3>基本信息<span className="sl-vis-tag ai">AI 可见</span></h3>
                             {!skillBasicCollapsed && (
-                              <div className="sl-sub">SKILL 元数据，将作为 Markdown 头部 YAML 写入；不会单独发送给 AI。</div>
+                              <div className="sl-sub">这些字段会作为 YAML 头部 + Markdown 标题/摘要写入实际 SKILL 文件，AI 加载该文件时即可读取。</div>
                             )}
                           </div>
                           <div className="sl-card-actions">
@@ -1132,52 +1175,58 @@ export default function SkillLibrary() {
                             <div className="sl-grid cols-2">
                               <label className="sl-field">
                                 <span className="sl-label">标题</span>
-                                <input className="sl-input-dev" value={skillDraft.title} onChange={(e) => updateSkillDraft('title', e.target.value)} placeholder="例如：表格补全规则" />
+                                <input className="sl-input-ai" value={skillDraft.title} onChange={(e) => updateSkillDraft('title', e.target.value)} placeholder="例如：表格补全规则" />
                               </label>
                               <label className="sl-field">
                                 <span className="sl-label">Slug</span>
-                                <input className="sl-input-dev" value={skillDraft.slug ?? ''} onChange={(e) => updateSkillDraft('slug', e.target.value)} placeholder="kebab-case-id" />
+                                <input className="sl-input-ai" value={skillDraft.slug ?? ''} onChange={(e) => updateSkillDraft('slug', e.target.value)} placeholder="kebab-case-id" />
                               </label>
                               <label className="sl-field">
                                 <span className="sl-label">绑定步骤 ID</span>
-                                <input className="sl-input-dev" value={skillDraft.step_id} onChange={(e) => updateSkillDraft('step_id', e.target.value)} placeholder="step.execute / step.review …" />
+                                <input className="sl-input-ai" value={skillDraft.step_id} onChange={(e) => updateSkillDraft('step_id', e.target.value)} placeholder="step.execute / step.review …" />
                               </label>
                               <label className="sl-field">
                                 <span className="sl-label">来源</span>
-                                <input className="sl-input-dev" value={skillDraft.source} onChange={(e) => updateSkillDraft('source', e.target.value)} placeholder="user / system" />
+                                <input className="sl-input-ai" value={skillDraft.source} onChange={(e) => updateSkillDraft('source', e.target.value)} placeholder="user / system" />
                               </label>
                             </div>
 
                             <div className="sl-field sl-field-row">
                               <span className="sl-label">摘要</span>
-                              <AutoTextarea className="sl-input-dev" value={skillDraft.summary} onChange={(e) => updateSkillDraft('summary', e.target.value)} placeholder="一两句话说明这个 SKILL 解决的问题" />
+                              <AutoTextarea markdown className="sl-input-ai" value={skillDraft.summary} onChange={(e) => updateSkillDraft('summary', e.target.value)} placeholder="一两句话说明这个 SKILL 解决的问题（写入文件 > 引言）" />
                             </div>
 
                             <div className="sl-field sl-field-row">
                               <span className="sl-label">说明</span>
-                              <AutoTextarea className="sl-input-dev" value={skillDraft.description} onChange={(e) => updateSkillDraft('description', e.target.value)} placeholder="详细描述使用场景、输入输出约束等" />
+                              <AutoTextarea markdown className="sl-input-ai" value={skillDraft.description} onChange={(e) => updateSkillDraft('description', e.target.value)} placeholder="详细描述使用场景、输入输出约束等（写入文件正文）" />
                             </div>
                           </>
                         )}
                       </section>
 
-                      {/* ── SKILL 文件预览（基本信息后、模块前）────── */}
-                      <div className="sl-preview-inline">
-                        <div className="sl-preview-head">
-                          <div className="sl-preview-title">📄 实际 SKILL 文件</div>
-                          <div className="sl-preview-meta">
-                            {skillDraft.generated_file_path || '保存后将自动生成 Markdown + YAML'}
-                            {skillDraft.generated_content && (
-                              <span className="sl-preview-tokens" title="按 3.5 字符 ≈ 1 token 粗略估算">
-                                · 约 {estimateTokens(skillDraft.generated_content)} tokens
-                              </span>
-                            )}
+                      {/* ── SKILL 文件预览（基本信息后、模块前）：实时根据当前草稿渲染 ────── */}
+                      {(() => {
+                        const livePreview = renderSkillMarkdown(skillDraft)
+                        const persistedDiff = !!skillDraft.generated_content && skillDraft.generated_content.trim() !== livePreview.trim()
+                        return (
+                          <div className="sl-preview-inline">
+                            <div className="sl-preview-head">
+                              <div className="sl-preview-title">
+                                📄 实际 SKILL 文件
+                                <span className="sl-preview-tag">实时预览</span>
+                                {persistedDiff && <span className="sl-preview-tag warn" title="已生成的文件与当前内容不一致，保存或点击「生成实际文件」可同步">未同步</span>}
+                              </div>
+                              <div className="sl-preview-meta">
+                                {skillDraft.generated_file_path || `skills/${skillDraft.slug || '<slug>'}.md`}
+                                <span className="sl-preview-tokens" title="按 3.5 字符 ≈ 1 token 粗略估算">
+                                  · 约 {estimateTokens(livePreview)} tokens
+                                </span>
+                              </div>
+                            </div>
+                            <pre className="sl-preview-body">{livePreview}</pre>
                           </div>
-                        </div>
-                        <pre className={`sl-preview-body${skillDraft.generated_content ? '' : ' empty'}`}>
-                          {skillDraft.generated_content || '尚未生成。点击右上角"生成实际文件"按钮即可生成。'}
-                        </pre>
-                      </div>
+                        )
+                      })()}
 
                       {/* ── 内容模块 ─────────────────────────────────── */}
                       <section className="sl-card">
