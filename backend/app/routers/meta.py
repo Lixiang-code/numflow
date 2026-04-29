@@ -13,6 +13,7 @@ from app.data.default_rules_02 import get_default_rules_payload
 from app.deps import ProjectDB, get_project_read, get_project_write
 from app.services.snapshot_ops import compare_snapshot, create_snapshot, list_snapshots
 from app.services.matrix_table_ops import read_matrix as _read_matrix, list_matrix_tables as _list_matrix_tables
+from app.services.table_ops import read_3d_table as _read_3d_table
 
 router = APIRouter(prefix="/meta", tags=["meta"])
 
@@ -128,16 +129,39 @@ def get_table_list(p: ProjectDB = Depends(get_project_read)):
             parsed = {}
         d["display_name"] = (parsed.get("display_name") if isinstance(parsed, dict) else "") or ""
         d["directory"] = d.get("directory") or ""
+        matrix_kind = ""
+        if mm:
+            try:
+                parsed_mm = json.loads(mm) if isinstance(mm, str) else {}
+            except json.JSONDecodeError:
+                parsed_mm = {}
+            if isinstance(parsed_mm, dict):
+                matrix_kind = str(parsed_mm.get("kind") or "")
+        d["matrix_kind"] = matrix_kind
         d["is_matrix"] = bool(mm) and d.get("layer") == "matrix"
+        d["is_3d_matrix"] = matrix_kind == "3d_matrix"
         rows.append(d)
     return {"tables": rows}
 
 
 @router.get("/matrix/{table_name}")
-def get_matrix_snapshot(table_name: str, p: ProjectDB = Depends(get_project_read)):
+def get_matrix_snapshot(
+    table_name: str,
+    level: Optional[int] = Query(None),
+    p: ProjectDB = Depends(get_project_read),
+):
     """以宽表 JSON 形式读取 matrix 表内容（前端只读视图）。"""
     try:
-        return _read_matrix(p.conn, table_name=table_name)
+        return _read_matrix(p.conn, table_name=table_name, level=level)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/3d-matrix/{table_name}")
+def get_three_dim_snapshot(table_name: str, p: ProjectDB = Depends(get_project_read)):
+    """读取三维表快照，供前端三轴查看器渲染。"""
+    try:
+        return _read_3d_table(p.conn, table_name=table_name)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 

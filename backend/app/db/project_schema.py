@@ -39,6 +39,17 @@ def init_project_db(conn: sqlite3.Connection, *, seed_readme: bool = True) -> No
             UNIQUE(table_name, column_name)
         );
 
+        CREATE TABLE IF NOT EXISTS _matrix_formula_registry (
+            table_name TEXT NOT NULL,
+            row_key TEXT NOT NULL,
+            col_key TEXT NOT NULL,
+            formula TEXT NOT NULL,
+            formula_type TEXT NOT NULL DEFAULT 'row',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (table_name, row_key, col_key)
+        );
+
         CREATE TABLE IF NOT EXISTS _snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             label TEXT NOT NULL,

@@ -30,6 +30,21 @@ def ensure_project_migrations(conn: sqlite3.Connection) -> None:
         """
     )
 
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS _matrix_formula_registry (
+            table_name TEXT NOT NULL,
+            row_key TEXT NOT NULL,
+            col_key TEXT NOT NULL,
+            formula TEXT NOT NULL,
+            formula_type TEXT NOT NULL DEFAULT 'row',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (table_name, row_key, col_key)
+        )
+        """
+    )
+
     # 优化文档：术语映射表 + 常数注册表（中英名词混淆 / 常数裸塞修复）
     conn.execute(
         """

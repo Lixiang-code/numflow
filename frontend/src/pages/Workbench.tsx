@@ -10,8 +10,19 @@ import { UniverSheetsCorePreset, type FWorkbook } from '@univerjs/preset-sheets-
 import UniverZhCN from '@univerjs/preset-sheets-core/locales/zh-CN'
 import '@univerjs/preset-sheets-core/lib/index.css'
 import MatrixEditor from './MatrixEditor'
+import ThreeDimTableEditor from './ThreeDimTableEditor'
 
-type TableInfo = { table_name: string; validation_status: string; layer: string; purpose?: string; display_name?: string; directory?: string; is_matrix?: boolean }
+type TableInfo = {
+  table_name: string
+  validation_status: string
+  layer: string
+  purpose?: string
+  display_name?: string
+  directory?: string
+  is_matrix?: boolean
+  is_3d_matrix?: boolean
+  matrix_kind?: string
+}
 type ColumnMeta = { name: string; sql_type?: string; display_name?: string; dtype?: string; number_format?: string; is_dim?: boolean }
 /** 列公式信息（含类型：sql / row / row_template） */
 type FormulaInfo = { formula: string; type: string }
@@ -525,6 +536,14 @@ export default function Workbench() {
     () => Boolean(tables.find((t) => t.table_name === selected)?.is_matrix),
     [tables, selected],
   )
+  /** 当前选中表是否是三维矩阵表（可通过多 sheet 视图展示） */
+  const selectedIs3DMatrix = useMemo(
+    () => {
+      const info = tables.find((t) => t.table_name === selected)
+      return Boolean(info?.is_3d_matrix || selectedMatrixMeta?.kind === '3d_matrix')
+    },
+    [tables, selected, selectedMatrixMeta],
+  )
 
   const loadTables = useCallback(async () => {
     const d = (await apiFetch('/meta/tables', { headers })) as { tables?: unknown }
@@ -994,6 +1013,7 @@ export default function Workbench() {
     // 查找表是否 matrix
     const tableInfo = tables.find((t) => t.table_name === selected)
     const isMatrix = Boolean(tableInfo?.is_matrix)
+    const is3DMatrix = Boolean(tableInfo?.is_3d_matrix)
 
     let cancelled = false
     ;(async () => {
@@ -1023,7 +1043,8 @@ export default function Workbench() {
             ? JSON.parse(desc.matrix_meta_json)
             : (desc.matrix_meta_json != null ? desc.matrix_meta_json as Record<string, unknown> : null)
         } catch { parsedMM = null }
-        if (isMatrix) {
+        const is3DMatrixFromMeta = parsedMM?.kind === '3d_matrix'
+        if (isMatrix || is3DMatrix || is3DMatrixFromMeta) {
           setSelectedMatrixMeta(parsedMM)
         } else {
           setSelectedMatrixMeta(null)
@@ -1076,8 +1097,8 @@ export default function Workbench() {
         setColumnFormulas(cf)
         setRelatedConstants(Array.isArray(desc.related_constants) ? desc.related_constants : [])
 
-        // 写入 Univer 并切换到该 sheet（传统 2D matrix 表不需要写入 Univer）
-        if (!isMatrix) {
+        // 写入 Univer 并切换到该 sheet（2D/3D matrix 专用视图不需要写入 Univer）
+        if (!isMatrix && !is3DMatrix && !is3DMatrixFromMeta) {
           populateSheet(selected, normalized, cols, cf, colMeta, displayName)
           activeTableRef.current = selected
           const wb = workbookRef.current
@@ -1444,7 +1465,7 @@ export default function Workbench() {
           ⚙ Agent 进程{pipeline && !pipeline.finished ? '（未完成）' : ''}
         </Link>
         <Link to={`/skills/${pid}`} className="link-btn">
-          [SKILL] 库
+          提示词
         </Link>
         <button
           type="button"
@@ -1663,6 +1684,28 @@ export default function Workbench() {
                 glossary={glossary}
               />
             </>
+          ) : selected && selectedIs3DMatrix ? (
+            <>
+              {exposedParams.length > 0 && (
+                <div className="exposed-params-banner">
+                  <strong>📎 本子系统继承的参数 {exposedParams.length} 项：</strong>{' '}
+                  {exposedParams.map((p, i) => (
+                    <span key={i} className="exposed-param-chip" title={p.brief}>
+                      <code>{p.key}</code>
+                      {p.value != null && <span className="muted"> = {JSON.stringify(p.value)}</span>}
+                      <span className="muted small"> ({p.owner_step})</span>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <ThreeDimTableEditor
+                key={selected}
+                tableName={selected}
+                headers={headers}
+                glossary={glossary}
+                canRecalculate={!readOnly}
+              />
+            </>
           ) : selected !== '__constants__' && !selectedIsMatrix ? (
           <>
           {/* 暴露参数 banner */}
@@ -1752,9 +1795,9 @@ export default function Workbench() {
           <div
             className="wb-univer-host"
             ref={univerHostRef}
-            style={{ display: (selected === '__constants__' || selectedIsMatrix) ? 'none' : undefined }}
+            style={{ display: (selected === '__constants__' || selectedIsMatrix || selectedIs3DMatrix) ? 'none' : undefined }}
           />
-          {readOnly && selected !== '__constants__' && !selectedIsMatrix && (
+          {readOnly && selected !== '__constants__' && !selectedIsMatrix && !selectedIs3DMatrix && (
             <div className="wb-readonly-overlay" title="只读模式">
               🔒 只读模式（在 Agent 进程页中查看，请回到完整工作台编辑）
             </div>

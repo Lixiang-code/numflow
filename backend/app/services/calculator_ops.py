@@ -11,6 +11,8 @@ import sqlite3
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
+from app.services.matrix_table_ops import evaluate_matrix_formula_value
+
 
 _VALID_KINDS = {"matrix_attr", "matrix_resource", "lookup"}
 
@@ -99,6 +101,7 @@ def call_calculator(
 
     # 查出 matrix 的 scale_mode（若是 matrix 表）
     scale_mode = "static"
+    mm: Dict[str, Any] = {}
     try:
         mm_row = conn.execute(
             "SELECT matrix_meta_json FROM _table_registry WHERE table_name = ?", (table_name,)
@@ -145,6 +148,39 @@ def call_calculator(
         rr = conn.execute(sql, params).fetchone()
     except sqlite3.OperationalError as e:
         return {"ok": False, "error": f"查询失败: {e}", "sql": sql}
+
+    if not rr and mm.get("kind") == "matrix_resource" and level_value is not None:
+        row_axis = str(mm.get("row_axis") or "")
+        col_axis = str(mm.get("col_axis") or "")
+        row_key = kwargs.get(row_axis)
+        col_key = kwargs.get(col_axis)
+        if row_axis and col_axis and row_key not in (None, "") and col_key not in (None, ""):
+            formula_result = evaluate_matrix_formula_value(
+                conn,
+                table_name=table_name,
+                row_axis=row_axis,
+                col_axis=col_axis,
+                row_key=str(row_key),
+                col_key=str(col_key),
+                level=int(level_value),
+                extra_env={str(k): v for k, v in kwargs.items()},
+            )
+            if formula_result.get("ok"):
+                return {
+                    "ok": True,
+                    "value": formula_result.get("value"),
+                    "found": True,
+                    "source": "formula",
+                    "formula": formula_result.get("formula"),
+                    "formula_type": formula_result.get("type"),
+                }
+            if formula_result.get("found"):
+                return {
+                    "ok": False,
+                    "error": str(formula_result.get("error") or "matrix_resource 公式计算失败"),
+                    "formula": formula_result.get("formula"),
+                    "formula_type": formula_result.get("type"),
+                }
 
     # fallback 模式：精确 level 找不到时，回退查 level=NULL 的基准值
     if not rr and scale_mode == "fallback" and level_value is not None:

@@ -12,14 +12,190 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.util.identifiers import assert_english_ident
-from app.services.calculator_ops import register_calculator
 
 
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def ensure_matrix_formula_registry(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS _matrix_formula_registry (
+            table_name TEXT NOT NULL,
+            row_key TEXT NOT NULL,
+            col_key TEXT NOT NULL,
+            formula TEXT NOT NULL,
+            formula_type TEXT NOT NULL DEFAULT 'row',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (table_name, row_key, col_key)
+        )
+        """
+    )
+
+
+def _load_matrix_formulas(
+    conn: sqlite3.Connection,
+    *,
+    table_name: str,
+) -> Dict[Tuple[str, str], Dict[str, str]]:
+    ensure_matrix_formula_registry(conn)
+    cur = conn.execute(
+        """
+        SELECT row_key, col_key, formula, formula_type
+        FROM _matrix_formula_registry
+        WHERE table_name = ?
+        """,
+        (table_name,),
+    )
+    out: Dict[Tuple[str, str], Dict[str, str]] = {}
+    for row_key, col_key, formula, formula_type in cur.fetchall():
+        out[(str(row_key), str(col_key))] = {
+            "formula": str(formula or ""),
+            "type": str(formula_type or "row"),
+        }
+    return out
+
+
+def _classify_matrix_formula(
+    conn: sqlite3.Connection,
+    *,
+    row_axis: str,
+    col_axis: str,
+    raw_formula: str,
+) -> str:
+    from app.services.formula_engine import parse_constant_refs, parse_row_refs, substitute_constants
+    from app.services.formula_exec import _load_constants
+
+    refs = parse_row_refs(raw_formula)
+    allowed_refs = {"level", row_axis, col_axis}
+    external_refs = refs - allowed_refs
+    const_names = parse_constant_refs(raw_formula)
+    constants, missing_consts = _load_constants(conn, const_names)
+    if const_names and not missing_consts:
+        _, missing_after_substitute = substitute_constants(raw_formula, constants)
+        missing_consts = list(set(missing_consts) | set(missing_after_substitute))
+    return "row" if not external_refs and not missing_consts else "row_template"
+
+
+def _upsert_matrix_formula(
+    conn: sqlite3.Connection,
+    *,
+    table_name: str,
+    row_key: str,
+    col_key: str,
+    row_axis: str,
+    col_axis: str,
+    formula: str,
+) -> str:
+    ensure_matrix_formula_registry(conn)
+    formula_type = _classify_matrix_formula(
+        conn,
+        row_axis=row_axis,
+        col_axis=col_axis,
+        raw_formula=formula,
+    )
+    now = _now()
+    conn.execute(
+        """
+        INSERT INTO _matrix_formula_registry
+            (table_name, row_key, col_key, formula, formula_type, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(table_name, row_key, col_key) DO UPDATE SET
+            formula = excluded.formula,
+            formula_type = excluded.formula_type,
+            updated_at = excluded.updated_at
+        """,
+        (table_name, row_key, col_key, formula, formula_type, now, now),
+    )
+    return formula_type
+
+
+def _delete_matrix_formula(
+    conn: sqlite3.Connection,
+    *,
+    table_name: str,
+    row_key: str,
+    col_key: str,
+) -> None:
+    ensure_matrix_formula_registry(conn)
+    conn.execute(
+        """
+        DELETE FROM _matrix_formula_registry
+        WHERE table_name = ? AND row_key = ? AND col_key = ?
+        """,
+        (table_name, row_key, col_key),
+    )
+
+
+def evaluate_matrix_formula_value(
+    conn: sqlite3.Connection,
+    *,
+    table_name: str,
+    row_axis: str,
+    col_axis: str,
+    row_key: str,
+    col_key: str,
+    level: Optional[int],
+    extra_env: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    from app.services.formula_engine import eval_row_formula, parse_constant_refs, substitute_constants
+    from app.services.formula_exec import _load_constants
+
+    formula_entry = _load_matrix_formulas(conn, table_name=table_name).get((row_key, col_key))
+    if not formula_entry:
+        return {"ok": False, "found": False}
+
+    formula = formula_entry["formula"]
+    formula_type = formula_entry["type"]
+    const_names = parse_constant_refs(formula)
+    constants, missing_consts = _load_constants(conn, const_names)
+    compiled = formula
+    if const_names and not missing_consts:
+        compiled, missing_after_substitute = substitute_constants(formula, constants)
+        missing_consts = list(set(missing_consts) | set(missing_after_substitute))
+    if missing_consts:
+        return {
+            "ok": False,
+            "found": True,
+            "formula": formula,
+            "type": formula_type,
+            "error": f"缺少常量：{', '.join(sorted(set(missing_consts)))}",
+        }
+
+    row_dict: Dict[str, Any] = {
+        row_axis: row_key,
+        col_axis: col_key,
+        "level": 0 if level is None else level,
+    }
+    if extra_env:
+        for key, value in extra_env.items():
+            if value is not None and key not in row_dict:
+                row_dict[str(key)] = value
+    value, missing_refs = eval_row_formula(compiled, row_dict, set(row_dict.keys()))
+    if missing_refs:
+        return {
+            "ok": False,
+            "found": True,
+            "formula": formula,
+            "type": "row_template",
+            "error": f"缺少参数：{', '.join(sorted(missing_refs))}",
+        }
+    try:
+        value = round(float(value), 6) if value is not None else None
+    except (TypeError, ValueError):
+        pass
+    return {
+        "ok": True,
+        "found": True,
+        "value": value,
+        "formula": formula,
+        "type": formula_type,
+    }
 
 
 _KIND_META: Dict[str, Dict[str, str]] = {
@@ -51,19 +227,19 @@ def create_matrix_table(
     value_dtype: str = "float",              # float / percent / int
     value_format: str = "0.00%",
     register_calc: bool = True,
-    scale_mode: Optional[str] = None,        # none | fallback | static
+    scale_mode: Optional[str] = None,        # none | fallback | static(旧)
     tags: Optional[List[str]] = None,
     # none    = 无等级维（matrix_attr 默认）；所有 cell 存 level=NULL，调用时忽略 level 参数
-    # fallback= 懒触发（matrix_resource 默认）：先查精确 level，找不到自动回退 level=NULL
-    # static  = 全量预存（旧行为，level 列必须全部填满）
+    # fallback= matrix_resource 的“第三维=公式”模式：二维基准值 + level 公式切片
+    # static  = 全量预存（旧行为，matrix_resource 已禁用）
 ) -> Dict[str, Any]:
     """创建 matrix 表。
 
-    推荐规则（避免写入爆炸）：
-    - matrix_attr  → scale_mode='none'     只存 2D（行×列），level=NULL，全等级同值
-    - matrix_resource → scale_mode='fallback'  先写 level=NULL 作为基准，
-                         只为需要区分等级的 cell 写入具体 level 覆盖值
-    - scale_mode='static' 保留旧行为（要求 AI 填满所有 level，适合极少数场景）
+    推荐规则：
+    - matrix_attr → scale_mode='none'：只存 2D（行×列），level=NULL，全等级同值
+    - matrix_resource → scale_mode='fallback'：第三维改为“公式维”，
+      可写 level=NULL 基准值；若需要等级相关变化，必须为该 (row,col) 注册公式，禁止手填 level 覆盖值
+    - scale_mode='static' 保留给非 matrix_resource 旧表，matrix_resource 不允许再使用
     """
     if kind not in _KIND_META:
         raise ValueError(f"未知 matrix kind={kind}（允许：{list(_KIND_META)}）")
@@ -77,6 +253,8 @@ def create_matrix_table(
         scale_mode = "none" if kind == "matrix_attr" else "fallback"
     if scale_mode not in ("none", "fallback", "static"):
         raise ValueError(f"scale_mode 必须为 none / fallback / static，得到 {scale_mode!r}")
+    if kind == "matrix_resource" and scale_mode == "static":
+        raise ValueError("matrix_resource 不再允许 static 手填第三维；请改用 fallback + formula")
 
     # none 模式强制 levels 为空
     effective_levels: List[int] = []
@@ -114,6 +292,8 @@ def create_matrix_table(
         "rows": [dict(r) for r in rows],
         "cols": [dict(c) for c in cols],
         "levels": effective_levels,
+        "third_axis_name": "level" if kind == "matrix_resource" and scale_mode != "none" else "",
+        "third_axis_formula_only": bool(kind == "matrix_resource" and scale_mode != "none"),
     }
 
     schema_payload = {
@@ -149,6 +329,8 @@ def create_matrix_table(
 
     calc_name = ""
     if register_calc:
+        from app.services.calculator_ops import register_calculator
+
         # 默认 calculator 名 = <table>_lookup
         calc_name = f"{t}_lookup"
         try:
@@ -190,12 +372,12 @@ def write_matrix_cells(
 ) -> Dict[str, Any]:
     """批量写入 matrix 单元格。
 
-    每项: {row, col, level (optional), value, note (optional)}
+    每项: {row, col, level (optional), value, note (optional), formula (optional)}
 
     scale_mode='none' 时 level 参数被忽略，统一存 level=NULL（避免写入爆炸）。
     scale_mode='fallback' 时：
-        - 不指定 level → 写入 level=NULL（作为兜底基准值）
-        - 指定 level → 写入精确等级覆盖值
+        - matrix_resource：第三维改为公式维，可写 level=NULL 基准值；如需第三维，写 formula，禁止手填 level
+        - 其他 matrix：不指定 level → 写入 level=NULL（作为兜底基准值）；指定 level → 写入精确等级覆盖值
     scale_mode='static' 时与旧行为一致。
     """
     t = table_name
@@ -206,28 +388,56 @@ def write_matrix_cells(
     if not row or row[0] != "matrix":
         raise ValueError(f"{t} 不是 matrix 表")
     meta = json.loads(row[1] or "{}") or {}
+    kind = str(meta.get("kind") or "")
     row_axis = meta.get("row_axis") or "row_key"
     col_axis = meta.get("col_axis") or "col_key"
     scale_mode = meta.get("scale_mode") or "static"
 
     written = 0
+    formula_written = 0
     for c in cells:
         r = str(c.get("row") or c.get(row_axis) or "").strip()
         co = str(c.get("col") or c.get(col_axis) or "").strip()
         if not r or not co:
             continue
         raw_lv = c.get("level")
+        has_formula_key = "formula" in c
+        formula = str(c.get("formula") or "").strip()
 
         # 根据 scale_mode 决定存入的 level 值
         if scale_mode == "none":
             lv_int: Optional[int] = None          # 强制 NULL，忽略调用方传的 level
         elif scale_mode == "fallback":
-            lv_int = int(raw_lv) if raw_lv is not None and str(raw_lv) != "" else None
+            if kind == "matrix_resource" and raw_lv is not None and str(raw_lv) != "":
+                raise ValueError("matrix_resource 的第三维禁止手填 level；如需第三维，请为该 cell 写 formula")
+            lv_int = int(raw_lv) if kind != "matrix_resource" and raw_lv is not None and str(raw_lv) != "" else None
         else:  # static
             lv_int = int(raw_lv) if raw_lv is not None and str(raw_lv) != "" else None
 
+        if formula and kind != "matrix_resource":
+            raise ValueError("仅 matrix_resource 支持按 cell 注册第三维公式")
+        if formula and lv_int is not None:
+            raise ValueError("formula 与 level 不能同时填写；第三维公式会自行覆盖 level 维")
+        if has_formula_key:
+            if formula:
+                _upsert_matrix_formula(
+                    conn,
+                    table_name=t,
+                    row_key=r,
+                    col_key=co,
+                    row_axis=str(row_axis),
+                    col_axis=str(col_axis),
+                    formula=formula,
+                )
+                formula_written += 1
+            else:
+                _delete_matrix_formula(conn, table_name=t, row_key=r, col_key=co)
+
         v = c.get("value")
         note = c.get("note") or ""
+        if v is None and formula and not note:
+            # 纯公式定义场景不需要写物理行；仍保留公式注册。
+            continue
         # row_id 按照 (row, col, level_or_null) 构成唯一键
         rid = f"{r}__{co}__{lv_int if lv_int is not None else 'na'}"
         conn.execute(
@@ -240,7 +450,7 @@ def write_matrix_cells(
         )
         written += 1
     conn.commit()
-    return {"ok": True, "written": written, "table_name": t}
+    return {"ok": True, "written": written, "formula_written": formula_written, "table_name": t}
 
 
 def read_matrix(
@@ -253,7 +463,7 @@ def read_matrix(
 ) -> Dict[str, Any]:
     """以宽表形式读取 matrix。
 
-    返回：{ "rows": [...], "cols": [...], "levels": [...], "data": {row: {col: {level: value}}} }
+    返回：{ "rows": [...], "cols": [...], "levels": [...], "data": {row: {col: {level: value}}}, "formula_cells": ... }
     """
     cur = conn.execute(
         "SELECT matrix_meta_json FROM _table_registry WHERE table_name = ?", (table_name,)
@@ -262,6 +472,7 @@ def read_matrix(
     if not row:
         raise ValueError(f"未知表 {table_name}")
     meta = json.loads(row[0] or "{}") or {}
+    kind = str(meta.get("kind") or "")
     row_axis = meta.get("row_axis") or "row_key"
     col_axis = meta.get("col_axis") or "col_key"
 
@@ -294,14 +505,45 @@ def read_matrix(
         out.setdefault(rk, {}).setdefault(ck, {})[str(lv) if lv is not None else "_"] = {
             "value": val, "note": note,
         }
+    formula_map = _load_matrix_formulas(conn, table_name=table_name)
+    formula_cells: Dict[str, Dict[str, Dict[str, str]]] = {}
+    for (rk, ck), formula_info in formula_map.items():
+        if rows and rk not in rows:
+            continue
+        if cols and ck not in cols:
+            continue
+        formula_cells.setdefault(rk, {})[ck] = formula_info
+        if kind == "matrix_resource" and level is not None:
+            exact_cell = out.get(rk, {}).get(ck, {}).get(str(level))
+            if exact_cell is not None:
+                continue
+            evaluated = evaluate_matrix_formula_value(
+                conn,
+                table_name=table_name,
+                row_axis=str(row_axis),
+                col_axis=str(col_axis),
+                row_key=rk,
+                col_key=ck,
+                level=level,
+            )
+            if evaluated.get("ok"):
+                base_note = ((out.get(rk) or {}).get(ck) or {}).get("_", {}).get("note")
+                out.setdefault(rk, {}).setdefault(ck, {})[str(level)] = {
+                    "value": evaluated.get("value"),
+                    "note": base_note,
+                    "source": "formula",
+                }
     return {
         "ok": True,
         "table_name": table_name,
+        "kind": kind,
         "row_axis": row_axis,
         "col_axis": col_axis,
         "rows": [r["key"] for r in (meta.get("rows") or [])],
         "cols": [c["key"] for c in (meta.get("cols") or [])],
         "levels": meta.get("levels") or [],
+        "preview_level": level,
+        "formula_cells": formula_cells,
         "data": out,
     }
 

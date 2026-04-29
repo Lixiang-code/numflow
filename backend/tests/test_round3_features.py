@@ -1,6 +1,7 @@
 """第3轮新增功能的最小覆盖测试：matrix 表 / calculator 注册 / 表目录 / 暴露参数。"""
 from __future__ import annotations
 
+import json
 import pathlib
 import sqlite3
 import sys
@@ -20,7 +21,7 @@ from app.services.calculator_ops import (
     list_calculators,
     call_calculator,
 )
-from app.services.table_ops import create_dynamic_table
+from app.services.table_ops import create_dynamic_table, create_3d_table, read_3d_table
 
 
 def _new_conn() -> sqlite3.Connection:
@@ -233,6 +234,101 @@ def test_matrix_fallback_scale_mode():
     assert res.get("fallback") is True
 
 
+def test_matrix_resource_formula_third_axis_piecewise():
+    conn = _new_conn()
+    create_matrix_table(
+        conn,
+        table_name="res_formula_piecewise",
+        display_name="资源分配公式表",
+        kind="matrix_resource",
+        rows=[{"key": "equip_base", "display_name": "装备·基础", "brief": ""}],
+        cols=[{"key": "gold", "display_name": "金币", "brief": ""}],
+        directory="分配/资源",
+        scale_mode="fallback",
+        register_calc=True,
+    )
+    out = write_matrix_cells(
+        conn,
+        table_name="res_formula_piecewise",
+        cells=[{
+            "row": "equip_base",
+            "col": "gold",
+            "formula": "piecewise(@level <= 5, 0.1, @level <= 10, 0.2, 0.3)",
+        }],
+    )
+    assert out["formula_written"] == 1
+
+    res = call_calculator(
+        conn,
+        name="res_formula_piecewise_lookup",
+        kwargs={"gameplay": "equip_base", "res_id": "gold", "level": 8},
+    )
+    assert res["found"] is True
+    assert res["source"] == "formula"
+    assert res["formula_type"] == "row"
+    assert res["value"] == 0.2
+
+    snap = read_matrix(conn, table_name="res_formula_piecewise", level=8)
+    assert snap["formula_cells"]["equip_base"]["gold"]["type"] == "row"
+    assert snap["data"]["equip_base"]["gold"]["8"]["value"] == 0.2
+
+
+def test_matrix_resource_formula_third_axis_accepts_runtime_params():
+    conn = _new_conn()
+    create_matrix_table(
+        conn,
+        table_name="res_formula_param",
+        display_name="资源参数公式表",
+        kind="matrix_resource",
+        rows=[{"key": "equip_base", "display_name": "装备·基础", "brief": ""}],
+        cols=[{"key": "gold", "display_name": "金币", "brief": ""}],
+        directory="分配/资源",
+        scale_mode="fallback",
+        register_calc=True,
+    )
+    write_matrix_cells(
+        conn,
+        table_name="res_formula_param",
+        cells=[{
+            "row": "equip_base",
+            "col": "gold",
+            "formula": "@level * @vip_mult",
+        }],
+    )
+    res = call_calculator(
+        conn,
+        name="res_formula_param_lookup",
+        kwargs={"gameplay": "equip_base", "res_id": "gold", "level": 3, "vip_mult": 2},
+    )
+    assert res["found"] is True
+    assert res["formula_type"] == "row_template"
+    assert res["value"] == 6.0
+
+
+def test_matrix_resource_rejects_manual_level_write():
+    conn = _new_conn()
+    create_matrix_table(
+        conn,
+        table_name="res_formula_guard",
+        display_name="资源分配守卫",
+        kind="matrix_resource",
+        rows=[{"key": "equip_base", "display_name": "装备·基础", "brief": ""}],
+        cols=[{"key": "gold", "display_name": "金币", "brief": ""}],
+        directory="分配/资源",
+        scale_mode="fallback",
+        register_calc=True,
+    )
+    try:
+        write_matrix_cells(
+            conn,
+            table_name="res_formula_guard",
+            cells=[{"row": "equip_base", "col": "gold", "level": 2, "value": 0.3}],
+        )
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "禁止手填 level" in str(exc)
+
+
 def test_matrix_none_scale_mode_ignores_level():
     """none 模式：写入时忽略 level，read_matrix 不过滤 level。"""
     conn = _new_conn()
@@ -256,6 +352,50 @@ def test_matrix_none_scale_mode_ignores_level():
     snap = read_matrix(conn, table_name="attr_alloc2")
     data = snap["data"]
     assert data["skill"]["atk"]["_"]["value"] == 0.3  # key='_' 表示 level=NULL
+
+
+def test_create_3d_table_snapshot_and_formula_with_constants():
+    conn = _new_conn()
+    now = "2026-01-01T00:00:00Z"
+    conn.execute(
+        """
+        INSERT INTO _constants(name_en, name_zh, value_json, brief, scope_table, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?)
+        """,
+        ("gem_base_atk", "宝石基础攻击", json.dumps(10.0), "用于宝石成长公式", None, now, now),
+    )
+    conn.commit()
+
+    res = create_3d_table(
+        conn,
+        table_name="gem_attr",
+        display_name="宝石属性表",
+        dim1={
+            "col_name": "tier",
+            "display_name": "品阶",
+            "keys": [{"key": "1", "display_name": "1阶"}, {"key": "2", "display_name": "2阶"}],
+        },
+        dim2={
+            "col_name": "gem_type",
+            "display_name": "宝石类型",
+            "keys": [{"key": "atk", "display_name": "攻击宝石"}, {"key": "def", "display_name": "防御宝石"}],
+        },
+        cols=[
+            {"key": "atk_bonus", "display_name": "攻击加成", "formula": "@tier * ${gem_base_atk}"},
+            {"key": "def_bonus", "display_name": "防御加成", "formula": "@tier * 2"},
+        ],
+        directory="落地/宝石",
+        tags=["宝石", "落地"],
+    )
+    assert res["ok"] is True
+    assert res["formula_errors"] == []
+
+    snap = read_3d_table(conn, table_name="gem_attr")
+    assert snap["display_name"] == "宝石属性表"
+    assert snap["data"]["1"]["atk"]["atk_bonus"] == 10.0
+    assert snap["data"]["2"]["def"]["atk_bonus"] == 20.0
+    assert snap["data"]["2"]["atk"]["def_bonus"] == 4.0
+    assert snap["column_formulas"]["atk_bonus"]["type"] == "row"
 
 
 # ---------- pipeline step specs ----------

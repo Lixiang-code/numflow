@@ -366,6 +366,76 @@ def create_3d_table(
     }
 
 
+def read_3d_table(conn: sqlite3.Connection, *, table_name: str) -> Dict[str, Any]:
+    """读取三维矩阵表快照，供前端按 sheet 方式渲染。"""
+    t = assert_ident_loose(table_name)
+    cur = conn.execute(
+        "SELECT schema_json, matrix_meta_json FROM _table_registry WHERE table_name = ?",
+        (t,),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise ValueError(f"未知表 {t}")
+    schema = json.loads(row[0] or "{}") or {}
+    matrix_meta = json.loads(row[1] or "{}") or {}
+    if matrix_meta.get("kind") != "3d_matrix":
+        raise ValueError(f"{t} 不是三维表")
+
+    dim1 = matrix_meta.get("dim1") or {}
+    dim2 = matrix_meta.get("dim2") or {}
+    cols = matrix_meta.get("cols") or []
+    dim1_col = str(dim1.get("col_name") or "")
+    dim2_col = str(dim2.get("col_name") or "")
+    if not dim1_col or not dim2_col:
+        raise ValueError(f"{t} 缺少三维表维度定义")
+
+    data: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    cur = conn.execute(f'SELECT * FROM "{t}"')
+    col_names = [str(item[0]) for item in (cur.description or [])]
+    for rec in cur.fetchall():
+        d = dict(rec) if isinstance(rec, sqlite3.Row) else dict(zip(col_names, rec))
+        dim1_key = str(d.get(dim1_col))
+        dim2_key = str(d.get(dim2_col))
+        values: Dict[str, Any] = {}
+        for col in cols:
+            key = str(col.get("key") or "").strip()
+            if key:
+                values[key] = d.get(key)
+        data.setdefault(dim1_key, {})[dim2_key] = values
+
+    cur = conn.execute(
+        """
+        SELECT column_name, formula, COALESCE(formula_type, 'sql') AS formula_type
+        FROM _formula_registry
+        WHERE table_name = ?
+        ORDER BY column_name
+        """,
+        (t,),
+    )
+    column_formulas = {}
+    for rec in cur.fetchall():
+        if isinstance(rec, sqlite3.Row):
+            column_name = str(rec["column_name"])
+            formula = str(rec["formula"])
+            formula_type = str(rec["formula_type"])
+        else:
+            column_name = str(rec[0])
+            formula = str(rec[1])
+            formula_type = str(rec[2])
+        column_formulas[column_name] = {"formula": formula, "type": formula_type}
+
+    return {
+        "ok": True,
+        "table_name": t,
+        "display_name": (schema.get("display_name") if isinstance(schema, dict) else "") or "",
+        "dim1": dim1,
+        "dim2": dim2,
+        "cols": cols,
+        "column_formulas": column_formulas,
+        "row_count": sum(len(v) for v in data.values()),
+        "data": data,
+    }
+
 
 def delete_dynamic_table(conn: sqlite3.Connection, *, table_name: str, confirm: Union[bool, str, int]) -> Dict[str, Any]:
     """删除动态表及元数据；若有公式依赖本表列则拒绝。"""
