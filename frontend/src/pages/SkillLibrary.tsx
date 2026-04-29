@@ -7,10 +7,10 @@ import { apiFetch, projectHeaders } from '../api'
  * 自适应高度文本框：默认显示「内容行数 + 1」行，超过 10 行则定高 + 出现滚动条。
  * 同时禁用拖动 resize，以保证页面节奏稳定。
  */
-type AutoTextareaProps = TextareaHTMLAttributes<HTMLTextAreaElement> & { value: string }
-const MAX_AUTO_ROWS = 10
+type AutoTextareaProps = TextareaHTMLAttributes<HTMLTextAreaElement> & { value: string; maxRows?: number }
+const DEFAULT_MAX_ROWS = 10
 
-function AutoTextarea({ value, className, onInput, ...rest }: AutoTextareaProps) {
+function AutoTextarea({ value, className, onInput, maxRows = DEFAULT_MAX_ROWS, ...rest }: AutoTextareaProps) {
   const ref = useRef<HTMLTextAreaElement | null>(null)
 
   const resize = useCallback(() => {
@@ -22,14 +22,14 @@ function AutoTextarea({ value, className, onInput, ...rest }: AutoTextareaProps)
     const pb = parseFloat(cs.paddingBottom) || 0
     const bt = parseFloat(cs.borderTopWidth) || 0
     const bb = parseFloat(cs.borderBottomWidth) || 0
-    const maxH = lh * MAX_AUTO_ROWS + pt + pb + bt + bb
+    const maxH = lh * maxRows + pt + pb + bt + bb
     el.style.height = 'auto'
     // scrollHeight 含 padding，加 1 行 buffer 让用户继续输入
     const desired = el.scrollHeight + lh + bt + bb
     const finalH = Math.min(desired, maxH)
     el.style.height = `${finalH}px`
     el.style.overflowY = desired > maxH ? 'auto' : 'hidden'
-  }, [])
+  }, [maxRows])
 
   useLayoutEffect(() => {
     resize()
@@ -923,6 +923,7 @@ export default function SkillLibrary() {
                           {visibleSkillModules.map((module) => {
                             const realIndex = skillDraft.modules.indexOf(module)
                             const modDirty = dirtySkillModuleIndices.has(realIndex)
+                            const singleModule = visibleSkillModules.length === 1
                             return (
                               <div key={`${module.id ?? 'new'}-${realIndex}`} className={`sl-module${module.required ? ' required' : ''}${modDirty ? ' sl-module-dirty' : ''}`}>
                                 <div className="sl-module-head">
@@ -957,6 +958,7 @@ export default function SkillLibrary() {
                                 <AutoTextarea
                                   className="sl-module-content sl-input-ai"
                                   value={module.content}
+                                  maxRows={singleModule ? 30 : 10}
                                   onChange={(e) => updateSkillModule(realIndex, { content: e.target.value })}
                                   placeholder="模块内容（AI 可见，支持 Markdown）"
                                 />
@@ -984,18 +986,6 @@ export default function SkillLibrary() {
             </>
           ) : (
             <>
-              <div className="sl-preview-pane">
-                <div className="sl-preview-head">
-                  <div className="sl-preview-title">
-                    {tab === 'tool' ? '🔧 工具字段预览（发送给 AI 的 description 内容）' : '🔭 运行时拼装预览（发送给 AI 的文本）'}
-                    <span className="sl-preview-pinbadge">置顶</span>
-                  </div>
-                  <div className="sl-preview-meta">{promptDraft?.prompt_key || '—'}</div>
-                </div>
-                <pre className={`sl-preview-body${runtimePreview ? '' : ' empty'}`}>
-                  {runtimePreview || '当前无启用模块内容。'}
-                </pre>
-              </div>
               <div className="sl-editor-pane">
                 <div className="sl-main-inner">
                   {promptDraft ? (
@@ -1059,6 +1049,19 @@ export default function SkillLibrary() {
                         )}
                       </section>
 
+                      {/* ── 运行时预览（基本信息后、模块前）────────── */}
+                      <div className="sl-preview-inline">
+                        <div className="sl-preview-head">
+                          <div className="sl-preview-title">
+                            {tab === 'tool' ? '🔧 工具字段预览（发送给 AI 的 description 内容）' : '🔭 运行时拼装预览（发送给 AI 的文本）'}
+                          </div>
+                          <div className="sl-preview-meta">{promptDraft.prompt_key || '—'}</div>
+                        </div>
+                        <pre className={`sl-preview-body${runtimePreview ? '' : ' empty'}`}>
+                          {runtimePreview || '当前无启用模块内容。'}
+                        </pre>
+                      </div>
+
                       <section className="sl-card">
                         <div className="sl-card-head">
                           <div>
@@ -1086,6 +1089,7 @@ export default function SkillLibrary() {
                           {visiblePromptModules.map((module) => {
                             const realIndex = promptDraft.modules.indexOf(module)
                             const modDirty = dirtyPromptModuleIndices.has(realIndex)
+                            const singleModule = visiblePromptModules.length === 1
                             return (
                               <div key={`${module.id ?? 'default'}-${module.module_key ?? realIndex}`} className={`sl-module${module.required ? ' required' : ''}${modDirty ? ' sl-module-dirty' : ''}`}>
                                 <div className="sl-module-head">
@@ -1116,6 +1120,7 @@ export default function SkillLibrary() {
                                 <AutoTextarea
                                   className="sl-module-content sl-input-ai"
                                   value={module.content}
+                                  maxRows={singleModule ? 30 : 10}
                                   onChange={(e) => updatePromptModule(realIndex, { content: e.target.value })}
                                   placeholder="模块内容（AI 可见，支持 Markdown）"
                                 />
