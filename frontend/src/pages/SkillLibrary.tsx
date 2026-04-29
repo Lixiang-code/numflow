@@ -45,6 +45,12 @@ type PromptItem = {
   default_reference_note?: string
   default_enabled?: boolean
   default_modules?: PromptModule[]
+  tool_group_key?: string
+  tool_group_label?: string
+  tool_group_order?: number
+  tool_group_hint?: string
+  tool_name_zh?: string
+  tool_summary_zh?: string
   diagnostics?: {
     default_module_keys?: string[]
     extra_module_keys?: string[]
@@ -54,6 +60,13 @@ type PromptItem = {
 }
 
 type PromptTab = 'skill' | 'system' | 'tool'
+type ToolPromptGroup = {
+  key: string
+  label: string
+  hint: string
+  order: number
+  items: PromptItem[]
+}
 
 type ToastItem = { id: number; type: 'success' | 'error'; message: string }
 
@@ -117,25 +130,6 @@ function renderToolModules(modules: PromptModule[]): string {
       return `▸ ${label}\n${m.content.trim()}`
     })
     .join('\n\n' + '─'.repeat(48) + '\n\n')
-}
-
-function buildToolEffectiveSignature(modules: PromptModule[]): string {
-  return JSON.stringify(
-    modules
-      .filter((module) => module.required || module.enabled)
-      .map((module) => ({
-        module_key: module.module_key || '',
-        content: module.content.trim(),
-      }))
-      .filter((module) => module.module_key || module.content)
-      .sort((a, b) => a.module_key.localeCompare(b.module_key)),
-  )
-}
-
-function buildPromptEffectiveSignature(category: Exclude<PromptTab, 'skill'>, modules: PromptModule[]): string {
-  return category === 'tool'
-    ? buildToolEffectiveSignature(modules)
-    : renderModules(modules).trim()
 }
 
 // ── Draft cache types ─────────────────────────────────────────────────────
@@ -736,50 +730,6 @@ export default function SkillLibrary() {
       : renderModules(promptDraft?.default_modules || []),
     [promptDraft, tab],
   )
-  const effectivePromptSignature = useMemo(
-    () => tab === 'skill'
-      ? ''
-      : buildPromptEffectiveSignature(tab, promptDraft?.modules || []),
-    [promptDraft, tab],
-  )
-  const defaultEffectivePromptSignature = useMemo(
-    () => tab === 'skill'
-      ? ''
-      : buildPromptEffectiveSignature(tab, promptDraft?.default_modules || []),
-    [promptDraft, tab],
-  )
-  const promptDefaultChanged = useMemo(
-    () => effectivePromptSignature !== defaultEffectivePromptSignature,
-    [defaultEffectivePromptSignature, effectivePromptSignature],
-  )
-  const promptModuleDiff = useMemo(() => {
-    if (!promptDraft) {
-      return { changed: 0, added: 0, enabledChanged: 0, orphanKeys: [] as string[] }
-    }
-    const baseModules = promptDraft.default_modules || []
-    const baseByKey = new Map(baseModules.map((module, idx) => [module.module_key || `__default_${idx}`, module]))
-    let changed = 0
-    let added = 0
-    let enabledChanged = 0
-    for (const [idx, module] of promptDraft.modules.entries()) {
-      const key = module.module_key || `__draft_${idx}`
-      const base = baseByKey.get(key)
-      if (!base) {
-        added += 1
-        continue
-      }
-      if (module.content.trim() !== base.content.trim()) changed += 1
-      const enabledNow = Boolean(module.required || module.enabled)
-      const enabledBase = Boolean(base.required || base.enabled)
-      if (enabledNow !== enabledBase) enabledChanged += 1
-    }
-    return {
-      changed,
-      added,
-      enabledChanged,
-      orphanKeys: promptDraft.diagnostics?.orphan_module_keys || [],
-    }
-  }, [promptDraft])
 
   // ── Per-module and section dirty detection ────────────────────────────────
   const dirtySkillModuleIndices = useMemo((): Set<number> => {
@@ -862,6 +812,31 @@ export default function SkillLibrary() {
     if (!editingPromptKey || !promptDraft || !activePromptBaseline || tab === 'skill') return false
     return promptDraft.enabled !== activePromptBaseline.enabled
   }, [activePromptBaseline, editingPromptKey, promptDraft, tab])
+  const toolPromptGroups = useMemo((): ToolPromptGroup[] => {
+    if (tab !== 'tool') return []
+    const groups = new Map<string, ToolPromptGroup>()
+    for (const item of promptItems) {
+      const key = item.tool_group_key || 'other'
+      const current = groups.get(key) ?? {
+        key,
+        label: item.tool_group_label || '其他工具',
+        hint: item.tool_group_hint || '',
+        order: item.tool_group_order ?? 999,
+        items: [],
+      }
+      current.items.push(item)
+      groups.set(key, current)
+    }
+    return Array.from(groups.values())
+      .map((group) => ({
+        ...group,
+        items: [...group.items].sort((a, b) => {
+          if (a.enabled !== b.enabled) return a.enabled ? -1 : 1
+          return (a.tool_name_zh || a.title).localeCompare((b.tool_name_zh || b.title), 'zh-CN')
+        }),
+      }))
+      .sort((a, b) => a.order - b.order || a.label.localeCompare(b.label, 'zh-CN'))
+  }, [promptItems, tab])
 
   return (
     <div className="sl-page">
@@ -1028,12 +1003,14 @@ export default function SkillLibrary() {
                   )
                 })()
               : (() => {
-                  const enabled  = promptItems.filter((i) => i.enabled)
-                  const disabled = promptItems.filter((i) => !i.enabled)
                   const renderPrompt = (item: PromptItem) => {
                     const active = item.prompt_key === editingPromptKey
                     const dirty  = isPromptDirty(item.prompt_key)
                     const conflict = conflictPromptKeys.has(promptCacheKey(tab as 'system' | 'tool', item.prompt_key))
+                    const displayTitle = tab === 'tool' ? (item.tool_name_zh || item.title) : item.title
+                    const displaySummary = tab === 'tool'
+                      ? (item.tool_summary_zh || item.summary || item.description || '')
+                      : (item.summary || '')
                     return (
                       <button
                         key={item.prompt_key}
@@ -1060,19 +1037,41 @@ export default function SkillLibrary() {
                           applyPromptSelection(item.prompt_key, draft, baseline)
                           setShowAllPromptModules(false)
                         }}
-                        className={`sl-list-item${active ? ' active' : ''}${dirty ? ' sl-dirty-item' : ''}${conflict ? ' sl-conflict-item' : ''}`}
+                        className={`sl-list-item${active ? ' active' : ''}${dirty ? ' sl-dirty-item' : ''}${conflict ? ' sl-conflict-item' : ''}${!item.enabled ? ' sl-list-item-disabled' : ''}`}
                       >
                         <div className="sl-row">
                           <span className="sl-name">
                             {conflict && <span className="sl-conflict-icon-inline" title="存在未解决的服务端冲突">⚡</span>}
-                            {item.title}
+                            {displayTitle}
                           </span>
                           <span className="sl-meta">{dirty ? <span className="sl-dirty-tag">编辑中</span> : (item.override ? '已覆盖' : '默认')}</span>
                         </div>
+                        {displaySummary && <div className="sl-desc">{displaySummary}</div>}
                         <div className="sl-key">{item.prompt_key}</div>
+                        {tab === 'tool' && (
+                          <div className="sl-chips">
+                            {!item.enabled && <span className="sl-chip amber">未启用</span>}
+                            {item.override && <span className="sl-chip">已覆盖默认</span>}
+                          </div>
+                        )}
                       </button>
                     )
                   }
+                  if (tab === 'tool') {
+                    return (
+                      <>
+                        {toolPromptGroups.map((group) => (
+                          <div key={group.key} className="sl-group-block">
+                            <div className="sl-group-label">{group.label} ({group.items.length})</div>
+                            {group.hint ? <div className="sl-group-help">{group.hint}</div> : null}
+                            {group.items.map(renderPrompt)}
+                          </div>
+                        ))}
+                      </>
+                    )
+                  }
+                  const enabled  = promptItems.filter((i) => i.enabled)
+                  const disabled = promptItems.filter((i) => !i.enabled)
                   const collapsed = disabledCollapsed[tab]
                   return (
                     <>
@@ -1331,7 +1330,12 @@ export default function SkillLibrary() {
                             <div className="sl-grid cols-2">
                               <label className="sl-field">
                                 <span className="sl-label">标题</span>
-                                <input className="sl-input-dev" value={promptDraft.title} onChange={(e) => updatePromptDraft('title', e.target.value)} />
+                                <input
+                                  className="sl-input-dev"
+                                  value={tab === 'tool' ? (promptDraft.tool_name_zh || promptDraft.title) : promptDraft.title}
+                                  onChange={tab === 'tool' ? undefined : (e) => updatePromptDraft('title', e.target.value)}
+                                  readOnly={tab === 'tool'}
+                                />
                               </label>
                               <label className="sl-field">
                                 <span className="sl-label">引用 Key</span>
@@ -1362,8 +1366,6 @@ export default function SkillLibrary() {
                         <div className="sl-preview-head">
                           <div className="sl-preview-title">
                             {tab === 'tool' ? '🔧 工具字段预览（发送给 AI 的 description 内容）' : '🔭 运行时拼装预览（发送给 AI 的文本）'}
-                            {promptDefaultChanged && <span className="sl-preview-tag warn">已偏离默认</span>}
-                            {!promptDefaultChanged && promptDraft.default_modules?.length ? <span className="sl-preview-tag">与默认一致</span> : null}
                           </div>
                           <div className="sl-preview-meta">
                             {promptDraft.prompt_key || '—'}
@@ -1378,22 +1380,6 @@ export default function SkillLibrary() {
                           {runtimePreview || '当前无启用模块内容。'}
                         </pre>
                       </div>
-                      {(promptDefaultChanged || promptModuleDiff.orphanKeys.length > 0) && (
-                        <div className="sl-card" style={{ padding: '0.85rem 1rem' }}>
-                          <div className="sl-sub" style={{ marginBottom: promptModuleDiff.orphanKeys.length > 0 ? '0.55rem' : 0 }}>
-                            相对默认：
-                            {promptModuleDiff.changed > 0 ? ` 改写 ${promptModuleDiff.changed} 个模块；` : ' 内容未改写；'}
-                            {promptModuleDiff.enabledChanged > 0 ? ` 启停变化 ${promptModuleDiff.enabledChanged} 个；` : ''}
-                            {promptModuleDiff.added > 0 ? ` 额外模块 ${promptModuleDiff.added} 个；` : ''}
-                          </div>
-                          {promptModuleDiff.orphanKeys.length > 0 && (
-                            <div className="err small" style={{ marginBottom: '0.35rem' }}>
-                              以下 module_key 当前不会落到真实工具 schema，上线前应清理或迁回现有字段：
-                              <code style={{ marginLeft: 6 }}>{promptModuleDiff.orphanKeys.join(', ')}</code>
-                            </div>
-                          )}
-                        </div>
-                      )}
                       {promptDraft.default_modules?.length ? (
                         <details className="sl-card">
                           <summary style={{ cursor: 'pointer', fontWeight: 600 }}>查看系统默认版本</summary>
