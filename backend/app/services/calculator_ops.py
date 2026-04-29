@@ -11,7 +11,7 @@ import sqlite3
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
-from app.services.matrix_table_ops import evaluate_matrix_formula_value
+from app.services.matrix_table_ops import _matrix_resource_state, evaluate_matrix_formula_value
 
 
 _VALID_KINDS = {"matrix_attr", "matrix_resource", "lookup"}
@@ -182,8 +182,13 @@ def call_calculator(
                     "formula_type": formula_result.get("type"),
                 }
 
-    # fallback 模式：精确 level 找不到时，回退查 level=NULL 的基准值
+    # fallback 模式：精确 level 找不到时，若该表未进入公式模式，则回退查 level=NULL 的基准值
     if not rr and scale_mode == "fallback" and level_value is not None:
+        formula_mode = False
+        if mm.get("kind") == "matrix_resource":
+            formula_mode = bool(_matrix_resource_state(conn, table_name=table_name).get("formula_count"))
+        if formula_mode:
+            return {"ok": True, "value": None, "found": False, "reason": "formula_mode_no_literal_fallback"}
         fallback_where = [w for w, _ in zip(where, params) if '"level"' not in w]
         fallback_params = [p for w, p in zip(where, params) if '"level"' not in w]
         fb_sql = (

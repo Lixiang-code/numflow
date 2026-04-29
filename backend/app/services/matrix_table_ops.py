@@ -132,6 +132,35 @@ def _delete_matrix_formula(
     )
 
 
+def _matrix_resource_state(conn: sqlite3.Connection, *, table_name: str) -> Dict[str, Any]:
+    ensure_matrix_formula_registry(conn)
+    formula_count = int(
+        conn.execute(
+            "SELECT COUNT(1) FROM _matrix_formula_registry WHERE table_name = ?",
+            (table_name,),
+        ).fetchone()[0]
+    )
+    cur = conn.execute(
+        f'''
+        SELECT level, COUNT(1)
+        FROM "{table_name}"
+        WHERE value IS NOT NULL
+        GROUP BY level
+        '''
+    )
+    literal_levels: List[Optional[int]] = []
+    literal_rows = 0
+    for level, count in cur.fetchall():
+        literal_levels.append(None if level is None else int(level))
+        literal_rows += int(count or 0)
+    return {
+        "formula_count": formula_count,
+        "literal_rows": literal_rows,
+        "has_base_literal": any(level is None for level in literal_levels),
+        "explicit_levels": {int(level) for level in literal_levels if level is not None},
+    }
+
+
 def evaluate_matrix_formula_value(
     conn: sqlite3.Connection,
     *,
@@ -230,15 +259,18 @@ def create_matrix_table(
     scale_mode: Optional[str] = None,        # none | fallback | static(旧)
     tags: Optional[List[str]] = None,
     # none    = 无等级维（matrix_attr 默认）；所有 cell 存 level=NULL，调用时忽略 level 参数
-    # fallback= matrix_resource 的“第三维=公式”模式：二维基准值 + level 公式切片
+    # fallback= matrix_resource 的“第三维=切片/公式”模式：
+    #           单切片时可写常量；切片数 > 1 时内容必须改为公式
     # static  = 全量预存（旧行为，matrix_resource 已禁用）
 ) -> Dict[str, Any]:
     """创建 matrix 表。
 
     推荐规则：
     - matrix_attr → scale_mode='none'：只存 2D（行×列），level=NULL，全等级同值
-    - matrix_resource → scale_mode='fallback'：第三维改为“公式维”，
-      可写 level=NULL 基准值；若需要等级相关变化，必须为该 (row,col) 注册公式，禁止手填 level 覆盖值
+    - matrix_resource → scale_mode='fallback'：
+      第三维轴值（如等级）本身允许手填；但限制的是内容——
+      若第三维切片数只有 1，可写常量/字符串；
+      若第三维切片数 > 1，则整表内容必须改为公式，不允许手填多个切片常量
     - scale_mode='static' 保留给非 matrix_resource 旧表，matrix_resource 不允许再使用
     """
     if kind not in _KIND_META:
@@ -293,7 +325,8 @@ def create_matrix_table(
         "cols": [dict(c) for c in cols],
         "levels": effective_levels,
         "third_axis_name": "level" if kind == "matrix_resource" and scale_mode != "none" else "",
-        "third_axis_formula_only": bool(kind == "matrix_resource" and scale_mode != "none"),
+        "third_axis_values_manual": bool(kind == "matrix_resource" and scale_mode != "none"),
+        "third_axis_content_rule": "single_slice_literal_or_formula" if kind == "matrix_resource" and scale_mode != "none" else "",
     }
 
     schema_payload = {
@@ -347,7 +380,7 @@ def create_matrix_table(
                 value_column="value",
                 brief=(
                     f"按 ({row_axis_name}, {col_axis_name}) 查询 {display_name} 的投放比例；"
-                    f"scale_mode={scale_mode}，'none' 时 level 参数忽略，'fallback' 时先查精确 level 再退 NULL。"
+                    f"scale_mode={scale_mode}。matrix_resource 在 fallback 下：单切片可常量，多切片必须公式。"
                 ),
             )
         except Exception:  # noqa: BLE001
@@ -376,7 +409,7 @@ def write_matrix_cells(
 
     scale_mode='none' 时 level 参数被忽略，统一存 level=NULL（避免写入爆炸）。
     scale_mode='fallback' 时：
-        - matrix_resource：第三维改为公式维，可写 level=NULL 基准值；如需第三维，写 formula，禁止手填 level
+        - matrix_resource：第三维轴值（如 level）可手填；但若字面量切片数 > 1，则拒绝写入并要求改为 formula
         - 其他 matrix：不指定 level → 写入 level=NULL（作为兜底基准值）；指定 level → 写入精确等级覆盖值
     scale_mode='static' 时与旧行为一致。
     """
@@ -393,8 +426,13 @@ def write_matrix_cells(
     col_axis = meta.get("col_axis") or "col_key"
     scale_mode = meta.get("scale_mode") or "static"
 
+    state = _matrix_resource_state(conn, table_name=t) if kind == "matrix_resource" else {}
     written = 0
     formula_written = 0
+    batch_formula_pairs: List[Tuple[str, str]] = []
+    batch_literal_pairs: List[Tuple[str, str]] = []
+    batch_has_base_literal = False
+    batch_explicit_levels: set[int] = set()
     for c in cells:
         r = str(c.get("row") or c.get(row_axis) or "").strip()
         co = str(c.get("col") or c.get(col_axis) or "").strip()
@@ -403,21 +441,46 @@ def write_matrix_cells(
         raw_lv = c.get("level")
         has_formula_key = "formula" in c
         formula = str(c.get("formula") or "").strip()
+        v = c.get("value")
+        note = c.get("note") or ""
 
         # 根据 scale_mode 决定存入的 level 值
         if scale_mode == "none":
             lv_int: Optional[int] = None          # 强制 NULL，忽略调用方传的 level
         elif scale_mode == "fallback":
-            if kind == "matrix_resource" and raw_lv is not None and str(raw_lv) != "":
-                raise ValueError("matrix_resource 的第三维禁止手填 level；如需第三维，请为该 cell 写 formula")
-            lv_int = int(raw_lv) if kind != "matrix_resource" and raw_lv is not None and str(raw_lv) != "" else None
+            lv_int = int(raw_lv) if raw_lv is not None and str(raw_lv) != "" else None
         else:  # static
             lv_int = int(raw_lv) if raw_lv is not None and str(raw_lv) != "" else None
 
         if formula and kind != "matrix_resource":
             raise ValueError("仅 matrix_resource 支持按 cell 注册第三维公式")
-        if formula and lv_int is not None:
-            raise ValueError("formula 与 level 不能同时填写；第三维公式会自行覆盖 level 维")
+        if formula and v is not None:
+            raise ValueError("同一 cell 不能同时填写 value 与 formula；多切片第三维请只保留 formula")
+        if kind == "matrix_resource":
+            if formula:
+                batch_formula_pairs.append((r, co))
+            elif v is not None:
+                batch_literal_pairs.append((r, co))
+                if lv_int is None:
+                    batch_has_base_literal = True
+                else:
+                    batch_explicit_levels.add(lv_int)
+
+        if kind == "matrix_resource" and scale_mode == "fallback":
+            if batch_formula_pairs and batch_literal_pairs:
+                raise ValueError("matrix_resource 不能混写常量与公式；第三维切片数 > 1 时整表内容必须是公式")
+            if batch_formula_pairs:
+                if state.get("literal_rows", 0) > 0:
+                    raise ValueError("当前 matrix_resource 表里已有常量内容；若要启用多切片第三维，请新建公式表或先清理旧常量")
+            elif batch_literal_pairs:
+                if state.get("formula_count", 0) > 0:
+                    raise ValueError("当前 matrix_resource 表已进入公式模式；不能再追加常量内容")
+                effective_levels = set(state.get("explicit_levels") or set()) | batch_explicit_levels
+                has_base_literal = bool(state.get("has_base_literal")) or batch_has_base_literal
+                literal_slice_count = len(effective_levels) + (1 if has_base_literal else 0)
+                if literal_slice_count > 1:
+                    raise ValueError("matrix_resource 的第三维切片数 > 1 时，内容必须全部改为 formula，不能手填多个常量切片")
+
         if has_formula_key:
             if formula:
                 _upsert_matrix_formula(
@@ -433,8 +496,6 @@ def write_matrix_cells(
             else:
                 _delete_matrix_formula(conn, table_name=t, row_key=r, col_key=co)
 
-        v = c.get("value")
-        note = c.get("note") or ""
         if v is None and formula and not note:
             # 纯公式定义场景不需要写物理行；仍保留公式注册。
             continue

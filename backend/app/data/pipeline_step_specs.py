@@ -64,9 +64,9 @@ _MATRIX_TABLE_HINT = (
     "①使用 create_matrix_table 创建（kind=matrix_attr 或 matrix_resource）；"
     "②【避免写入爆炸】scale_mode 默认规则：\n"
     "   matrix_attr  → scale_mode='none'    纯 2D，无等级维，write_matrix_cells 不传 level；\n"
-    "   matrix_resource → scale_mode='fallback' 先写 level=NULL 基准值，\n"
-    "   只对有等级差异的 cell 写入 level 覆盖，call_calculator 自动回退基准；\n"
-    "   【禁止使用 scale_mode='static' 填满所有 level，除非设计上必须每级不同且已说明原因】\n"
+    "   matrix_resource → scale_mode='fallback' 时，第三维轴值（如等级）可以手填；\n"
+    "   但限制的是内容：第三维切片数=1 时可写常量，切片数>1 时必须改成 formula（允许参数公式 / piecewise 分段公式）；\n"
+    "   call_calculator 优先按公式算 level 切片；单切片常量模式下才回退基准；【禁止 matrix_resource 使用 scale_mode='static'】\n"
     "③写入用 write_matrix_cells，行=玩法子系统(如 equip_base/equip_enhance)，列=属性或资源；"
     "④创建后必须 register_calculator 注册 fun(gameplay, attr|res[, level, grain])，"
     "brief 字段必须 ≥8 字符，写清楚函数语义与 grain 含义；"
@@ -429,6 +429,7 @@ def _build_landing_sub_spec(sub: str) -> StepSpec:
     elif sub == "gem":
         extra_acceptance = [
             "宝石按品阶/合成轴（3 同阶→1 高 1 品），不要按 1..N 标准等级拉行",
+            "若属性值同时受宝石类型与品阶/等级影响，必须用 create_3d_table 建真实三维表，不要用 level=1 伪装二维表",
             "颜色/属性绑定与解锁门槛在 README 写清",
         ]
     elif sub == "mount":

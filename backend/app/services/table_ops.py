@@ -367,7 +367,7 @@ def create_3d_table(
 
 
 def read_3d_table(conn: sqlite3.Connection, *, table_name: str) -> Dict[str, Any]:
-    """读取三维矩阵表快照，供前端按 sheet 方式渲染。"""
+    """读取三维矩阵表快照，供前端三轴查看器 / 工具切片渲染。"""
     t = assert_ident_loose(table_name)
     cur = conn.execute(
         "SELECT schema_json, matrix_meta_json FROM _table_registry WHERE table_name = ?",

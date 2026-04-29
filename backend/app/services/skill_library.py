@@ -206,7 +206,8 @@ DEFAULT_SKILLS: List[Dict[str, Any]] = [
                 "enabled": True,
                 "content": (
                     "- `gem_landing`：宝石定义表，至少包含 `color / tier / synthesis_rule / unlock_level / attr_pool / share`。\n"
-                    "- `gem_attr`：宝石属性表，以品阶或颜色+品阶为轴，表达不同宝石的属性增量。\n"
+                    "- `gem_attr`：若存在“品阶/等级 × 宝石类型 × 属性列”三个维度，必须使用真实三维表；"
+                    "推荐 `dim1=tier`、`dim2=gem_type`、`cols=atk_bonus/def_bonus/...`，并按多 sheet 方式展示。\n"
                     "- 如有养成量化，可补 `gem_cultivation_quant` 表达单次合成投入、累计投入、回报。"
                 ),
             },
@@ -218,6 +219,7 @@ DEFAULT_SKILLS: List[Dict[str, Any]] = [
                 "content": (
                     "- 先定义宝石类型（如攻击、防御、生存、控制等），再定义每类对应的属性池。\n"
                     "- `tier` 表示品阶或星级，不要把 `level 1..N` 直接映射成“宝石 N 级”。\n"
+                    "- 当属性同时受 `tier` 和 `gem_type` 影响时，不要把第二维折叠进 if 串或手填表，直接用三维表 + 公式生成。\n"
                     "- 合成规则建议落成可追踪列，如输入数量、输出品阶、是否保留副属性、失败保护等。\n"
                     "- 合成路径的常量（如 3 合 1）先注册为常量，再在 README 与公式中引用。"
                 ),

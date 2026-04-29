@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import sqlite3
 from typing import Any, Dict, List, Optional, Union
@@ -15,6 +16,7 @@ from app.services.formula_exec import (
     recalculate_downstream,
     register_formula,
 )
+from app.services.prompt_overrides import get_prompt_override, merge_prompt_item
 from app.data.default_rules_02 import get_default_rules_payload
 from app.services.skill_library import (
     get_skill_detail as _get_skill_detail,
@@ -22,7 +24,7 @@ from app.services.skill_library import (
     render_skill_file as _render_skill_file,
 )
 from app.services.snapshot_ops import compare_snapshot, create_snapshot, list_snapshots
-from app.services.table_ops import create_dynamic_table, delete_dynamic_table, create_3d_table
+from app.services.table_ops import create_dynamic_table, delete_dynamic_table, create_3d_table, read_3d_table
 from app.services.tool_envelope import wrap_tool_payload
 from app.services.validation_report import build_validation_report, list_validation_history, confirm_validation_rule as _confirm_validation_rule
 
@@ -41,6 +43,23 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
             "name": "get_table_list",
             "description": "列出所有业务表及验证状态",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_table_schema",
+            "description": "读取指定表的结构信息：列定义、目录、标签、矩阵/三维元信息、公式摘要；适合空表或改表前先看结构",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "目标表名，建议先通过 get_table_list 获取"},
+                    "include_readme_excerpt": {"type": "boolean", "default": True, "description": "是否附带 README 摘要而非全文"},
+                    "include_formulas": {"type": "boolean", "default": True, "description": "是否附带该表已注册公式摘要"},
+                },
+                "required": ["table_name"],
+                "additionalProperties": False,
+            },
         },
     },
     {
@@ -130,6 +149,45 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "type": "object",
                 "properties": {"table_name": {"type": "string"}},
                 "required": ["table_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_3d_table",
+            "description": (
+                "读取真实三维表快照，返回按 dim2 分组的紧凑切片结果（便于模型快速查看）。"
+                "适合检查 dim1/dim2、属性列、公式结果与当前某一组切片；"
+                "默认会截断 dim1 行数，避免一次返回过大。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "目标三维表名，必须由 create_3d_table 创建"},
+                    "dim1_keys": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "可选，仅返回这些 dim1 key（如等级）",
+                    },
+                    "dim2_keys": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "可选，仅返回这些 dim2 key（如宝石类型 / 装备部位）",
+                    },
+                    "limit_dim1": {
+                        "type": "integer",
+                        "default": 30,
+                        "description": "未指定 dim1_keys 时，最多返回多少个 dim1 行，避免结果过大",
+                    },
+                    "include_formulas": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "是否附带列公式摘要",
+                    },
+                },
+                "required": ["table_name"],
+                "additionalProperties": False,
             },
         },
     },
@@ -833,11 +891,12 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "用途：分配方案表（行=玩法/子系统，列=属性 或 资源，交叉=投放比例/权重）。\n"
                 "kind=matrix_attr：玩法×属性 投放比例；kind=matrix_resource：玩法×资源 分配比例。\n"
                 "rows/cols 每项为 {key:'装备_基础', display_name:'装备·基础', brief:''}；\n"
-                "【重要】scale_mode 决定 level 维的处理策略（避免写入爆炸）：\n"
+                "【重要】scale_mode 决定 level 维的处理策略：\n"
                 "  - 'none'（默认 matrix_attr）：无等级维，2D 表，调用时忽略 level 参数，无需填 levels。\n"
-                "  - 'fallback'（默认 matrix_resource）：只写 level=NULL 基准值，有特殊等级时覆盖写；\n"
-                "     call_calculator 先查精确 level，找不到自动回退 level=NULL 基准，无需预填所有等级。\n"
-                "  - 'static'：旧行为，要求 AI 填满所有 (row,col,level) 组合，慎用。\n"
+                "  - 'fallback'（默认 matrix_resource）：第三维轴值（如 level）允许手填，但限制的是内容。\n"
+                "     若第三维切片数只有 1，可写常量；若切片数 > 1，则整表内容必须改为 formula。\n"
+                "     call_calculator 会优先按公式计算 level 切片；仅在单切片常量模式下才会回退基准值。\n"
+                "  - 'static'：仅保留给历史非 matrix_resource 场景，matrix_resource 禁用。\n"
                 "建表后会自动注册一个名为 <table>_lookup 的 calculator，供后续 call_calculator 查询。"
             ),
             "parameters": {
@@ -850,7 +909,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                     "scale_mode": {
                         "type": "string",
                         "enum": ["none", "fallback", "static"],
-                        "description": "等级维策略：none=无等级（matrix_attr 默认）；fallback=懒触发（matrix_resource 默认）；static=全量预存",
+                        "description": "等级维策略：none=无等级；fallback=matrix_resource 的单切片常量/多切片公式模式；static=历史全量预存（matrix_resource 禁用）",
                     },
                     "rows": {
                         "type": "array",
@@ -876,7 +935,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                             "required": ["key", "display_name"],
                         },
                     },
-                    "levels": {"type": "array", "items": {"type": "integer"}, "description": "仅 scale_mode='static' 时需要填写"},
+                    "levels": {"type": "array", "items": {"type": "integer"}, "description": "第三维轴值本身可手填；这里只给历史 static 场景保留，matrix_resource 不建议再用"},
                     "value_dtype": {"type": "string", "enum": ["float", "percent", "int"], "default": "float"},
                     "value_format": {"type": "string", "default": "0.00%"},
                     "readme": {"type": "string", "default": ""},
@@ -898,9 +957,9 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "function": {
             "name": "write_matrix_cells",
             "description": (
-                "向 matrix 表批量写入交叉点值。每项 {row, col, level (可空), value, note}。一次 ≤200 条。\n"
+                "向 matrix 表批量写入交叉点值。每项 {row, col, level (可空), value, note, formula}。一次 ≤200 条。\n"
                 "scale_mode='none' 时 level 字段自动忽略（存 NULL）；\n"
-                "scale_mode='fallback' 时不传 level 即写入基准值（level=NULL），传 level 写精确覆盖。"
+                "matrix_resource + scale_mode='fallback' 时：第三维轴值可手填；但若出现多个第三维切片，则整表内容必须全用 formula，不能混写常量。"
             ),
             "parameters": {
                 "type": "object",
@@ -916,8 +975,9 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                                 "level": {"type": "integer"},
                                 "value": {"type": "number"},
                                 "note": {"type": "string"},
+                                "formula": {"type": "string", "description": "仅 matrix_resource 使用；当第三维切片数 > 1 时必须使用。支持参数公式与 piecewise/ifs 分段公式"},
                             },
-                            "required": ["row", "col", "value"],
+                            "required": ["row", "col"],
                         },
                     },
                 },
@@ -1077,8 +1137,11 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "创建三维矩阵表：行同时包含两个维度（如 等级 × 宝石类型），列是属性。\n"
                 "典型场景：宝石属性表（dim1=等级1~30, dim2=宝石类型, cols=atk_bonus/def_bonus/...）。\n"
                 "系统自动预插所有 (dim1 × dim2) 组合行（row_id='{d1}_{d2}'）；\n"
-                "属性列可设置 formula（支持 @dim1列名、@dim2列名 同行引用语法），设置后自动计算全表。\n"
-                "物理存储为普通 dynamic 表，前端以 2D 宽表渲染，头两列为维度列（高亮冻结）。"
+                "dim1/dim2 的轴值本身可以手填（例如等级 1..30、宝石类型 atk/def）。\n"
+                "属性列可设置 formula（支持 @dim1列名、@dim2列名 以及同行 @其他列）。\n"
+                "若公式只依赖维度列/同行列，系统会自动计算全表；若含未注册 ${常量}，会先保存为运行时模板，"
+                "需先 const_register 再 recalculate_table/重算。\n"
+                "前端使用三轴查看器：可自由选择行轴、列轴，并固定剩余第三维切片。"
             ),
             "parameters": {
                 "type": "object",
@@ -1138,13 +1201,13 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                                 "number_format": {"type": "string", "default": "0.00"},
                                 "formula": {
                                     "type": "string",
-                                    "description": (
-                                        "可选，同行公式（支持 @列名 引用本表其他列，含维度列）。\n"
-                                        "示例：@level * ${gem_base_atk} * 0.01\n"
-                                        "若公式含 ${常量} 则注册为 row_template，需后续手动计算。"
-                                    ),
+                                        "description": (
+                                            "可选，同行公式（支持 @列名 引用本表其他列，含维度列）。\n"
+                                            "示例：@level * ${gem_base_atk} * 0.01\n"
+                                            "若 ${常量} 已注册会立即计算；未注册则保留为运行时模板，后续可重算。"
+                                        ),
+                                    },
                                 },
-                            },
                             "required": ["key", "display_name"],
                         },
                         "minItems": 1,
@@ -1164,6 +1227,110 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         },
     },
 ]
+
+
+def _tool_reference_note(name: str) -> str:
+    return (
+        f"该提示词来自工具 `{name}` 的 function schema。agent_runner 在向模型暴露可用工具时，"
+        f"会把这里的函数说明与参数说明一起发送给模型；修改后会直接影响 AI 何时选择 `{name}`、"
+        "以及它如何组织参数。"
+    )
+
+
+def _schema_module_title(path: str) -> str:
+    if path == "function.description":
+        return "函数说明"
+    return f"说明：{path}"
+
+
+def _collect_schema_description_modules(
+    node: Any,
+    *,
+    path: str,
+    out: List[Dict[str, Any]],
+) -> None:
+    if isinstance(node, dict):
+        desc = node.get("description")
+        if isinstance(desc, str) and desc.strip():
+            module_path = f"{path}.description" if path else "description"
+            out.append(
+                {
+                    "module_key": module_path,
+                    "title": _schema_module_title(module_path),
+                    "content": desc,
+                    "required": True,
+                    "enabled": True,
+                    "sort_order": len(out) + 1,
+                }
+            )
+        for key, value in node.items():
+            if isinstance(value, dict):
+                child_path = f"{path}.{key}" if path else key
+                _collect_schema_description_modules(value, path=child_path, out=out)
+
+
+def _tool_prompt_default_item(tool: Dict[str, Any], display_order: int) -> Dict[str, Any]:
+    fn = tool.get("function") or {}
+    name = str(fn.get("name") or "")
+    modules: List[Dict[str, Any]] = []
+    _collect_schema_description_modules(fn, path="function", out=modules)
+    desc = str(fn.get("description") or "")
+    return {
+        "category": "tool",
+        "prompt_key": name,
+        "title": f"工具：{name}",
+        "summary": desc[:200],
+        "description": desc,
+        "reference_note": _tool_reference_note(name),
+        "enabled": True,
+        "display_order": display_order,
+        "modules": modules,
+    }
+
+
+def get_tool_prompt_catalog(conn: Optional[sqlite3.Connection] = None) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for idx, tool in enumerate(TOOLS_OPENAI, start=1):
+        default = _tool_prompt_default_item(tool, idx)
+        if conn is None:
+            items.append(default)
+            continue
+        override = get_prompt_override(conn, category="tool", prompt_key=str(default["prompt_key"]))
+        items.append(merge_prompt_item(default, override))
+    items.sort(key=lambda item: (int(item.get("display_order") or 0), str(item.get("prompt_key") or "")))
+    return items
+
+
+def _set_nested_description(target: Dict[str, Any], path: str, content: str) -> None:
+    parts = path.split(".")
+    cur: Any = target
+    for part in parts[:-1]:
+        if not isinstance(cur, dict):
+            return
+        cur = cur.get(part)
+    if isinstance(cur, dict):
+        cur[parts[-1]] = content
+
+
+def build_tools_openai(conn: Optional[sqlite3.Connection] = None) -> List[Dict[str, Any]]:
+    tools = copy.deepcopy(TOOLS_OPENAI)
+    if conn is None:
+        return tools
+    prompt_items = {str(item["prompt_key"]): item for item in get_tool_prompt_catalog(conn)}
+    for tool in tools:
+        fn = tool.get("function") or {}
+        name = str(fn.get("name") or "")
+        prompt_item = prompt_items.get(name)
+        if not prompt_item:
+            continue
+        for module in prompt_item.get("modules") or []:
+            if not (module.get("required") or module.get("enabled")):
+                continue
+            module_key = str(module.get("module_key") or "")
+            content = str(module.get("content") or "")
+            if module_key and content:
+                _set_nested_description(tool, module_key, content)
+    return tools
 
 
 def _list_known_tables(conn: sqlite3.Connection) -> List[str]:
@@ -1242,6 +1409,81 @@ def _get_table_list(conn: sqlite3.Connection) -> Dict[str, Any]:
         "COALESCE(directory,'') AS directory FROM _table_registry ORDER BY directory, table_name"
     )
     return {"tables": [dict(r) for r in cur.fetchall()]}
+
+
+def _get_table_schema(
+    conn: sqlite3.Connection,
+    *,
+    table_name: str,
+    include_readme_excerpt: bool = True,
+    include_formulas: bool = True,
+) -> Dict[str, Any]:
+    cur = conn.execute(
+        """
+        SELECT table_name, layer, purpose, readme, schema_json, validation_status,
+               COALESCE(directory, '') AS directory, COALESCE(matrix_meta_json, '') AS matrix_meta_json,
+               COALESCE(tags, '[]') AS tags
+        FROM _table_registry
+        WHERE table_name = ?
+        """,
+        (table_name,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return {"error": f"未知表 '{table_name}'", "fix": f"用 get_table_list 确认表名，当前已注册: {_list_known_tables(conn)}"}
+
+    try:
+        schema = json.loads(row["schema_json"] or "{}")
+    except json.JSONDecodeError:
+        schema = {}
+    try:
+        matrix_meta = json.loads(row["matrix_meta_json"] or "{}")
+    except json.JSONDecodeError:
+        matrix_meta = {}
+    try:
+        tags = json.loads(row["tags"] or "[]")
+    except json.JSONDecodeError:
+        tags = []
+
+    columns = schema.get("columns") if isinstance(schema, dict) else []
+    if not isinstance(columns, list):
+        columns = []
+
+    out: Dict[str, Any] = {
+        "table_name": row["table_name"],
+        "display_name": (schema.get("display_name") if isinstance(schema, dict) else "") or "",
+        "layer": row["layer"],
+        "purpose": row["purpose"] or "",
+        "validation_status": row["validation_status"] or "",
+        "directory": row["directory"] or "",
+        "tags": tags if isinstance(tags, list) else [],
+        "column_count": len(columns),
+        "columns": columns,
+    }
+    if include_readme_excerpt:
+        out["readme_excerpt"] = _doc_excerpt(str(row["readme"] or ""))
+    if isinstance(matrix_meta, dict) and matrix_meta:
+        out["matrix_meta"] = matrix_meta
+        out["matrix_kind"] = str(matrix_meta.get("kind") or "")
+    if include_formulas:
+        cur = conn.execute(
+            """
+            SELECT column_name, formula, COALESCE(formula_type, 'sql') AS formula_type
+            FROM _formula_registry
+            WHERE table_name = ?
+            ORDER BY column_name
+            """,
+            (table_name,),
+        )
+        out["formulas"] = [
+            {
+                "column_name": str(rec["column_name"]),
+                "formula": str(rec["formula"]),
+                "formula_type": str(rec["formula_type"]),
+            }
+            for rec in cur.fetchall()
+        ]
+    return out
 
 
 def _list_directories(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -1470,6 +1712,85 @@ def _get_table_readme(conn: sqlite3.Connection, table_name: str) -> Dict[str, An
     if not row:
         return {"error": f"未知表 '{table_name}'", "fix": f"用 get_table_list 确认表名，当前已注册: {_list_known_tables(conn)}"}
     return {"table_name": table_name, "readme": row["readme"] or ""}
+
+
+def _compact_3d_table_result(
+    raw: Dict[str, Any],
+    *,
+    dim1_keys: Optional[List[str]] = None,
+    dim2_keys: Optional[List[str]] = None,
+    limit_dim1: int = 30,
+    include_formulas: bool = True,
+) -> Dict[str, Any]:
+    dim1 = raw.get("dim1") or {}
+    dim2 = raw.get("dim2") or {}
+    data = raw.get("data") or {}
+    dim1_meta = dim1.get("keys") or []
+    dim2_meta = dim2.get("keys") or []
+    dim1_display = {str(item.get("key")): str(item.get("display_name") or item.get("key") or "") for item in dim1_meta if isinstance(item, dict)}
+    dim2_display = {str(item.get("key")): str(item.get("display_name") or item.get("key") or "") for item in dim2_meta if isinstance(item, dict)}
+
+    ordered_dim1 = [str(item.get("key")) for item in dim1_meta if isinstance(item, dict) and str(item.get("key") or "").strip()]
+    ordered_dim2 = [str(item.get("key")) for item in dim2_meta if isinstance(item, dict) and str(item.get("key") or "").strip()]
+    if not ordered_dim1:
+        ordered_dim1 = sorted(str(key) for key in data.keys())
+    if not ordered_dim2:
+        dim2_seen = {str(dim2_key) for rows in data.values() if isinstance(rows, dict) for dim2_key in rows.keys()}
+        ordered_dim2 = sorted(dim2_seen)
+
+    selected_dim1 = [str(key) for key in (dim1_keys or []) if str(key).strip()] or ordered_dim1[: max(1, min(int(limit_dim1 or 30), 200))]
+    selected_dim2 = [str(key) for key in (dim2_keys or []) if str(key).strip()] or ordered_dim2
+
+    sheets: List[Dict[str, Any]] = []
+    returned_row_count = 0
+    for dim2_key in selected_dim2:
+        rows_out: List[Dict[str, Any]] = []
+        for dim1_key in selected_dim1:
+            values = ((data.get(dim1_key) or {}).get(dim2_key) if isinstance(data.get(dim1_key), dict) else None)
+            if values is None:
+                continue
+            rows_out.append(
+                {
+                    "dim1_key": dim1_key,
+                    "dim1_display_name": dim1_display.get(dim1_key, dim1_key),
+                    "values": values,
+                }
+            )
+        if rows_out:
+            returned_row_count += len(rows_out)
+            sheets.append(
+                {
+                    "dim2_key": dim2_key,
+                    "dim2_display_name": dim2_display.get(dim2_key, dim2_key),
+                    "row_count": len(rows_out),
+                    "rows": rows_out,
+                }
+            )
+
+    out: Dict[str, Any] = {
+        "table_name": raw.get("table_name"),
+        "display_name": raw.get("display_name"),
+        "row_count": raw.get("row_count"),
+        "returned_row_count": returned_row_count,
+        "dim1": {
+            "col_name": dim1.get("col_name"),
+            "display_name": dim1.get("display_name"),
+            "total_keys": len(ordered_dim1),
+            "returned_keys": selected_dim1,
+            "truncated": not dim1_keys and len(selected_dim1) < len(ordered_dim1),
+        },
+        "dim2": {
+            "col_name": dim2.get("col_name"),
+            "display_name": dim2.get("display_name"),
+            "total_keys": len(ordered_dim2),
+            "returned_keys": selected_dim2,
+        },
+        "cols": raw.get("cols") or [],
+        "sheets": sheets,
+    }
+    if include_formulas:
+        out["column_formulas"] = raw.get("column_formulas") or {}
+    return out
 
 
 def _update_table_readme(conn: sqlite3.Connection, table_name: str, content: str) -> Dict[str, Any]:
@@ -1742,6 +2063,13 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
         out = {**_get_project_config(conn), "can_write": p.can_write}
     elif name == "get_table_list":
         out = _get_table_list(conn)
+    elif name == "get_table_schema":
+        out = _get_table_schema(
+            conn,
+            table_name=str(args.get("table_name", "")),
+            include_readme_excerpt=bool(args.get("include_readme_excerpt", True)),
+            include_formulas=bool(args.get("include_formulas", True)),
+        )
     elif name == "read_table":
         cols = args.get("columns")
         col_list: Optional[List[str]] = cols if isinstance(cols, list) else None
@@ -1767,6 +2095,17 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
         out = _dependency_edges(conn, args.get("table_name"), str(args.get("direction", "full")))
     elif name == "get_table_readme":
         out = _get_table_readme(conn, str(args.get("table_name", "")))
+    elif name == "read_3d_table":
+        try:
+            out = _compact_3d_table_result(
+                read_3d_table(conn, table_name=str(args.get("table_name", ""))),
+                dim1_keys=args.get("dim1_keys") if isinstance(args.get("dim1_keys"), list) else None,
+                dim2_keys=args.get("dim2_keys") if isinstance(args.get("dim2_keys"), list) else None,
+                limit_dim1=int(args.get("limit_dim1", 30)),
+                include_formulas=bool(args.get("include_formulas", True)),
+            )
+        except ValueError as e:
+            out = {"error": str(e)}
     elif name == "list_skills":
         items = _list_skills(
             conn,
@@ -2078,7 +2417,10 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                     tags=args.get("tags") or [],
                 )
             except ValueError as e:
-                out = {"error": str(e)}
+                out = {
+                    "error": str(e),
+                    "fix": "matrix_resource 规则：第三维轴值（如 level）可手填；若第三维切片数只有 1，可写常量；若切片数 > 1，整表内容必须改为 formula。",
+                }
     elif name == "write_matrix_cells":
         if not p.can_write:
             out = {"error": "无写权限"}
@@ -2091,7 +2433,10 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                     cells=args.get("cells") or [],
                 )
             except ValueError as e:
-                out = {"error": str(e)}
+                out = {
+                    "error": str(e),
+                    "fix": "matrix_resource 写入规则：单切片可写常量；多切片必须全表 formula。不要在同一张表里混写常量切片和公式切片。",
+                }
     elif name == "read_matrix":
         try:
             from app.services.matrix_table_ops import read_matrix as _rm
@@ -2157,7 +2502,10 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                     tags=args.get("tags") or [],
                 )
             except Exception as e:  # noqa: BLE001
-                out = {"error": str(e)}
+                out = {
+                    "error": str(e),
+                    "fix": "create_3d_table 中 dim1/dim2 是可手填的轴值集合；若数值变化本质上来自第三维展开，优先把变化写进 cols[].formula，而不是手填展开后的整表常量。",
+                }
     else:
         out = {"error": f"未知工具 {name}"}
     return json.dumps(wrap_tool_payload(out), ensure_ascii=False)

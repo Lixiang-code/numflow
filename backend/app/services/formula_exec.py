@@ -120,11 +120,16 @@ def _load_constants(conn: sqlite3.Connection, names: Set[str]) -> Tuple[Dict[str
     for r in rows:
         try:
             import json as _json
-
-            out[r["name_en"]] = _json.loads(r["value_json"])
+            if isinstance(r, sqlite3.Row):
+                name_en = r["name_en"]
+                value_json = r["value_json"]
+            else:
+                name_en = r[0]
+                value_json = r[1]
+            out[str(name_en)] = _json.loads(value_json)
         except Exception:  # noqa: BLE001
             continue
-        found.add(r["name_en"])
+        found.add(str(name_en))
     for n in names:
         if n not in found:
             missing.append(n)
@@ -312,7 +317,13 @@ def register_row_formula(
 
     refs = parse_row_refs(raw_formula)
     external_refs = refs - available_cols
-    is_computable = len(external_refs) == 0
+    const_names = parse_constant_refs(raw_formula)
+    constants, missing_consts = _load_constants(conn, const_names)
+    formula_for_compute = raw_formula
+    if const_names and not missing_consts:
+        formula_for_compute, missing_after_substitute = substitute_constants(raw_formula, constants)
+        missing_consts = list(set(missing_consts) | set(missing_after_substitute))
+    is_computable = len(external_refs) == 0 and len(missing_consts) == 0
     formula_type = "row" if is_computable else "row_template"
 
     conn.execute(
@@ -333,7 +344,7 @@ def register_row_formula(
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         for _, row_data in df.iterrows():
             row_dict: Dict[str, Any] = {c: row_data[c] for c in df.columns}
-            val, missing = eval_row_formula(raw_formula, row_dict, available_cols)
+            val, missing = eval_row_formula(formula_for_compute, row_dict, available_cols)
             if missing:
                 warnings.append(f"行 {row_dict.get('row_id')}: 缺少 {missing}")
                 continue
@@ -356,6 +367,7 @@ def register_row_formula(
         conn.commit()
     else:
         warnings = [f"外部参数 {r} 不在表内（运行时模板，需外部系统计算）" for r in sorted(external_refs)]
+        warnings.extend(f"公式引用未注册常量：{r}" for r in sorted(set(missing_consts)))
         conn.commit()
 
     return {
@@ -382,7 +394,7 @@ def execute_row_formula(
     if not row:
         raise ValueError("未注册公式")
 
-    formula = row[0]
+    raw_formula = row[0]
     formula_type = row[1] if row[1] else "sql"
 
     if formula_type == "sql":
@@ -390,13 +402,50 @@ def execute_row_formula(
 
     df = load_table_df(conn, table_name)
     available_cols: Set[str] = set(df.columns) - {"row_id"}
+    refs = parse_row_refs(raw_formula)
+    external_refs = refs - available_cols
+    const_names = parse_constant_refs(raw_formula)
+    constants, missing_consts = _load_constants(conn, const_names)
+    formula_for_compute = raw_formula
+    if const_names and not missing_consts:
+        formula_for_compute, missing_after_substitute = substitute_constants(raw_formula, constants)
+        missing_consts = list(set(missing_consts) | set(missing_after_substitute))
+
+    if external_refs or missing_consts:
+        conn.execute(
+            """
+            UPDATE _formula_registry
+            SET formula_type = 'row_template'
+            WHERE table_name = ? AND column_name = ?
+            """,
+            (table_name, column_name),
+        )
+        conn.commit()
+        errors: List[str] = []
+        if external_refs:
+            errors.extend(f"缺少同行列引用：{r}" for r in sorted(external_refs))
+        if missing_consts:
+            errors.extend(f"缺少常量：{r}" for r in sorted(set(missing_consts)))
+        return {"ok": False, "rows_updated": 0, "rows_total": len(df), "errors": errors}
+
+    if formula_type != "row":
+        conn.execute(
+            """
+            UPDATE _formula_registry
+            SET formula_type = 'row'
+            WHERE table_name = ? AND column_name = ?
+            """,
+            (table_name, column_name),
+        )
+        conn.commit()
+
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     updated = 0
     errors: List[str] = []
 
     for _, row_data in df.iterrows():
         row_dict: Dict[str, Any] = {c: row_data[c] for c in df.columns}
-        val, missing = eval_row_formula(formula, row_dict, available_cols)
+        val, missing = eval_row_formula(formula_for_compute, row_dict, available_cols)
         if missing:
             errors.append(f"行 {row_dict.get('row_id')}: 缺少参数 {missing}")
             continue
@@ -438,9 +487,9 @@ def recalculate_row_formulas_for_table(
     conn: sqlite3.Connection,
     table_name: str,
 ) -> Dict[str, Any]:
-    """重新计算表内所有 row 类型公式（不含 row_template）。"""
+    """重新计算表内所有同行公式；row_template 若常量已补齐也会尝试转正。"""
     cur = conn.execute(
-        "SELECT column_name FROM _formula_registry WHERE table_name = ? AND formula_type = 'row'",
+        "SELECT column_name FROM _formula_registry WHERE table_name = ? AND formula_type IN ('row', 'row_template')",
         (table_name,),
     )
     cols = [r[0] for r in cur.fetchall()]
@@ -453,4 +502,3 @@ def recalculate_row_formulas_for_table(
         except Exception as e:  # noqa: BLE001
             errors.append(f"{c}: {e}")
     return {"recalculated": done, "errors": errors}
-

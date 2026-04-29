@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from app.config import QWEN_MODEL
+from app.services.prompt_overrides import get_prompt_override, merge_prompt_item, render_prompt_text
 from app.services.qwen_client import get_client_for_model
 from app.services.skill_library import build_default_skill_prompt
 
@@ -178,7 +179,8 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
         "操作：\n"
         "  1. `create_matrix_table(name='gameplay_res_alloc', kind='matrix_resource', "
         "rows=[<同 gameplay_attr_alloc 的子系统>], cols=[<资源列表>], directory='分配/玩法资源')`；\n"
-        "  2. `write_matrix_cells` 填比例（允许 0 表示不投放）；\n"
+        "  2. `write_matrix_cells` 填二维基准比例（允许 0 表示不投放）；第三维轴值（如等级）允许手填，"
+        "但若同表出现多个第三维切片，内容必须统一改成 formula，不能手填多切片常量；\n"
         "  3. `register_calculator(name='gameplay_res_alloc_lookup', kind='matrix_lookup', "
         "table='gameplay_res_alloc', axes=[{name:'gameplay',source:'row'},{name:'res',source:'col'},"
         "{name:'grain',source:'param',values:['per_hour','per_level','cumulative']}], "
@@ -216,7 +218,8 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
         + "【步骤 11.宝石 — 落地表】\n"
         "产出：\n"
         "  · `gem_landing`（display_name=「宝石·落地」；列：color / tier / synthesis_rule / unlock_level / attr_pool / share）；\n"
-        "  · `gem_attr`（行=品阶 tier，列=具体属性）。\n"
+        "  · `gem_attr`：若同时存在「品阶/等级 × 宝石类型 × 属性列」三个维度，必须用 `create_3d_table`；"
+        "推荐 dim1=tier 或 gem_grade，dim2=gem_type，cols=atk_bonus/def_bonus/...，避免伪二维表。\n"
         "★ 合成路径以 const_register 抽出（如 `gem_synth_input=3`、`gem_synth_output=1`），"
         "在 README 文字阐述「3 同阶 → 1 高 1 品」并在 schema 中以列体现。\n"
         "★ 不要把标准等级 1..N 当成「宝石 N 级」。"
@@ -278,6 +281,110 @@ _ROUTE_SYSTEM = (
 ROUTE_SYSTEM = _ROUTE_SYSTEM
 
 
+def _router_prompt_defaults() -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = [
+        {
+            "category": "system",
+            "prompt_key": "router_system",
+            "title": "提示词路由判断提示词",
+            "summary": "用于判断默认步骤提示词是否能直接覆盖当前任务。",
+            "description": "prompt_router 的路由判断 system prompt。",
+            "reference_note": "在 prompt_router.route_prompt 中作为路由判断的 system prompt 使用，直接影响默认步骤模板是否命中。",
+            "enabled": True,
+            "display_order": 1,
+            "modules": [
+                {
+                    "module_key": "body",
+                    "title": "完整提示词",
+                    "content": _ROUTE_SYSTEM,
+                    "required": True,
+                    "enabled": True,
+                    "sort_order": 1,
+                }
+            ],
+        },
+        {
+            "category": "system",
+            "prompt_key": "router_writer",
+            "title": "路由兜底提示词撰写器",
+            "summary": "当默认模板未命中时，用于让模型现写一段当前步骤提示词。",
+            "description": "prompt_router 的兜底 system prompt。",
+            "reference_note": "在 prompt_router.route_prompt 中，当默认模板未命中时作为 system prompt 调用，用来生成一段新的 routed_prompt。",
+            "enabled": True,
+            "display_order": 2,
+            "modules": [
+                {
+                    "module_key": "body",
+                    "title": "完整提示词",
+                    "content": (
+                        "你是 Numflow 的提示词撰写器。基于当前 pipeline 步骤、用户需求与项目配置，"
+                        "写一段简短（<=300 字）的「玩法/系统」提示词，明确本次任务必产出（表名/列名/验收标准）。"
+                        "**所有表/列名必须英文 snake_case，中文走 display_name；公式中的浮点字面量必须以 ${name} 引用常数；"
+                        "等级行数必须从 system_level_caps[<system>] 或 max_level 派生，禁止硬编码 30 / 60 / 100。**"
+                        "不要寒暄；直接输出提示词本体。"
+                    ),
+                    "required": True,
+                    "enabled": True,
+                    "sort_order": 1,
+                }
+            ],
+        },
+    ]
+    for idx, (step_id, prompt) in enumerate(DEFAULT_STEP_PROMPTS.items(), start=10):
+        items.append(
+            {
+                "category": "system",
+                "prompt_key": f"route_step::{step_id}",
+                "title": f"步骤默认提示词：{step_id}",
+                "summary": f"{step_id} 的默认路由提示词模板。",
+                "description": "当默认 SKILL 未覆盖且路由命中时使用。",
+                "reference_note": f"在 prompt_router.route_prompt 中，当 step_id={step_id} 且默认模板命中时，这段提示词会作为 routed_prompt 注入 agent 的 design/review/execute 三阶段。",
+                "enabled": True,
+                "display_order": idx,
+                "modules": [
+                    {
+                        "module_key": "body",
+                        "title": "完整提示词",
+                        "content": prompt,
+                        "required": True,
+                        "enabled": True,
+                        "sort_order": 1,
+                    }
+                ],
+            }
+        )
+    return items
+
+
+def get_router_prompt_catalog(conn: Optional[sqlite3.Connection] = None) -> List[Dict[str, Any]]:
+    defaults = _router_prompt_defaults()
+    if conn is None:
+        return defaults
+    items: List[Dict[str, Any]] = []
+    for default in defaults:
+        override = get_prompt_override(conn, category="system", prompt_key=str(default["prompt_key"]))
+        items.append(merge_prompt_item(default, override))
+    items.sort(key=lambda item: (int(item.get("display_order") or 0), str(item.get("title") or "")))
+    return items
+
+
+def _resolve_router_prompt(conn: Optional[sqlite3.Connection], prompt_key: str) -> str:
+    defaults = {str(item["prompt_key"]): item for item in _router_prompt_defaults()}
+    default = defaults[prompt_key]
+    if conn is None:
+        return render_prompt_text(default)
+    override = get_prompt_override(conn, category="system", prompt_key=prompt_key)
+    return render_prompt_text(merge_prompt_item(default, override))
+
+
+def get_route_system_prompt(conn: Optional[sqlite3.Connection] = None) -> str:
+    return _resolve_router_prompt(conn, "router_system")
+
+
+def get_default_step_prompt(step_id: str, conn: Optional[sqlite3.Connection] = None) -> str:
+    return _resolve_router_prompt(conn, f"route_step::{step_id}")
+
+
 def route_prompt(
     step_id: str,
     user_message: str,
@@ -310,9 +417,10 @@ def route_prompt(
                 "gather_hint": _extract_gather_hint(skill_prompt),
                 "rationale": "skill_library_default_exposure",
                 "skills": skill_items,
+                "route_system": get_route_system_prompt(conn),
             }
 
-    default_prompt = DEFAULT_STEP_PROMPTS.get(step_id, "")
+    default_prompt = get_default_step_prompt(step_id, conn) if step_id in DEFAULT_STEP_PROMPTS else ""
     client = get_client_for_model(model or QWEN_MODEL)
 
     judge_user = (
@@ -327,7 +435,7 @@ def route_prompt(
         resp = client.chat.completions.create(
             model=model or QWEN_MODEL,
             messages=[
-                {"role": "system", "content": _ROUTE_SYSTEM},
+                {"role": "system", "content": get_route_system_prompt(conn)},
                 {"role": "user", "content": judge_user},
             ],
             temperature=0.1,
@@ -343,13 +451,20 @@ def route_prompt(
             "prompt": fallback_prompt,
             "gather_hint": _extract_gather_hint(fallback_prompt),
             "rationale": f"router_fallback: {e!r}",
+            "route_system": get_route_system_prompt(conn),
         }
 
     hit = bool(verdict.get("hit")) and bool(default_prompt)
     rationale = str(verdict.get("rationale") or "")[:400]
 
     if hit:
-        return {"hit": True, "prompt": default_prompt, "gather_hint": _extract_gather_hint(default_prompt), "rationale": rationale}
+        return {
+            "hit": True,
+            "prompt": default_prompt,
+            "gather_hint": _extract_gather_hint(default_prompt),
+            "rationale": rationale,
+            "route_system": get_route_system_prompt(conn),
+        }
 
     # 未命中：让千问现写一段对应本步骤的提示词（仍套上命名纪律前缀）
     try:
@@ -358,13 +473,7 @@ def route_prompt(
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "你是 Numflow 的提示词撰写器。基于当前 pipeline 步骤、用户需求与项目配置，"
-                        "写一段简短（<=300 字）的「玩法/系统」提示词，明确本次任务必产出（表名/列名/验收标准）。"
-                        "**所有表/列名必须英文 snake_case，中文走 display_name；公式中的浮点字面量必须以 ${name} 引用常数；"
-                        "等级行数必须从 system_level_caps[<system>] 或 max_level 派生，禁止硬编码 30 / 60 / 100。**"
-                        "不要寒暄；直接输出提示词本体。"
-                    ),
+                    "content": _resolve_router_prompt(conn, "router_writer"),
                 },
                 {
                     "role": "user",
@@ -394,4 +503,5 @@ def route_prompt(
         "prompt": custom,
         "gather_hint": _extract_gather_hint(custom),
         "rationale": rationale or "default_template_not_matched",
+        "route_system": get_route_system_prompt(conn),
     }

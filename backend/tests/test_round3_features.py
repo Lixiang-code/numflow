@@ -305,7 +305,7 @@ def test_matrix_resource_formula_third_axis_accepts_runtime_params():
     assert res["value"] == 6.0
 
 
-def test_matrix_resource_rejects_manual_level_write():
+def test_matrix_resource_allows_single_literal_slice():
     conn = _new_conn()
     create_matrix_table(
         conn,
@@ -318,15 +318,76 @@ def test_matrix_resource_rejects_manual_level_write():
         scale_mode="fallback",
         register_calc=True,
     )
+    write_matrix_cells(
+        conn,
+        table_name="res_formula_guard",
+        cells=[{"row": "equip_base", "col": "gold", "level": 2, "value": 0.3}],
+    )
+    res = call_calculator(
+        conn,
+        name="res_formula_guard_lookup",
+        kwargs={"gameplay": "equip_base", "res_id": "gold", "level": 2},
+    )
+    assert res["found"] is True
+    assert res["value"] == 0.3
+
+
+def test_matrix_resource_rejects_multi_slice_literal_content():
+    conn = _new_conn()
+    create_matrix_table(
+        conn,
+        table_name="res_formula_guard_multi",
+        display_name="资源分配守卫多切片",
+        kind="matrix_resource",
+        rows=[{"key": "equip_base", "display_name": "装备·基础", "brief": ""}],
+        cols=[{"key": "gold", "display_name": "金币", "brief": ""}],
+        directory="分配/资源",
+        scale_mode="fallback",
+        register_calc=True,
+    )
+    write_matrix_cells(
+        conn,
+        table_name="res_formula_guard_multi",
+        cells=[{"row": "equip_base", "col": "gold", "level": 2, "value": 0.3}],
+    )
     try:
         write_matrix_cells(
             conn,
-            table_name="res_formula_guard",
-            cells=[{"row": "equip_base", "col": "gold", "level": 2, "value": 0.3}],
+            table_name="res_formula_guard_multi",
+            cells=[{"row": "equip_base", "col": "gold", "level": 3, "value": 0.4}],
         )
         raise AssertionError("expected ValueError")
     except ValueError as exc:
-        assert "禁止手填 level" in str(exc)
+        assert "切片数 > 1" in str(exc)
+
+
+def test_matrix_resource_rejects_switching_literal_table_to_formula_mode():
+    conn = _new_conn()
+    create_matrix_table(
+        conn,
+        table_name="res_formula_guard_mixed",
+        display_name="资源分配守卫混写",
+        kind="matrix_resource",
+        rows=[{"key": "equip_base", "display_name": "装备·基础", "brief": ""}],
+        cols=[{"key": "gold", "display_name": "金币", "brief": ""}],
+        directory="分配/资源",
+        scale_mode="fallback",
+        register_calc=True,
+    )
+    write_matrix_cells(
+        conn,
+        table_name="res_formula_guard_mixed",
+        cells=[{"row": "equip_base", "col": "gold", "value": 0.3}],
+    )
+    try:
+        write_matrix_cells(
+            conn,
+            table_name="res_formula_guard_mixed",
+            cells=[{"row": "equip_base", "col": "gold", "formula": "@level * 0.1"}],
+        )
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "已有常量内容" in str(exc)
 
 
 def test_matrix_none_scale_mode_ignores_level():

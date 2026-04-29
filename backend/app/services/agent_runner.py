@@ -9,8 +9,13 @@ from typing import Any, Callable, Dict, Generator, Iterable, List, Optional
 from app.config import QWEN_MODEL
 from app.db.project_schema import get_pipeline_state
 from app.deps import ProjectDB
-from app.services.agent_tools import TOOLS_OPENAI, dispatch_tool, _get_project_config
-from app.services.prompt_router import route_prompt, ROUTE_SYSTEM as _ROUTE_SYSTEM_PROMPT
+from app.services.agent_tools import TOOLS_OPENAI, build_tools_openai, dispatch_tool, _get_project_config
+from app.services.prompt_overrides import (
+    get_prompt_override,
+    merge_prompt_item,
+    render_prompt_text,
+)
+from app.services.prompt_router import route_prompt
 from app.services.qwen_client import get_client_for_model
 
 
@@ -47,26 +52,41 @@ def _retry_llm_call(
 
 WRITE_TOOLS = {
     "write_cells",
+    "write_cells_series",
     "create_table",
+    "create_matrix_table",
+    "write_matrix_cells",
+    "create_3d_table",
     "delete_table",
     "register_formula",
     "execute_formula",
     "recalculate_downstream",
+    "register_calculator",
     "update_table_readme",
     "update_global_readme",
     "set_project_setting",
+    "set_table_directory",
     "call_algorithm_api",
     "bulk_register_and_compute",
     "setup_level_table",
     "create_snapshot",
     "confirm_validation_rule",
+    "glossary_register",
+    "const_register",
+    "const_tag_register",
+    "const_set",
+    "const_delete",
+    "expose_param_to_subsystems",
 }
 
 # 只读工具白名单（gather 阶段只允许调用这些）
 READ_TOOLS = {
     "get_project_config",
     "get_table_list",
+    "get_table_schema",
     "read_table",
+    "read_matrix",
+    "read_3d_table",
     "read_cell",
     "get_protected_cells",
     "get_dependency_graph",
@@ -84,16 +104,16 @@ READ_TOOLS = {
     "glossary_lookup",
     "glossary_list",
     "const_list",
+    "const_tag_list",
     "sparse_sample",
+    "list_directories",
     "list_calculators",
     "call_calculator",
+    "list_exposed_params",
 }
-
-READ_TOOLS_OPENAI = [t for t in TOOLS_OPENAI if t["function"]["name"] in READ_TOOLS]
 
 # Recovery Agent 只允许用只读工具 + 清理类写工具（delete_table / delete_column 等）
 RECOVERY_CLEANUP_TOOLS = READ_TOOLS | {"delete_table", "update_table_readme", "update_global_readme"}
-RECOVERY_TOOLS_OPENAI = [t for t in TOOLS_OPENAI if t["function"]["name"] in RECOVERY_CLEANUP_TOOLS]
 
 # 工具名称 → 中文标签（用于前端监控显示）
 _TOOL_LABELS: Dict[str, str] = {
@@ -140,9 +160,13 @@ def _emit(phase: str, obj: Dict[str, Any]) -> bytes:
     return sse_event(payload)
 
 
-def _tool_schema_payload(tool_names: set[str]) -> List[Dict[str, Any]]:
+def _filter_tools_openai(all_tools: List[Dict[str, Any]], tool_names: set[str]) -> List[Dict[str, Any]]:
+    return [tool for tool in all_tools if str((tool.get("function") or {}).get("name") or "") in tool_names]
+
+
+def _tool_schema_payload(all_tools: List[Dict[str, Any]], tool_names: set[str]) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
-    for tool in TOOLS_OPENAI:
+    for tool in all_tools:
         fn = tool.get("function") or {}
         name = str(fn.get("name", ""))
         if name in tool_names:
@@ -179,7 +203,7 @@ def _build_assistant_msg(msg: Any, *, tool_calls: Optional[List[Dict[str, Any]]]
 
 # ---------- system prompts ----------
 
-def _role_block(mode_norm: str) -> str:
+def _base_role_block(mode_norm: str) -> str:
     if mode_norm == "init":
         return (
             "【1/4 角色】你是 Numflow「初始化 Agent」。职责：根据项目配置推导待建表、依赖与 README，"
@@ -192,8 +216,8 @@ def _role_block(mode_norm: str) -> str:
     )
 
 
-def _common_system(mode_norm: str) -> str:
-    role_block = _role_block(mode_norm)
+def _base_common_system(mode_norm: str) -> str:
+    role_block = _base_role_block(mode_norm)
     return "\n".join(
         [
             role_block,
@@ -210,12 +234,15 @@ def _common_system(mode_norm: str) -> str:
             "③创建后必须调用 register_calculator 注册 fun(level, gameplay, attr|res[, grain])，"
             "brief 必须 ≥8 字符；下游一律用 call_calculator 取值，避免硬编码。",
             "【三维矩阵表（create_3d_table）】"
-            "当一张表需要两个行维度时（如 等级×宝石类型、等级×装备部位），用 create_3d_table。\n"
+            "当一张表需要两个真实维度时（如 等级×宝石类型、等级×装备部位），必须用 create_3d_table，"
+            "不要把其中一维硬塞成 level=1 或伪二维表。\n"
             "典型场景：宝石属性表（dim1=等级1~N, dim2=宝石类型atk/def/…, cols=atk_bonus/def_bonus/…）。\n"
             "dim1 通常为数字等级（key 填整数字符串'1','2'…），dim2 为分类（key 填英文标识符）。\n"
             "属性列（cols[]）可附 formula 字段，公式可用 @dim1列名/@dim2列名 同行引用：\n"
             "  例：atk_bonus 公式 = @level * ${gem_base_atk}（需先注册常量 gem_base_atk）\n"
-            "若公式含外部 ${常量} 引用则注册为 row_template，需用 recalculate_table 执行。\n"
+            "若公式含 ${常量}，先 const_register；常量就绪后再重算整表，确保不要手填展开值。\n"
+            "【matrix_resource 第三维规则】第三维轴值（如等级）可手填；限制的是内容："
+            "单切片允许常量，多切片必须全表 formula，不能混写。\n"
             "create_3d_table 同样必须传 display_name（中文）、directory、tags（≥1个）。",
             "【表命名与标签规范（严格）】"
             "①每张表的 display_name 必须为中文，如「基础属性表」，不得省略或留空；"
@@ -259,6 +286,123 @@ def _common_system(mode_norm: str) -> str:
             "【README 必含字段】任何写 README 的工具调用必须覆盖：目的（goal）/上游输入/产出/必备表与列/验收标准/常见踩坑。",
         ]
     )
+
+
+def _agent_system_prompt_defaults() -> Dict[str, Dict[str, Any]]:
+    return {
+        "agent_common_init": {
+            "category": "system",
+            "prompt_key": "agent_common_init",
+            "title": "Agent 通用系统提示词（初始化）",
+            "summary": "初始化 Agent 在 design/review/execute 三阶段共享的基础 system prompt。",
+            "description": "用于初始化模式的主 system prompt，包含命名纪律、表规则、流程与执行规范。",
+            "reference_note": "在 agent_runner.run_agent_sse 中，当 mode=init 时作为 design/review/execute 三阶段的基础 system prompt 注入；修改会直接影响初始化 Agent 的行为边界与写入纪律。",
+            "enabled": True,
+            "modules": [
+                {
+                    "module_key": "body",
+                    "title": "完整提示词",
+                    "content": _base_common_system("init"),
+                    "required": True,
+                    "enabled": True,
+                    "sort_order": 1,
+                }
+            ],
+        },
+        "agent_common_maintain": {
+            "category": "system",
+            "prompt_key": "agent_common_maintain",
+            "title": "Agent 通用系统提示词（维护）",
+            "summary": "维护 Agent 在 design/review/execute 三阶段共享的基础 system prompt。",
+            "description": "用于维护模式的主 system prompt，包含命名纪律、表规则、流程与执行规范。",
+            "reference_note": "在 agent_runner.run_agent_sse 中，当 mode=maintain 时作为 design/review/execute 三阶段的基础 system prompt 注入；修改会直接影响维护 Agent 的读写策略与流程要求。",
+            "enabled": True,
+            "modules": [
+                {
+                    "module_key": "body",
+                    "title": "完整提示词",
+                    "content": _base_common_system("maintain"),
+                    "required": True,
+                    "enabled": True,
+                    "sort_order": 1,
+                }
+            ],
+        },
+        "agent_gather": {
+            "category": "system",
+            "prompt_key": "agent_gather",
+            "title": "Agent gather 阶段提示词",
+            "summary": "限定 gather 阶段只能读取项目信息并输出收集总结。",
+            "description": "用于 gather 阶段的系统提示词。",
+            "reference_note": "在 agent_runner._run_gather_phase 中作为唯一阶段 system prompt 注入，用于约束 gather 只读收集，不允许提前设计或写入。",
+            "enabled": True,
+            "modules": [{"module_key": "body", "title": "完整提示词", "content": _GATHER_SYSTEM, "required": True, "enabled": True, "sort_order": 1}],
+        },
+        "agent_design_tail": {
+            "category": "system",
+            "prompt_key": "agent_design_tail",
+            "title": "Agent design 阶段尾提示词",
+            "summary": "要求 design 阶段只输出三段式 CoT。",
+            "description": "用于 design 阶段的附加 system prompt。",
+            "reference_note": "在 design 阶段附加到通用 system prompt 后，用于固定输出格式并禁止工具调用。",
+            "enabled": True,
+            "modules": [{"module_key": "body", "title": "完整提示词", "content": _DESIGN_SYSTEM_TAIL, "required": True, "enabled": True, "sort_order": 1}],
+        },
+        "agent_review_tail": {
+            "category": "system",
+            "prompt_key": "agent_review_tail",
+            "title": "Agent review 阶段尾提示词",
+            "summary": "要求 review 阶段输出自审问题与最终操作方案。",
+            "description": "用于 review 阶段的附加 system prompt。",
+            "reference_note": "在 review 阶段附加到通用 system prompt 后，用于强制自审并输出可执行操作方案。",
+            "enabled": True,
+            "modules": [{"module_key": "body", "title": "完整提示词", "content": _REVIEW_SYSTEM_TAIL, "required": True, "enabled": True, "sort_order": 1}],
+        },
+        "agent_execute_tail": {
+            "category": "system",
+            "prompt_key": "agent_execute_tail",
+            "title": "Agent execute 阶段尾提示词",
+            "summary": "约束 execute 阶段的工具调用、自诉、TODO 与收尾规范。",
+            "description": "用于 execute 阶段的附加 system prompt。",
+            "reference_note": "在 execute 阶段附加到通用 system prompt 后，用于规范实际工具调用批次、写入顺序、校验和收尾。",
+            "enabled": True,
+            "modules": [{"module_key": "body", "title": "完整提示词", "content": _EXECUTE_SYSTEM_TAIL, "required": True, "enabled": True, "sort_order": 1}],
+        },
+        "agent_reviewer": {
+            "category": "system",
+            "prompt_key": "agent_reviewer",
+            "title": "写操作 Reviewer 提示词",
+            "summary": "对即将执行的写工具调用进行审批的 reviewer system prompt。",
+            "description": "用于 reviewer 旁路模型的 system prompt。",
+            "reference_note": "在 reviewer 审批写操作时使用，用于判断写工具调用是否安全、是否违反默认细则或覆盖用户手工内容。",
+            "enabled": True,
+            "modules": [{"module_key": "body", "title": "完整提示词", "content": _REVIEWER_SYSTEM, "required": True, "enabled": True, "sort_order": 1}],
+        },
+    }
+
+
+def get_agent_system_prompt_catalog(conn: Optional[sqlite3.Connection] = None) -> List[Dict[str, Any]]:
+    defaults = list(_agent_system_prompt_defaults().values())
+    if conn is None:
+        return defaults
+    items: List[Dict[str, Any]] = []
+    for default in defaults:
+        override = get_prompt_override(conn, category="system", prompt_key=str(default["prompt_key"]))
+        items.append(merge_prompt_item(default, override))
+    return items
+
+
+def _resolve_agent_system_prompt(conn: Optional[sqlite3.Connection], prompt_key: str) -> str:
+    default = _agent_system_prompt_defaults()[prompt_key]
+    if conn is None:
+        return render_prompt_text(default)
+    override = get_prompt_override(conn, category="system", prompt_key=prompt_key)
+    return render_prompt_text(merge_prompt_item(default, override))
+
+
+def _common_system(mode_norm: str, conn: Optional[sqlite3.Connection] = None) -> str:
+    prompt_key = "agent_common_init" if mode_norm == "init" else "agent_common_maintain"
+    return _resolve_agent_system_prompt(conn, prompt_key)
 
 
 _GATHER_SYSTEM = (
@@ -475,7 +619,7 @@ def _reviewer_check(client, tool_name: str, tool_args: str, *, model: Optional[s
         resp = client.chat.completions.create(
             model=model or QWEN_MODEL,
             messages=[
-                {"role": "system", "content": _REVIEWER_SYSTEM},
+                {"role": "system", "content": _resolve_agent_system_prompt(p.conn, "agent_reviewer")},
                 {
                     "role": "user",
                     "content": f"tool_name: {tool_name}\narguments:\n{tool_args}",
@@ -537,7 +681,7 @@ def _run_gather_phase(
     returns: 本阶段产生的消息列表（assistant+tool exchanges），供 design 阶段注入上下文。
     """
     gather_messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": _GATHER_SYSTEM},
+        {"role": "system", "content": _resolve_agent_system_prompt(p.conn, "agent_gather")},
     ]
     if routed_block:
         gather_messages.append({"role": "system", "content": routed_block})
@@ -552,7 +696,7 @@ def _run_gather_phase(
     yield _emit("gather", {
         "type": "tools_meta", "phase": "gather",
         "tools": sorted(READ_TOOLS),
-        "tool_schemas": _tool_schema_payload(READ_TOOLS),
+        "tool_schemas": _tool_schema_payload(build_tools_openai(p.conn), READ_TOOLS),
         "parallel_tool_calls": True,
         "tool_choice": "auto",
     })
@@ -563,7 +707,7 @@ def _run_gather_phase(
             resp = client.chat.completions.create(
                 model=model,
                 messages=gather_messages,
-                tools=READ_TOOLS_OPENAI,
+                tools=_filter_tools_openai(build_tools_openai(p.conn), READ_TOOLS),
                 tool_choice="auto",
                 parallel_tool_calls=True,
                 temperature=0.1,
@@ -672,14 +816,14 @@ def run_agent_sse(
             "hit": bool(route.get("hit")),
             "prompt": route.get("prompt", ""),
             "gather_hint": route.get("gather_hint", ""),
-            "route_system": _ROUTE_SYSTEM_PROMPT,
+            "route_system": route.get("route_system", ""),
             "rationale": route.get("rationale", ""),
             "step_id": step_id,
             "skills": route.get("skills", []),
         },
     )
 
-    base_system = _common_system(mode_norm)
+    base_system = _common_system(mode_norm, p.conn)
     routed_prompt = (route.get("prompt") or "").strip()
     routed_block = (
         "【5/4 路由提示词】" + routed_prompt if routed_prompt else ""
@@ -712,7 +856,7 @@ def run_agent_sse(
         design_messages.append({"role": "system", "content": routed_block})
     if exposed_block:
         design_messages.append({"role": "system", "content": exposed_block})
-    design_messages.append({"role": "system", "content": _DESIGN_SYSTEM_TAIL})
+    design_messages.append({"role": "system", "content": _resolve_agent_system_prompt(p.conn, "agent_design_tail")})
     design_messages.append({"role": "user", "content": user_message})
     # Inject gather phase context so design sees real project data
     design_messages.extend(gather_context)
@@ -755,7 +899,7 @@ def run_agent_sse(
         review_messages.append({"role": "system", "content": routed_block})
     if exposed_block:
         review_messages.append({"role": "system", "content": exposed_block})
-    review_messages.append({"role": "system", "content": _REVIEW_SYSTEM_TAIL})
+    review_messages.append({"role": "system", "content": _resolve_agent_system_prompt(p.conn, "agent_review_tail")})
     review_messages.append({"role": "user", "content": user_message})
     review_messages.append(
         {
@@ -798,7 +942,7 @@ def run_agent_sse(
         execute_messages.append({"role": "system", "content": routed_block})
     if exposed_block:
         execute_messages.append({"role": "system", "content": exposed_block})
-    execute_messages.append({"role": "system", "content": _EXECUTE_SYSTEM_TAIL})
+    execute_messages.append({"role": "system", "content": _resolve_agent_system_prompt(p.conn, "agent_execute_tail")})
     execute_messages.append({"role": "user", "content": user_message})
     execute_messages.append(
         {
@@ -818,7 +962,7 @@ def run_agent_sse(
     yield _emit("execute", {
         "type": "tools_meta", "phase": "execute",
         "tools": sorted(WRITE_TOOLS | READ_TOOLS),
-        "tool_schemas": _tool_schema_payload(WRITE_TOOLS | READ_TOOLS),
+        "tool_schemas": _tool_schema_payload(build_tools_openai(p.conn), WRITE_TOOLS | READ_TOOLS),
         "parallel_tool_calls": True,
         "tool_choice": "auto",
     })
@@ -893,7 +1037,7 @@ def run_agent_sse(
                 return client.chat.completions.create(
                     model=_model,
                     messages=execute_messages,
-                    tools=TOOLS_OPENAI,
+                    tools=build_tools_openai(p.conn),
                     tool_choice="auto",
                     parallel_tool_calls=True,
                     temperature=0.2,
@@ -1275,7 +1419,7 @@ def _run_recovery_sse(
             resp = client.chat.completions.create(
                 model=_model,
                 messages=execute_messages,
-                tools=RECOVERY_TOOLS_OPENAI,
+                tools=_filter_tools_openai(build_tools_openai(p.conn), RECOVERY_CLEANUP_TOOLS),
                 tool_choice="auto",
                 parallel_tool_calls=True,
                 temperature=0.1,
