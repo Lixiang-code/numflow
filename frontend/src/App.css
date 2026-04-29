@@ -2861,15 +2861,23 @@ textarea.sl-input-ai:focus {
 /* ── 沉浸式聚焦效果 ─────────────────────────────────────────────── */
 /*
  * 设计：当提示词库任意 AI 可见输入框聚焦时，
- * 页面其余内容被半透明深色遮罩覆盖，当前模块卡片浮出，
- * 文本框高度自动扩展，给编辑过程明确的视觉焦点。
+ * 页面其余内容被半透明深色遮罩覆盖，
+ * 【仅】被聚焦的那个输入元素（及其直接容器）浮出遮罩并放大，
+ * 同一卡片/模块内其余输入框保持在遮罩之下。
  *
  * 实现：
- *   - .sl-focus-overlay  → 固定全屏遮罩，默认隐藏
+ *   - .sl-focus-overlay  → 固定全屏遮罩，默认隐藏（z-index: 100）
  *   - body:has(.sl-input-ai:focus) → 遮罩可见
- *   - .sl-module:focus-within / .sl-preview-inline:focus-within
- *       → 通过 z-index 浮出到遮罩之上，加深阴影
- *   - .sl-module:focus-within .sl-module-content → 文本框扩展高度
+ *
+ *   - .sl-field:has(.sl-input-ai:focus)
+ *       → 包含 label 的字段包裹层浮出（z-index: 101）
+ *       → textarea 放大：字号 1rem、最小高度 280px
+ *
+ *   - .sl-module:focus-within
+ *       → 每个 module 只有一个主 textarea，整体浮出即可
+ *       → textarea 放大：字号 0.95rem、最小高度 280px
+ *
+ *   - .sl-preview-inline:focus-within → 预览区浮出
  */
 
 .sl-focus-overlay {
@@ -2877,9 +2885,9 @@ textarea.sl-input-ai:focus {
   position: fixed;
   inset: 0;
   z-index: 100;
-  background: rgba(10, 15, 25, 0.52);
-  backdrop-filter: blur(1.5px);
-  -webkit-backdrop-filter: blur(1.5px);
+  background: rgba(10, 15, 25, 0.55);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
   pointer-events: none;
   animation: sl-overlay-in .18s ease forwards;
 }
@@ -2894,32 +2902,59 @@ body:has(.sl-input-ai:focus) .sl-focus-overlay {
   display: block;
 }
 
-/* 聚焦模块：浮出遮罩 */
-.sl-module:focus-within,
-.sl-preview-inline:focus-within,
-.sl-card:focus-within:has(.sl-input-ai:focus) {
+/* ── 仅聚焦字段（label + input/textarea）浮出 ── */
+/* 适用于 SKILL 基本信息、系统/工具提示词基本信息等多字段卡片 */
+.sl-field:has(.sl-input-ai:focus) {
   position: relative;
   z-index: 101;
-  border-color: rgba(33, 115, 70, 0.55) !important;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow:
+    0 0 0 3px rgba(33, 115, 70, 0.22),
+    0 20px 64px rgba(0, 0, 0, 0.26),
+    0 4px 14px rgba(0, 0, 0, 0.12);
+  outline: none;
+  /* 用 padding + 负 margin 让视觉扩大但不影响布局流 */
+  padding: 10px 12px !important;
+  margin: -10px -12px;
+  transition: box-shadow .22s ease;
+}
+
+/* 聚焦字段：放大 textarea（字号 + 高度） */
+.sl-field:has(textarea.sl-input-ai:focus) > textarea.sl-input-ai {
+  min-height: 280px !important;
+  font-size: 1rem !important;
+  line-height: 1.7 !important;
+  transition: min-height .25s ease, font-size .15s ease;
+}
+
+/* 聚焦字段：放大 input（字号） */
+.sl-field:has(input.sl-input-ai:focus) > input.sl-input-ai {
+  font-size: 1rem !important;
+  transition: font-size .15s ease;
+}
+
+/* ── 聚焦模块（每个模块仅一个主 textarea）整体浮出 ── */
+.sl-module:focus-within,
+.sl-preview-inline:focus-within {
+  position: relative;
+  z-index: 101;
+  border-color: rgba(33, 115, 70, 0.5) !important;
   background: #fff !important;
   box-shadow:
-    0 0 0 3px rgba(33, 115, 70, 0.13),
-    0 16px 56px rgba(0, 0, 0, 0.22),
-    0 4px 12px rgba(0, 0, 0, 0.1);
+    0 0 0 3px rgba(33, 115, 70, 0.16),
+    0 20px 64px rgba(0, 0, 0, 0.26),
+    0 4px 14px rgba(0, 0, 0, 0.12);
   transform: translateY(-2px);
   transition: box-shadow .22s ease, transform .22s ease, border-color .18s ease;
 }
 
-/* 聚焦时文本框扩展：让内容更舒适地展开 */
-.sl-module:focus-within .sl-module-content {
-  min-height: 220px !important;
-  transition: min-height .25s ease;
-}
-
-/* 聚焦时字段 textarea 也稍微扩展 */
-.sl-card:focus-within:has(.sl-input-ai:focus) .sl-field > textarea.sl-input-ai {
-  min-height: 120px;
-  transition: min-height .25s ease;
+/* 聚焦模块：主内容 textarea 放大 */
+.sl-module:focus-within .sl-module-content.sl-input-ai {
+  min-height: 280px !important;
+  font-size: 0.95rem !important;
+  line-height: 1.7 !important;
+  transition: min-height .25s ease, font-size .15s ease;
 }
 
 /* 避免聚焦时侧边栏被遮罩挡住（sidebar 始终可操作） */
