@@ -67,9 +67,17 @@ type GameplayTable = {
   table_id: string
   display_name: string
   readme: string
-  status: '未开始' | '进行中' | '已完成'
+  status: '未开始' | '进行中' | '已完成' | '需修订'
   order_num: number
   dependencies: string[]
+}
+type RevisionRequest = {
+  id: number
+  table_id: string
+  reason: string
+  requested_by_step: string
+  status: 'pending' | 'in_progress' | 'done'
+  created_at: string
 }
 type ProjectInfo = {
   name: string
@@ -346,6 +354,7 @@ export default function ProjectSetup() {
   const [currentStep, setCurrentStep] = useState<string | null>(null)
   const [allDone, setAllDone] = useState(false)
   const [gameplayTables, setGameplayTables] = useState<GameplayTable[]>([])
+  const [revisionRequests, setRevisionRequests] = useState<RevisionRequest[]>([])
 
   // ── 每步历史（stepId → 阶段面板状态）────────────────────────────
   const [stepHistory, setStepHistory] = useState<Array<{
@@ -382,6 +391,7 @@ export default function ProjectSetup() {
         void checkExistingSession(plData.next_expected_step)
       }
       void loadGameplayTables()
+      void loadRevisionRequests()
     } catch (e) {
       setLoadErr(String(e))
     }
@@ -393,6 +403,15 @@ export default function ProjectSetup() {
       setGameplayTables(data.tables ?? [])
     } catch {
       // 忽略（玩法表可能尚未规划）
+    }
+  }, [headers])
+
+  const loadRevisionRequests = useCallback(async () => {
+    try {
+      const data = await apiFetch('/pipeline/revision-requests', { headers }) as { items: RevisionRequest[] }
+      setRevisionRequests((data.items ?? []).filter(r => r.status !== 'done'))
+    } catch {
+      // 忽略
     }
   }, [headers])
 
@@ -505,6 +524,7 @@ export default function ProjectSetup() {
     }
     await loadPipeline()
     await loadGameplayTables()
+    await loadRevisionRequests()
   }
 
   // ── 通用 SSE 读取：返回 { localPhases, localTools, toolCount, hasError, recoveryStatus }
@@ -1029,15 +1049,45 @@ export default function ProjectSetup() {
                 </span>
               </div>
               <ul className="ps-gameplay-table-list">
-                {gameplayTables.map(t => (
-                  <li key={t.table_id} className={`ps-gameplay-table-item ps-gt-${t.status === '已完成' ? 'done' : t.status === '进行中' ? 'active' : 'pending'}`}>
-                    <span className="ps-gt-icon">
-                      {t.status === '已完成' ? '✓' : t.status === '进行中' ? '⟳' : String(t.order_num)}
-                    </span>
-                    <span className="ps-gt-name" title={t.table_id}>{t.display_name}</span>
-                    <span className={`ps-gt-badge ${t.status === '已完成' ? 'done' : t.status === '进行中' ? 'active' : ''}`}>
-                      {t.status}
-                    </span>
+                {gameplayTables.map(t => {
+                  const cls = t.status === '已完成' ? 'done'
+                    : t.status === '进行中' ? 'active'
+                    : t.status === '需修订' ? 'revision'
+                    : 'pending'
+                  return (
+                    <li key={t.table_id} className={`ps-gameplay-table-item ps-gt-${cls}`}>
+                      <span className="ps-gt-icon">
+                        {t.status === '已完成' ? '✓' : t.status === '进行中' ? '⟳' : t.status === '需修订' ? '↺' : String(t.order_num)}
+                      </span>
+                      <span className="ps-gt-name" title={t.table_id}>{t.display_name}</span>
+                      <span className={`ps-gt-badge ${cls}`}>
+                        {t.status}
+                      </span>
+                    </li>
+                  )
+                })}
+              </ul>
+            </div>
+          )}
+
+          {/* 修订请求队列（有待处理修订时展示） */}
+          {revisionRequests.length > 0 && (
+            <div className="ps-revision-queue">
+              <div className="ps-sidebar-section-head">
+                <span>⚠ 待修订队列</span>
+                <span className="ps-progress-text">{revisionRequests.length}</span>
+              </div>
+              <ul className="ps-revision-list">
+                {revisionRequests.map(r => (
+                  <li key={r.id} className="ps-revision-item">
+                    <div className="ps-revision-item-head">
+                      <span className="ps-revision-table-id">{r.table_id}</span>
+                      <span className={`ps-gt-badge ${r.status === 'in_progress' ? 'active' : ''}`}>{r.status === 'in_progress' ? '进行中' : '待处理'}</span>
+                    </div>
+                    <div className="ps-revision-reason" title={r.reason}>{r.reason}</div>
+                    {r.requested_by_step && (
+                      <div className="ps-revision-by">来自 {r.requested_by_step}</div>
+                    )}
                   </li>
                 ))}
               </ul>

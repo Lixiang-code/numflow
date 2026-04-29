@@ -278,3 +278,65 @@ def pipeline_gameplay_tables(p: ProjectDB = Depends(get_project_read)):
     """返回已注册的玩法表清单（由 gameplay_planning 步骤的 Agent 注册）。"""
     tables = _get_registered_gameplay_tables(p.conn)
     return {"tables": tables}
+
+
+@router.get("/revision-requests")
+def pipeline_revision_requests(p: ProjectDB = Depends(get_project_read)):
+    """返回玩法表二次修订请求队列。"""
+    try:
+        rows = p.conn.execute(
+            "SELECT id, table_id, reason, requested_by_step, status, created_at, updated_at "
+            "FROM _table_revision_requests ORDER BY created_at DESC"
+        ).fetchall()
+        items = [
+            {
+                "id": r[0],
+                "table_id": r[1],
+                "reason": r[2],
+                "requested_by_step": r[3],
+                "status": r[4],
+                "created_at": r[5],
+                "updated_at": r[6],
+            }
+            for r in rows
+        ]
+        return {"items": items, "total": len(items)}
+    except Exception:  # noqa: BLE001
+        return {"items": [], "total": 0}
+
+
+class RevisionStatusBody(BaseModel):
+    status: str  # pending / in_progress / done
+
+
+@router.patch("/revision-requests/{request_id}/status")
+def pipeline_revision_request_update_status(
+    request_id: int,
+    body: RevisionStatusBody,
+    p: ProjectDB = Depends(get_project_write),
+):
+    """更新修订请求状态（前端手动确认修订完成时调用）。"""
+    if body.status not in ("pending", "in_progress", "done"):
+        raise HTTPException(status_code=400, detail="status 只允许 pending / in_progress / done")
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    cur = p.conn.execute(
+        "UPDATE _table_revision_requests SET status=?, updated_at=? WHERE id=?",
+        (body.status, now, request_id),
+    )
+    p.conn.commit()
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail=f"找不到修订请求 id={request_id}")
+    # 若标记为 done，也尝试将对应的表状态从 需修订 → 已完成（若当前还是需修订）
+    if body.status == "done":
+        row = p.conn.execute(
+            "SELECT table_id FROM _table_revision_requests WHERE id=?", (request_id,)
+        ).fetchone()
+        if row:
+            table_id = row[0]
+            p.conn.execute(
+                "UPDATE _gameplay_table_registry SET status='已完成', updated_at=? "
+                "WHERE table_id=? AND status='需修订'",
+                (now, table_id),
+            )
+            p.conn.commit()
+    return {"ok": True, "id": request_id, "new_status": body.status}

@@ -79,6 +79,7 @@ WRITE_TOOLS = {
     "expose_param_to_subsystems",
     "register_gameplay_table",
     "set_gameplay_table_status",
+    "request_table_revision",
 }
 
 # 只读工具白名单（gather 阶段只允许调用这些）
@@ -155,6 +156,9 @@ _TOOL_LABELS: Dict[str, str] = {
     "register_gameplay_table": "注册玩法表",
     "get_gameplay_table_list": "读取玩法表清单",
     "set_gameplay_table_status": "更新玩法表状态",
+    "expose_param_to_subsystems": "暴露参数给下游",
+    "list_exposed_params": "读取上游暴露参数",
+    "request_table_revision": "发起玩法表修订",
 }
 
 
@@ -624,12 +628,14 @@ def _current_step_id(p: ProjectDB) -> str:
 
 
 def _build_exposed_params_block(p: ProjectDB, step_id: str) -> str:
-    """读取 _step_exposed_params 中针对当前步骤（含父步通配）的暴露参数，渲染为 system 提示。"""
+    """读取 _step_exposed_params 中针对当前步骤（含父步通配）的暴露参数，渲染为 system 提示。
+    调用本函数会自动将 pending 参数标记为 acknowledged（已读）。"""
     if not step_id:
         return ""
     try:
         from app.services.agent_tools import _list_exposed_params
-        items = (_list_exposed_params(p.conn, step_id) or {}).get("items") or []
+        result = _list_exposed_params(p.conn, step_id) or {}
+        items = result.get("items") or []
     except Exception:
         return ""
     if not items:
@@ -643,8 +649,11 @@ def _build_exposed_params_block(p: ProjectDB, step_id: str) -> str:
         val = it.get("value")
         brief = it.get("brief", "") or ""
         owner = it.get("owner_step", "")
-        lines.append(f"- ${key}$ = {val!r}  (来自 {owner})  // {brief}")
+        status = it.get("status", "")
+        status_hint = " [新参数]" if status == "acknowledged" else ""
+        lines.append(f"- ${key}$ = {val!r}  (来自 {owner}){status_hint}  // {brief}")
     return "\n".join(lines)
+
 
 
 

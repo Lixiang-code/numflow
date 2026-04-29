@@ -1107,18 +1107,36 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "function": {
             "name": "expose_param_to_subsystems",
             "description": (
-                "在父系统步骤里把关键参数暴露给所有子系统步骤。\n"
-                "示例：装备_基础步骤暴露 `equip_base_to_upgrade_ratio=0.6`，"
-                "装备_升级 / 装备_增幅 步骤的 prompt 会自动看到此参数。"
+                "向下游或兄弟步骤暴露关键数值参数，接收方步骤的设计提示词会自动注入这些参数。\n\n"
+                "【使用流程】\n"
+                "1. 先调用 get_gameplay_table_list 获取所有已注册玩法表 ID，从中选择目标步骤 ID。\n"
+                "2. 指定 target_step：\n"
+                "   - 单个目标：'gameplay_table.<table_id>'（例如 'gameplay_table.equip_enhance'）\n"
+                "   - 广播全部玩法表：'subsystems:gameplay_table'（所有 gameplay_table.* 步骤均可见）\n"
+                "   - 广播养成系统：'subsystems:cultivation_allocation' 等常规步骤 ID 也可使用前缀广播\n"
+                "3. 参数创建后 status='pending'；接收方步骤调用 list_exposed_params 后自动标记为 acknowledged；\n"
+                "   接收方步骤标记为 已完成 后自动标记为 acted_on。\n\n"
+                "示例：equip_base 步骤暴露 equip_max_atk=1200 给 equip_enhance 步骤，后者设计时自动看到此值。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "owner_step": {"type": "string", "description": "暴露源的步骤 ID"},
-                    "target_step": {"type": "string", "description": "目标步骤 ID 或 'subsystems:<owner_step>'（广播）"},
-                    "key": {"type": "string"},
-                    "value": {},
-                    "brief": {"type": "string"},
+                    "owner_step": {"type": "string", "description": "暴露源的步骤 ID（本步骤 ID）"},
+                    "target_step": {
+                        "type": "string",
+                        "description": (
+                            "接收方步骤 ID。\n"
+                            "可选格式：\n"
+                            "- 'gameplay_table.<table_id>'：指定某个玩法表步骤\n"
+                            "- 'subsystems:gameplay_table'：广播给所有 gameplay_table.* 步骤\n"
+                            "- 'subsystems:<步骤前缀>'：广播给该前缀下的所有步骤\n"
+                            "- 普通步骤 ID（如 'cultivation_allocation'）：精确指向\n"
+                            "建议先用 get_gameplay_table_list 确认有效的 table_id 列表"
+                        ),
+                    },
+                    "key": {"type": "string", "description": "参数键名（snake_case 英文）"},
+                    "value": {"description": "参数值（数值、字符串均可）"},
+                    "brief": {"type": "string", "description": "参数说明（接收方 AI 会看到此说明，需清晰描述含义和单位）"},
                 },
                 "required": ["owner_step", "target_step", "key", "value", "brief"],
             },
@@ -1128,13 +1146,47 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "list_exposed_params",
-            "description": "列出针对某个步骤的所有 exposed params（子步骤启动 prompt 自动注入）。",
+            "description": (
+                "列出针对某个步骤的所有上游暴露参数，调用后自动将参数状态标记为 acknowledged（已读）。\n"
+                "在本步骤设计开始前调用，确认上游是否有关键约束参数需要遵守。\n"
+                "返回字段：owner_step / key / value / brief / status（pending=未读 / acknowledged=已读 / acted_on=已落地）"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "target_step": {"type": "string"},
+                    "target_step": {"type": "string", "description": "当前步骤 ID（即本步骤 ID）"},
                 },
                 "required": ["target_step"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "request_table_revision",
+            "description": (
+                "对已完成的玩法表发起二次修订请求。\n"
+                "调用后目标表状态重置为 '需修订'，修订请求进入队列等待玩法AGENT处理。\n"
+                "适用场景：本步骤完成时发现另一个已完成的玩法表的数值需要调整（如依赖参数变化、数值平衡偏差等）。\n"
+                "注意：仅能对已注册的玩法表发起修订（先用 get_gameplay_table_list 确认 table_id）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_id": {
+                        "type": "string",
+                        "description": "需要修订的玩法表 table_id（从 get_gameplay_table_list 获取）",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "修订原因，说明为什么已完成的表需要修改（需具体，如：equip_enhance 基础值调整后旧装备属性上限需重新计算）",
+                    },
+                    "requested_by_step": {
+                        "type": "string",
+                        "description": "发起修订的步骤 ID（即本步骤 ID）",
+                    },
+                },
+                "required": ["table_id", "reason"],
             },
         },
     },
@@ -2714,8 +2766,8 @@ def _get_gameplay_table_list(conn) -> Dict[str, Any]:
 def _set_gameplay_table_status(conn, table_id: str, status: str) -> Dict[str, Any]:
     """更新玩法落地表的执行状态。"""
     import time as _time
-    if status not in ("进行中", "已完成"):
-        return {"status": "error", "data": None, "warnings": [f"非法状态: {status!r}，只允许 '进行中' 或 '已完成'"], "blocked_cells": []}
+    if status not in ("进行中", "已完成", "需修订"):
+        return {"status": "error", "data": None, "warnings": [f"非法状态: {status!r}，只允许 '进行中' / '已完成' / '需修订'"], "blocked_cells": []}
     now = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
     try:
         cur = conn.execute(
@@ -2725,6 +2777,16 @@ def _set_gameplay_table_status(conn, table_id: str, status: str) -> Dict[str, An
         conn.commit()
         if cur.rowcount == 0:
             return {"status": "error", "data": None, "warnings": [f"找不到 table_id: {table_id!r}，请先 register_gameplay_table"], "blocked_cells": []}
+        # 当标记为已完成时，将针对此表的所有已读参数升级为 acted_on
+        if status == "已完成":
+            step_id = f"gameplay_table.{table_id}"
+            broadcast_key = "subsystems:gameplay_table"
+            conn.execute(
+                "UPDATE _step_exposed_params SET status='acted_on' "
+                "WHERE (target_step = ? OR target_step = ?) AND status = 'acknowledged'",
+                (step_id, broadcast_key),
+            )
+            conn.commit()
         return {
             "status": "success",
             "data": {"table_id": table_id, "new_status": status},
@@ -2733,6 +2795,55 @@ def _set_gameplay_table_status(conn, table_id: str, status: str) -> Dict[str, An
         }
     except Exception as e:  # noqa: BLE001
         return {"status": "error", "data": None, "warnings": [str(e)], "blocked_cells": []}
+
+
+def _request_table_revision(conn, table_id: str, reason: str, requested_by_step: str) -> Dict[str, Any]:
+    """对已注册玩法表发起二次修订请求。将表状态重置为'需修订'，并在队列中记录请求。"""
+    import time as _time
+    if not table_id:
+        return {"status": "error", "data": None, "warnings": ["table_id 必填"], "blocked_cells": []}
+    if not reason:
+        return {"status": "error", "data": None, "warnings": ["reason 必填，需说明为何要修订"], "blocked_cells": []}
+    # 验证 table_id 存在
+    row = conn.execute(
+        "SELECT table_id, status FROM _gameplay_table_registry WHERE table_id=?",
+        (table_id,),
+    ).fetchone()
+    if not row:
+        return {
+            "status": "error", "data": None,
+            "warnings": [f"找不到 table_id: {table_id!r}，请先用 get_gameplay_table_list 查看有效的玩法表"],
+            "blocked_cells": [],
+        }
+    now = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
+    # 创建修订请求
+    conn.execute(
+        """
+        INSERT INTO _table_revision_requests (table_id, reason, requested_by_step, status, created_at, updated_at)
+        VALUES (?, ?, ?, 'pending', ?, ?)
+        """,
+        (table_id, reason, requested_by_step or "", now, now),
+    )
+    # 将表状态标记为需修订
+    conn.execute(
+        "UPDATE _gameplay_table_registry SET status='需修订', updated_at=? WHERE table_id=?",
+        (now, table_id),
+    )
+    conn.commit()
+    return {
+        "status": "success",
+        "data": {
+            "table_id": table_id,
+            "previous_status": row[1],
+            "new_status": "需修订",
+            "reason": reason,
+            "requested_by_step": requested_by_step or "",
+            "hint": f"玩法表 '{table_id}' 已标记为需修订，修订请求已入队。可在项目界面查看修订队列，触发重新设计。",
+        },
+        "warnings": [],
+        "blocked_cells": [],
+    }
+
 
 
 def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: ProjectDB) -> str:
@@ -3226,6 +3337,16 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
             table_id=str(args.get("table_id", "")),
             status=str(args.get("status", "")),
         )
+    elif name == "request_table_revision":
+        if not p.can_write:
+            out = {"error": "无写权限"}
+        else:
+            out = _request_table_revision(
+                conn,
+                table_id=str(args.get("table_id", "")),
+                reason=str(args.get("reason", "")),
+                requested_by_step=str(args.get("requested_by_step", "")),
+            )
     elif name == "sparse_sample":
         out = _sparse_sample(conn, args)
     elif name == "create_3d_table":
@@ -3269,39 +3390,65 @@ def _expose_param(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, A
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     conn.execute(
         """
-        INSERT INTO _step_exposed_params (owner_step, target_step, key, value_json, brief, created_at)
-        VALUES (?,?,?,?,?,?)
+        INSERT INTO _step_exposed_params (owner_step, target_step, key, value_json, brief, status, read_at, created_at)
+        VALUES (?,?,?,?,?,'pending',NULL,?)
         ON CONFLICT(owner_step, target_step, key) DO UPDATE SET
             value_json = excluded.value_json,
-            brief = excluded.brief
+            brief = excluded.brief,
+            status = 'pending',
+            read_at = NULL
         """,
         (owner, target, key, val_json, brief, now),
     )
     conn.commit()
-    return {"ok": True, "owner_step": owner, "target_step": target, "key": key}
+    return {"ok": True, "owner_step": owner, "target_step": target, "key": key, "status": "pending"}
 
 
 def _list_exposed_params(conn: sqlite3.Connection, target_step: str) -> Dict[str, Any]:
     if not target_step:
         return {"items": []}
-    # 直接命中 + 通配（subsystems:<owner>，调用方自行解析 owner）
+    # 直接命中 + 通配（subsystems:<namespace>，如 subsystems:gameplay_table）
+    broadcast_key = "subsystems:" + target_step.split(".")[0]
     cur = conn.execute(
-        "SELECT owner_step, target_step, key, value_json, brief FROM _step_exposed_params "
+        "SELECT owner_step, target_step, key, value_json, brief, status, read_at, created_at "
+        "FROM _step_exposed_params "
         "WHERE target_step = ? OR target_step = ?",
-        (target_step, "subsystems:" + target_step.split(".")[0]),
+        (target_step, broadcast_key),
     )
+    rows = cur.fetchall()
+    if not rows:
+        return {"items": []}
+    # 标记未读的条目为 acknowledged，记录 read_at 时间
+    import time as _time
+    now = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
+    pending_keys = [
+        (r[0], r[1], r[2]) for r in rows if r[5] == "pending"
+    ]
+    for owner_step, ts, key in pending_keys:
+        conn.execute(
+            "UPDATE _step_exposed_params SET status='acknowledged', read_at=? "
+            "WHERE owner_step=? AND target_step=? AND key=?",
+            (now, owner_step, ts, key),
+        )
+    if pending_keys:
+        conn.commit()
     items: List[Dict[str, Any]] = []
-    for r in cur.fetchall():
+    for r in rows:
         try:
             val = json.loads(r[3])
         except Exception:  # noqa: BLE001
             val = r[3]
+        # 如果刚被 acknowledged，反映最新状态
+        status = "acknowledged" if (r[0], r[1], r[2]) in pending_keys else r[5]
         items.append({
             "owner_step": r[0],
             "target_step": r[1],
             "key": r[2],
             "value": val,
             "brief": r[4],
+            "status": status,
+            "read_at": now if (r[0], r[1], r[2]) in pending_keys else r[6],
+            "created_at": r[7],
         })
     return {"items": items}
 

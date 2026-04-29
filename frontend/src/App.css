@@ -2228,6 +2228,56 @@ pre {
 }
 .ps-gt-badge.done { background: var(--green); color: #fff; }
 .ps-gt-badge.active { background: var(--green-dark, #1b5e20); color: #fff; }
+.ps-gt-badge.revision { background: #f57c00; color: #fff; }
+.ps-gameplay-table-item.ps-gt-revision {
+  color: #e65100;
+  border-left-color: #f57c00;
+}
+.ps-gameplay-table-item.ps-gt-revision .ps-gt-icon { background: #f57c00; color: #fff; }
+
+/* 修订请求队列 */
+.ps-revision-queue {
+  flex-shrink: 0;
+  overflow: hidden;
+}
+.ps-revision-list {
+  list-style: none;
+  margin: 0;
+  padding: 0.2rem 0 0.5rem;
+  overflow-y: auto;
+  max-height: 200px;
+}
+.ps-revision-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  padding: 0.35rem 0.9rem;
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  border-left: 3px solid #f57c00;
+  margin-bottom: 0.15rem;
+}
+.ps-revision-item-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.ps-revision-table-id {
+  font-weight: 700;
+  color: #e65100;
+}
+.ps-revision-reason {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ps-revision-by {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  opacity: 0.7;
+}
 
 /* ── 主体 ── */
 .ps-main {

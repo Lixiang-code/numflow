@@ -225,8 +225,34 @@ def ensure_project_migrations(conn: sqlite3.Connection) -> None:
             key TEXT NOT NULL,
             value_json TEXT NOT NULL,
             brief TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',  -- pending / acknowledged / acted_on
+            read_at TEXT,                        -- 首次被 list_exposed_params 读取的时间
             created_at TEXT NOT NULL,
             PRIMARY KEY (owner_step, target_step, key)
+        )
+        """
+    )
+    # 迁移：为旧库的 _step_exposed_params 添加 status / read_at 列
+    try:
+        conn.execute("ALTER TABLE _step_exposed_params ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        conn.execute("ALTER TABLE _step_exposed_params ADD COLUMN read_at TEXT")
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 玩法表二次修订请求队列
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS _table_revision_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            table_id TEXT NOT NULL,              -- 目标玩法表 table_id
+            reason TEXT NOT NULL DEFAULT '',     -- 修订原因
+            requested_by_step TEXT NOT NULL DEFAULT '',  -- 发起步骤 ID
+            status TEXT NOT NULL DEFAULT 'pending',      -- pending / in_progress / done
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         )
         """
     )
