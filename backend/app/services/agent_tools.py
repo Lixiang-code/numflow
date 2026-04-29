@@ -2778,10 +2778,11 @@ def _get_gameplay_table_list(conn) -> Dict[str, Any]:
 
 
 def _set_gameplay_table_status(conn, table_id: str, status: str) -> Dict[str, Any]:
-    """更新玩法落地表的执行状态。"""
+    """更新玩法落地表的执行状态。目标状态只允许 '进行中' 或 '已完成'。
+    若要将表标记为 '待修订'，请使用 request_table_revision 工具。"""
     import time as _time
-    if status not in ("进行中", "已完成", "待修订"):
-        return {"status": "error", "data": None, "warnings": [f"非法状态: {status!r}，只允许 '进行中' / '已完成' / '待修订'"], "blocked_cells": []}
+    if status not in ("进行中", "已完成"):
+        return {"status": "error", "data": None, "warnings": [f"非法状态: {status!r}，只允许 '进行中' / '已完成'；若要标记为待修订请使用 request_table_revision"], "blocked_cells": []}
     now = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
     try:
         cur = conn.execute(
@@ -2800,8 +2801,7 @@ def _set_gameplay_table_status(conn, table_id: str, status: str) -> Dict[str, An
                 "WHERE (target_step = ? OR target_step = ?) AND status = 'acknowledged'",
                 (step_id, broadcast_key),
             )
-            import time as _time2
-            now2 = _time2.strftime("%Y-%m-%dT%H:%M:%SZ", _time2.gmtime())
+            now2 = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
             conn.execute(
                 "UPDATE _table_revision_requests SET status='done', updated_at=? "
                 "WHERE table_id=? AND status='pending'",

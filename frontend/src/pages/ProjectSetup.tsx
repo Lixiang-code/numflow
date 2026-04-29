@@ -302,7 +302,7 @@ function buildInitMessage(stepId: string, projectInfo: ProjectInfo, completedSte
   let custom: string | undefined
   if (stepId.startsWith('gameplay_table.')) {
     const tableId = stepId.slice('gameplay_table.'.length)
-    custom = `请执行玩法规划中已注册的「${tableId}」落地表：\n1. 先调用 get_gameplay_table_list 查看该表的 readme 和依赖关系\n2. 调用 set_gameplay_table_status 标记为「进行中」\n3. 完成完整数值设计（参考该表 readme 中的设计目标和关键列）\n4. 完成后调用 set_gameplay_table_status 标记为「已完成」`
+    custom = `请执行玩法规划中已注册的「${tableId}」落地表：\n1. 先调用 get_gameplay_table_list 查看该表的 readme 和依赖关系\n2. 调用 set_gameplay_table_status('${tableId}', '进行中') 标记开始\n3. 完成完整数值设计（参考该表 readme 中的设计目标和关键列）\n4. 完成后调用 set_gameplay_table_status('${tableId}', '已完成') 标记完成\n5. 若完成后发现列表中有 status='待修订' 的表且与本步工作相关，可顺带处理`
   } else {
     custom = STEP_INIT_MESSAGES[stepId]
   }
