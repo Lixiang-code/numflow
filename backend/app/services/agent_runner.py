@@ -1044,7 +1044,7 @@ def run_agent_sse(
     total_errors = 0    # 累计错误（不重置）
     total_success = 0   # 累计成功
     MAX_CONSEC_ERRORS = 4  # 连续失败4次强制注入分析提示
-    MAX_EXECUTE_ROUNDS = 80  # execute 阶段总轮次硬上限（兜底防失控；放宽以容纳大批量数值表）
+    MAX_EXECUTE_ROUNDS = 0  # 0 = 无限制（依赖反循环计数器和连续错误上限兜底）
     # ---- 反循环计数器 ----
     _snapshot_count = 0        # create_snapshot 调用次数
     _validation_count = 0      # run_validation 调用次数
@@ -1055,8 +1055,8 @@ def run_agent_sse(
     while True:
         round_i += 1
 
-        # ---- 总轮次硬上限：超过则强制收尾 ----
-        if round_i > MAX_EXECUTE_ROUNDS:
+        # ---- 总轮次上限（当前无限制，由反循环计数器和连续错误兜底）----
+        if MAX_EXECUTE_ROUNDS > 0 and round_i > MAX_EXECUTE_ROUNDS:
             yield _emit(
                 "execute",
                 {
