@@ -109,6 +109,11 @@ def get_project_read(
     conn = connect_sqlite_file(path)
     try:
         ensure_project_migrations(conn)
+        try:
+            from app.services.skill_library import ensure_default_skills
+            ensure_default_skills(conn)
+        except Exception:  # noqa: BLE001
+            pass
         yield ProjectDB(
             row=row,
             conn=conn,
@@ -130,6 +135,11 @@ def get_project_write(
     conn = connect_sqlite_file(path)
     try:
         ensure_project_migrations(conn)
+        try:
+            from app.services.skill_library import ensure_default_skills
+            ensure_default_skills(conn)
+        except Exception:  # noqa: BLE001
+            pass
         yield ProjectDB(row=row, conn=conn, can_write=True)
     finally:
         conn.close()

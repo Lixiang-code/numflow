@@ -104,6 +104,7 @@ def init_project_db(conn: sqlite3.Connection, *, seed_readme: bool = True) -> No
             review_text TEXT NOT NULL DEFAULT '',
             execute_text TEXT NOT NULL DEFAULT '',
             tools_json TEXT NOT NULL DEFAULT '[]',
+            events_json TEXT NOT NULL DEFAULT '[]',
             error_text TEXT
         );
 
@@ -188,6 +189,11 @@ def init_project_db(conn: sqlite3.Connection, *, seed_readme: bool = True) -> No
                 "INSERT INTO project_settings (key, value_json, updated_at) VALUES (?,?,?)",
                 ("global_readme", json.dumps({"text": readme}, ensure_ascii=False), now),
             )
+    try:
+        from app.services.skill_library import ensure_default_skills
+        ensure_default_skills(conn)
+    except Exception:  # noqa: BLE001
+        pass
     conn.commit()
 
 
@@ -285,6 +291,7 @@ def update_agent_session(
     review_text: Optional[str] = None,
     execute_text: Optional[str] = None,
     tools_json: Optional[str] = None,
+    events_json: Optional[str] = None,
     error_text: Optional[str] = None,
     messages_json: Optional[str] = None,
     user_message: Optional[str] = None,
@@ -304,6 +311,8 @@ def update_agent_session(
         fields.append("execute_text = ?"); params.append(execute_text)
     if tools_json is not None:
         fields.append("tools_json = ?"); params.append(tools_json)
+    if events_json is not None:
+        fields.append("events_json = ?"); params.append(events_json)
     if error_text is not None:
         fields.append("error_text = ?"); params.append(error_text)
     if messages_json is not None:
@@ -339,11 +348,11 @@ def list_agent_sessions(
 ) -> list:
     """Return all agent sessions (newest first), optionally filtered by step_id."""
     cols = (
-        "id, step_id, status, started_at, finished_at, "
-        "design_text, review_text, execute_text, tools_json, error_text, "
-        "COALESCE(user_message,'') AS user_message, "
-        "COALESCE(model_used,'') AS model_used"
-    )
+            "id, step_id, status, started_at, finished_at, "
+            "design_text, review_text, execute_text, tools_json, events_json, error_text, "
+            "COALESCE(user_message,'') AS user_message, "
+            "COALESCE(model_used,'') AS model_used"
+        )
     if step_id:
         cur = conn.execute(
             f"SELECT {cols} FROM _agent_sessions WHERE step_id = ? ORDER BY id DESC LIMIT ?",
@@ -370,9 +379,9 @@ def list_agent_sessions(
             "review_text": row[6] or "",
             "execute_text": row[7] or "",
             "tools": tools,
-            "error_text": row[9],
-            "user_message": row[10] or "",
-            "model_used": row[11] or "",
+            "error_text": row[10],
+            "user_message": row[11] or "",
+            "model_used": row[12] or "",
         })
     return out
 
@@ -382,7 +391,7 @@ def get_agent_session_messages(conn: sqlite3.Connection, session_id: int) -> Opt
     try:
         cur = conn.execute(
             """SELECT id, step_id, status, started_at, finished_at,
-                      design_text, review_text, execute_text, tools_json, error_text,
+                      design_text, review_text, execute_text, tools_json, COALESCE(events_json,'[]') AS events_json, error_text,
                       COALESCE(messages_json,'[]') AS messages_json,
                       COALESCE(user_message,'') AS user_message,
                       COALESCE(model_used,'') AS model_used
@@ -399,7 +408,11 @@ def get_agent_session_messages(conn: sqlite3.Connection, session_id: int) -> Opt
     except json.JSONDecodeError:
         tools = []
     try:
-        messages = json.loads(row[10] or "[]")
+        events = json.loads(row[9] or "[]")
+    except json.JSONDecodeError:
+        events = []
+    try:
+        messages = json.loads(row[11] or "[]")
     except json.JSONDecodeError:
         messages = []
     return {
@@ -412,10 +425,11 @@ def get_agent_session_messages(conn: sqlite3.Connection, session_id: int) -> Opt
         "review_text": row[6] or "",
         "execute_text": row[7] or "",
         "tools": tools,
-        "error_text": row[9],
+        "events": events,
+        "error_text": row[10],
         "messages": messages,
-        "user_message": row[11] or "",
-        "model_used": row[12] or "",
+        "user_message": row[12] or "",
+        "model_used": row[13] or "",
     }
 
 

@@ -97,7 +97,10 @@ export default function SkillLibrary() {
   }, [headers, pid])
 
   useEffect(() => {
-    void loadSkills(undefined, true)
+    const timer = window.setTimeout(() => {
+      void loadSkills(undefined, true)
+    }, 0)
+    return () => window.clearTimeout(timer)
   }, [loadSkills])
 
   function selectSkill(skillId: number) {

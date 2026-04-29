@@ -40,9 +40,16 @@ type RouteInfo = {
   gatherHint: string | null
   routeSystem: string | null
   rationale: string | null
+  skills: Array<{ id?: number; slug: string; title: string }>
 }
 
 // ─── 完整对话类型 ──────────────────────────────────────────────────────────
+type ToolSchema = {
+  name: string
+  description: string
+  parameters: unknown
+}
+
 type LlmMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'
   content: string | null
@@ -60,6 +67,7 @@ type ConversationTurn = {
 type ToolsMeta = {
   phase: string
   tools: string[]
+  tool_schemas: ToolSchema[]
   parallel_tool_calls: boolean
   tool_choice: string
 }
@@ -180,7 +188,12 @@ function PhasePanel({ phase, label, state, toolEntries, live }:{
 function ToolTimeline({ entries }: { entries: ToolEntry[] }) {
   const [exp, setExp] = useState<Set<number>>(new Set())
   function toggle(idx: number) {
-    setExp(s => { const n = new Set(s); n.has(idx) ? n.delete(idx) : n.add(idx); return n })
+    setExp((s) => {
+      const n = new Set(s)
+      if (n.has(idx)) n.delete(idx)
+      else n.add(idx)
+      return n
+    })
   }
   return (
     <div className="am-tool-timeline">
@@ -197,6 +210,71 @@ function ToolTimeline({ entries }: { entries: ToolEntry[] }) {
       ))}
     </div>
   )
+}
+
+function rebuildFromEvents(events: SseEvent[]) {
+  const phases: Record<string, PhaseState> = {}
+  const tools: ToolEntry[] = []
+  const turns: ConversationTurn[] = []
+  const toolsMeta: Record<string, ToolsMeta> = {}
+  let routeInfo: RouteInfo | null = null
+  let toolCalls = 0
+
+  for (const ev of events) {
+    const phase = String(ev.raw.phase ?? '')
+    const type = String(ev.raw.type ?? '')
+    if (phase && !phases[phase]) {
+      phases[phase] = { started: ev.ts, finished: null, text: '', logs: [], error: null, hasContent: false }
+    }
+
+    if (type === 'token') {
+      if (phase) {
+        phases[phase].text += String(ev.raw.text ?? '')
+        phases[phase].hasContent = true
+      }
+    } else if (type === 'log') {
+      if (phase) phases[phase].logs.push(String(ev.raw.message ?? ''))
+    } else if (type === 'error') {
+      if (phase) phases[phase].error = String(ev.raw.message ?? '')
+    } else if (type === 'tool_call') {
+      toolCalls += 1
+      tools.push({ idx: tools.length, ts: ev.ts, kind: 'call', name: String(ev.raw.name ?? ''), body: String(ev.raw.arguments ?? ''), expanded: false })
+    } else if (type === 'tool_result') {
+      tools.push({ idx: tools.length, ts: ev.ts, kind: 'result', name: String(ev.raw.name ?? ''), body: String(ev.raw.preview ?? ''), expanded: false })
+    } else if (type === 'phase_messages') {
+      const messages = ev.raw.messages as LlmMessage[] | undefined
+      if (Array.isArray(messages) && messages.length > 0) {
+        turns.push({
+          phase: String(ev.raw.phase ?? phase),
+          round: ev.raw.round !== undefined ? Number(ev.raw.round) : undefined,
+          messages,
+        })
+      }
+    } else if (type === 'tools_meta') {
+      const metaPhase = String(ev.raw.phase ?? phase)
+      toolsMeta[metaPhase] = {
+        phase: metaPhase,
+        tools: Array.isArray(ev.raw.tools) ? ev.raw.tools as string[] : [],
+        tool_schemas: Array.isArray(ev.raw.tool_schemas) ? ev.raw.tool_schemas as ToolSchema[] : [],
+        parallel_tool_calls: Boolean(ev.raw.parallel_tool_calls),
+        tool_choice: String(ev.raw.tool_choice ?? 'auto'),
+      }
+    } else if (type === 'prompt_route') {
+      routeInfo = {
+        step: String(ev.raw.step_id ?? ev.raw.step ?? ''),
+        template_key: String(ev.raw.template_key ?? ''),
+        log: String(ev.raw.message ?? ''),
+        hit: ev.raw.hit != null ? Boolean(ev.raw.hit) : null,
+        prompt: ev.raw.prompt ? String(ev.raw.prompt) : null,
+        gatherHint: ev.raw.gather_hint ? String(ev.raw.gather_hint) : null,
+        routeSystem: ev.raw.route_system ? String(ev.raw.route_system) : null,
+        rationale: ev.raw.rationale ? String(ev.raw.rationale) : null,
+        skills: Array.isArray(ev.raw.skills) ? ev.raw.skills as Array<{ id?: number; slug: string; title: string }> : [],
+      }
+    }
+  }
+
+  return { phases, tools, turns, toolsMeta, routeInfo, toolCalls }
 }
 
 // ─── 进度条 ────────────────────────────────────────────────────────────────
@@ -348,10 +426,27 @@ function ToolsMetaBadge({ meta }: { meta: ToolsMeta }) {
         <span style={{ marginLeft: 'auto', fontSize: '0.65rem', color: '#666' }}>{open ? '▲ 折叠' : '▼ 展开'}</span>
       </div>
       {open && (
-        <div style={{ padding: '6px 10px 8px', borderTop: '1px solid #1a2a4a', display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-          {meta.tools.map(t => (
-            <code key={t} style={{ fontSize: '0.65rem', background: '#1a2030', padding: '2px 6px', borderRadius: '3px', color: '#9ab0d0' }}>{t}</code>
-          ))}
+        <div style={{ padding: '6px 10px 8px', borderTop: '1px solid #1a2a4a' }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginBottom: meta.tool_schemas.length > 0 ? '8px' : 0 }}>
+            {meta.tools.map(t => (
+              <code key={t} style={{ fontSize: '0.65rem', background: '#1a2030', padding: '2px 6px', borderRadius: '3px', color: '#9ab0d0' }}>{t}</code>
+            ))}
+          </div>
+          {meta.tool_schemas.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {meta.tool_schemas.map((schema) => (
+                <div key={schema.name} style={{ border: '1px solid #223455', borderRadius: '6px', background: '#111827', padding: '8px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                    <code style={{ color: '#7ec8e3', fontSize: '0.72rem', fontWeight: 700 }}>{schema.name}</code>
+                  </div>
+                  {schema.description && (
+                    <div style={{ color: '#c7d2e1', fontSize: '0.74rem', marginBottom: '6px', whiteSpace: 'pre-wrap' }}>{schema.description}</div>
+                  )}
+                  <CollapsibleText text={JSON.stringify(schema.parameters, null, 2)} previewLen={700} />
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -464,7 +559,8 @@ export default function AgentTest() {
 
   function syncQuery(pid: number) {
     const n = new URLSearchParams(search)
-    pid > 0 ? n.set('project', String(pid)) : n.delete('project')
+    if (pid > 0) n.set('project', String(pid))
+    else n.delete('project')
     setSearch(n, { replace: true })
   }
 
@@ -472,20 +568,28 @@ export default function AgentTest() {
   const loadServerHistory = useCallback(async () => {
     if (projectId <= 0) return
     try {
-      const d = (await apiFetch('/agent/sessions?limit=50', { headers })) as {
-        sessions?: {
-          id: number
-          step_id: string
-          status: string
+        const d = (await apiFetch('/agent/sessions?limit=50', { headers })) as {
+          sessions?: {
+            id: number
+            step_id: string
+            status: string
           started_at: string
-          finished_at: string | null
-          design_text: string
-          review_text: string
-          execute_text: string
-          tools_json: string
-          error_text: string | null
-        }[]
-      }
+            finished_at: string | null
+            design_text: string
+            review_text: string
+            execute_text: string
+            tools: Array<{
+              callId?: string
+              name?: string
+              label?: string
+              arguments?: string
+              status?: string
+              resultPreview?: string | null
+            }>
+            error_text: string | null
+            user_message: string
+          }[]
+        }
       const list = Array.isArray(d.sessions) ? d.sessions : []
       const serverSessions: Session[] = list.map((s) => {
         const evs: SseEvent[] = []
@@ -500,34 +604,40 @@ export default function AgentTest() {
         for (const [phase, text] of phaseEntries) {
           if (text) evs.push({ ts: s.started_at, raw: { phase, type: 'token', text } })
         }
-        try {
-          const tools = JSON.parse(s.tools_json || '[]') as Array<{
-            ts?: string; kind?: string; name?: string; body?: string; arguments?: string; preview?: string
-          }>
-          for (const t of tools) {
-            const kind = t.kind === 'result' ? 'tool_result' : 'tool_call'
+          for (const t of (Array.isArray(s.tools) ? s.tools : [])) {
             evs.push({
-              ts: t.ts || s.started_at,
+              ts: s.started_at,
               raw: {
-                phase: 'execute', type: kind, name: t.name || '',
-                arguments: t.arguments ?? t.body ?? '',
-                preview: t.preview ?? t.body ?? '',
+                phase: 'execute',
+                type: 'tool_call',
+                name: t.name || '',
+                arguments: t.arguments ?? '',
               },
             })
+            if (t.resultPreview != null) {
+              evs.push({
+                ts: s.finished_at || s.started_at,
+                raw: {
+                  phase: 'execute',
+                  type: 'tool_result',
+                  name: t.name || '',
+                  preview: t.resultPreview ?? '',
+                },
+              })
+            }
           }
-        } catch { /* ignore tool parse */ }
         if (s.error_text) {
           evs.push({ ts: s.finished_at || s.started_at, raw: { phase: 'execute', type: 'error', message: s.error_text } })
         }
         const totalMs = s.finished_at ? new Date(s.finished_at).getTime() - new Date(s.started_at).getTime() : null
         const status: Metrics['status'] = s.status === 'error' ? 'error' : s.status === 'done' ? 'done' : 'running'
-        return {
-          id: `srv_${s.id}`,
-          projectId,
-          mode,
-          userMessage: `[${stepId || mode}] 服务端记录 #${s.id}`,
-          events: evs,
-          metrics: {
+          return {
+            id: `srv_${s.id}`,
+            projectId,
+            mode,
+            userMessage: s.user_message || `[${stepId || mode}] 服务端记录 #${s.id}`,
+            events: evs,
+            metrics: {
             startedAt: s.started_at, finishedAt: s.finished_at,
             totalMs, designMs: null, reviewMs: null, executeMs: null,
             toolCalls: 0, tokenHint: null, status,
@@ -547,7 +657,10 @@ export default function AgentTest() {
   }, [projectId, headers])
 
   useEffect(() => {
-    void loadServerHistory()
+    const timer = window.setTimeout(() => {
+      void loadServerHistory()
+    }, 0)
+    return () => window.clearTimeout(timer)
   }, [loadServerHistory])
 
   function initPhase(): PhaseState {
@@ -695,6 +808,7 @@ export default function AgentTest() {
               [metaPhase]: {
                 phase: metaPhase,
                 tools: (raw.tools as string[] | undefined) ?? [],
+                tool_schemas: Array.isArray(raw.tool_schemas) ? raw.tool_schemas as ToolSchema[] : [],
                 parallel_tool_calls: Boolean(raw.parallel_tool_calls),
                 tool_choice: String(raw.tool_choice ?? 'auto'),
               },
@@ -723,6 +837,7 @@ export default function AgentTest() {
               gatherHint: raw.gather_hint ? String(raw.gather_hint) : null,
               routeSystem: raw.route_system ? String(raw.route_system) : null,
               rationale: raw.rationale ? String(raw.rationale) : null,
+              skills: Array.isArray(raw.skills) ? raw.skills as Array<{ id?: number; slug: string; title: string }> : [],
             })
           }
         }
@@ -767,41 +882,36 @@ export default function AgentTest() {
   function loadSession(s: Session) {
     resetView()
     setViewSession(s)
-    // rebuild phase/tool state from events
-    const ph: Record<string, PhaseState> = {}
-    const tl: ToolEntry[] = []
-    let tc = 0
-    for (const ev of s.events) {
-      const phase = String(ev.raw.phase ?? '')
-      const type = String(ev.raw.type ?? '')
-      if (!ph[phase]) ph[phase] = initPhase()
-      if (type === 'token') {
-        ph[phase].text += String(ev.raw.text ?? '')
-        ph[phase].hasContent = true
-      } else if (type === 'log') {
-        ph[phase].logs.push(String(ev.raw.message ?? ''))
-      } else if (type === 'error') {
-        ph[phase].error = String(ev.raw.message ?? '')
-      } else if (type === 'tool_call') {
-        tc++
-        tl.push({ idx: tl.length, ts: ev.ts, kind: 'call', name: String(ev.raw.name ?? ''), body: String(ev.raw.arguments ?? ''), expanded: false })
-      } else if (type === 'tool_result') {
-        tl.push({ idx: tl.length, ts: ev.ts, kind: 'result', name: String(ev.raw.name ?? ''), body: String(ev.raw.preview ?? ''), expanded: false })
-      }
-    }
-    setPhases(ph)
-    setTools(tl)
-    setMetrics({ ...s.metrics, toolCalls: tc })
+    const rebuilt = rebuildFromEvents(s.events)
+    setPhases(rebuilt.phases)
+    setTools(rebuilt.tools)
+    setMetrics({ ...s.metrics, toolCalls: rebuilt.toolCalls })
+    setRouteInfo(rebuilt.routeInfo)
+    setConversationTurns(rebuilt.turns)
+    setToolsMeta(rebuilt.toolsMeta)
 
     // 若是服务端会话，尝试拉取完整对话记录
     if (s.id.startsWith('srv_')) {
       const numId = s.id.replace('srv_', '')
       void apiFetch(`/agent/sessions/${numId}`, { headers })
         .then((d: unknown) => {
-          const data = d as { messages?: ConversationTurn[] }
-          const msgs = data?.messages
-          if (Array.isArray(msgs) && msgs.length > 0) {
-            setConversationTurns(msgs as ConversationTurn[])
+          const data = d as { messages?: ConversationTurn[]; events?: Record<string, unknown>[] }
+          const rawEvents = Array.isArray(data?.events)
+            ? data.events.map((raw) => ({ ts: s.metrics.startedAt, raw }))
+            : []
+          if (rawEvents.length > 0) {
+            const next = rebuildFromEvents(rawEvents)
+            setPhases(next.phases)
+            setTools(next.tools)
+            setMetrics({ ...s.metrics, toolCalls: next.toolCalls })
+            setRouteInfo(next.routeInfo)
+            setConversationTurns(next.turns)
+            setToolsMeta(next.toolsMeta)
+          } else {
+            const msgs = data?.messages
+            if (Array.isArray(msgs) && msgs.length > 0) {
+              setConversationTurns(msgs as ConversationTurn[])
+            }
           }
         })
         .catch(() => {/* 静默失败 */})
@@ -1018,6 +1128,15 @@ export default function AgentTest() {
                 <p>命中默认模板：<code style={{ color: routeInfo.hit ? '#388e3c' : '#e65100' }}>{routeInfo.hit ? '✅ 是' : '❌ 否（LLM 生成）'}</code></p>
               )}
               {routeInfo.rationale && <p style={{ fontSize: '0.85rem', color: '#666' }}>理由：{routeInfo.rationale}</p>}
+              {routeInfo.skills.length > 0 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '0.45rem' }}>
+                  {routeInfo.skills.map((skill) => (
+                    <span key={skill.slug} style={{ fontSize: '0.72rem', padding: '0.16rem 0.45rem', borderRadius: 999, background: 'rgba(64,158,255,.12)', color: '#1f6fb2' }}>
+                      SKILL · {skill.title} ({skill.slug})
+                    </span>
+                  ))}
+                </div>
+              )}
               {routeInfo.routeSystem && (
                 <details style={{ marginTop: '0.4rem' }}>
                   <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: '0.85rem' }}>🤖 路由 Agent System Prompt</summary>

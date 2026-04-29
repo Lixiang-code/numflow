@@ -33,6 +33,15 @@ def test_default_skills_seeded_and_listed():
     assert any(m["title"] == "建议产出表" for m in gem["modules"])
 
 
+def test_init_project_db_seeds_default_skills():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_project_db(conn, seed_readme=False)
+    ensure_project_migrations(conn)
+    cur = conn.execute("SELECT COUNT(*) FROM _skills")
+    assert cur.fetchone()[0] >= 7
+
+
 def test_render_skill_file_persists_markdown():
     conn = _new_conn()
     with tempfile.TemporaryDirectory() as tmp:

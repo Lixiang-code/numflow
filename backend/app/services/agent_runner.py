@@ -140,6 +140,23 @@ def _emit(phase: str, obj: Dict[str, Any]) -> bytes:
     return sse_event(payload)
 
 
+def _tool_schema_payload(tool_names: set[str]) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for tool in TOOLS_OPENAI:
+        fn = tool.get("function") or {}
+        name = str(fn.get("name", ""))
+        if name in tool_names:
+            items.append(
+                {
+                    "name": name,
+                    "description": str(fn.get("description", "")),
+                    "parameters": fn.get("parameters") or {},
+                }
+            )
+    items.sort(key=lambda item: item["name"])
+    return items
+
+
 def _chunk_text(text: str, size: int) -> Iterable[str]:
     for i in range(0, len(text), size):
         yield text[i : i + size]
@@ -535,6 +552,7 @@ def _run_gather_phase(
     yield _emit("gather", {
         "type": "tools_meta", "phase": "gather",
         "tools": sorted(READ_TOOLS),
+        "tool_schemas": _tool_schema_payload(READ_TOOLS),
         "parallel_tool_calls": True,
         "tool_choice": "auto",
     })
@@ -800,6 +818,7 @@ def run_agent_sse(
     yield _emit("execute", {
         "type": "tools_meta", "phase": "execute",
         "tools": sorted(WRITE_TOOLS | READ_TOOLS),
+        "tool_schemas": _tool_schema_payload(WRITE_TOOLS | READ_TOOLS),
         "parallel_tool_calls": True,
         "tool_choice": "auto",
     })

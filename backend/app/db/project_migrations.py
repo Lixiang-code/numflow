@@ -73,6 +73,7 @@ def ensure_project_migrations(conn: sqlite3.Connection) -> None:
 
     # Agent 全链路对话追踪：存储完整的消息序列（system/user/assistant/tool）
     _add_column_if_missing(conn, "_agent_sessions", "messages_json", "TEXT NOT NULL DEFAULT '[]'")
+    _add_column_if_missing(conn, "_agent_sessions", "events_json", "TEXT NOT NULL DEFAULT '[]'")
     _add_column_if_missing(conn, "_agent_sessions", "user_message", "TEXT NOT NULL DEFAULT ''")
     _add_column_if_missing(conn, "_agent_sessions", "model_used", "TEXT NOT NULL DEFAULT ''")
 
@@ -179,5 +180,11 @@ def ensure_project_migrations(conn: sqlite3.Connection) -> None:
         )
         """
     )
+
+    try:
+        from app.services.skill_library import ensure_default_skills
+        ensure_default_skills(conn)
+    except Exception:  # noqa: BLE001
+        pass
 
     conn.commit()

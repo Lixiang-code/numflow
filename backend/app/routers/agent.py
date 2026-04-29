@@ -56,11 +56,23 @@ def _session_tracking_wrapper(
     execute_buf: list[str] = []
     tools: list[dict] = []
     tool_map: dict[str, dict] = {}
+    tracked_events: list[dict] = []
 
     # Full conversation tracking: list of {phase, round?, messages:[{role,content}]}
     conversation_turns: list[dict] = []
     _user_message_stored = False
     _model_stored = ""
+    _tracked_event_types = {
+        "user_message",
+        "prompt_route",
+        "phase_messages",
+        "tools_meta",
+        "tool_call",
+        "tool_result",
+        "reviewer_verdict",
+        "done",
+        "error",
+    }
 
     def _flush_tools() -> None:
         try:
@@ -77,6 +89,19 @@ def _session_tracking_wrapper(
         except Exception:  # noqa: BLE001
             pass
 
+    def _track_event(raw: dict) -> None:
+        if str(raw.get("type", "")) not in _tracked_event_types:
+            return
+        try:
+            tracked_events.append(raw)
+            update_agent_session(
+                conn,
+                session_id,
+                events_json=json.dumps(tracked_events, ensure_ascii=False),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     try:
         for chunk in gen:
             # Intercept and parse each SSE event
@@ -85,6 +110,7 @@ def _session_tracking_wrapper(
                     raw = json.loads(chunk[6:].decode("utf-8").strip())
                     phase = str(raw.get("phase", ""))
                     etype = str(raw.get("type", ""))
+                    _track_event(raw)
 
                     # ── 用户消息 & 模型元信息 ──
                     if etype == "user_message":
@@ -185,6 +211,7 @@ def _session_tracking_wrapper(
                                 review_text="".join(review_buf),
                                 execute_text=str(raw.get("full_text", "".join(execute_buf))),
                                 tools_json=json.dumps(tools, ensure_ascii=False),
+                                events_json=json.dumps(tracked_events, ensure_ascii=False),
                                 messages_json=json.dumps(conversation_turns, ensure_ascii=False),
                                 finished=True,
                             )
@@ -200,6 +227,7 @@ def _session_tracking_wrapper(
                                 review_text="".join(review_buf),
                                 execute_text="".join(execute_buf),
                                 tools_json=json.dumps(tools, ensure_ascii=False),
+                                events_json=json.dumps(tracked_events, ensure_ascii=False),
                                 messages_json=json.dumps(conversation_turns, ensure_ascii=False),
                                 error_text=str(raw.get("message", ""))[:2000],
                                 finished=True,
