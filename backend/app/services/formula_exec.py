@@ -179,7 +179,8 @@ def execute_formula_on_column(
         raise ValueError("level_range 需同时提供 level_min 与 level_max")
     mask: Optional[pd.Series] = None
     if level_min is not None and level_max is not None:
-        lc = level_column or "row_id"
+        raw_level_column = str(level_column).strip() if level_column is not None else ""
+        lc = raw_level_column or ("level" if "level" in df.columns else "row_id")
         if lc not in df.columns:
             raise ValueError(f"等级列 {lc} 不存在")
         lv = pd.to_numeric(df[lc], errors="coerce")

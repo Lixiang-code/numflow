@@ -720,7 +720,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "properties": {
                     "table_name": {"type": "string", "description": "英文表名（snake_case）"},
                     "max_level": {"type": "integer"},
-                    "level_column": {"type": "string", "default": "等级"},
+                    "level_column": {"type": "string", "default": "level"},
                     "columns": {
                         "type": "array",
                         "items": {
@@ -1934,6 +1934,7 @@ def _read_table(
         t = assert_col_or_table(table_name)
     except ValueError as e:
         return {"error": str(e)}
+    table_columns = set(_list_table_columns(conn, t))
     where_parts: List[str] = []
     params: List[Any] = []
     if filters:
@@ -1950,9 +1951,22 @@ def _read_table(
                 return {"error": f"filter 列名 '{coln}' 非法（含非法字符或格式错误）", "fix": f"表 '{table_name}' 的可用列: {known_cols}"}
             where_parts.append(f'"{cq}" = ?')
             params.append(f.get("value"))
-    if level_column is not None and level_min is not None and level_max is not None:
+    if level_min is not None or level_max is not None:
+        if level_min is None or level_max is None:
+            return {
+                "error": "level_range 需同时提供 level_min 与 level_max",
+                "fix": "若要按等级区间读取，请同时传 level_min 和 level_max；未传 level_column 时会默认优先使用 level，否则回退 row_id",
+            }
+        raw_level_column = str(level_column).strip() if level_column is not None else ""
+        level_col_name = raw_level_column or ("level" if "level" in table_columns else "row_id")
+        if level_col_name != "row_id" and level_col_name not in table_columns:
+            known_cols = sorted(table_columns)
+            return {
+                "error": f"等级列 '{level_col_name}' 不存在",
+                "fix": f"表 '{table_name}' 的可用列: {known_cols}；若未提供 level_column，则默认优先用 level，否则回退 row_id",
+            }
         try:
-            lc = assert_col_or_table(str(level_column))
+            lc = assert_col_or_table(level_col_name)
         except ValueError as e:
             return {"error": str(e)}
         where_parts.append(f'CAST("{lc}" AS REAL) BETWEEN ? AND ?')

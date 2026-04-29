@@ -96,6 +96,12 @@ def test_tool_whitelists_expose_critical_existing_and_new_tools():
     assert must_write.issubset(names)
 
 
+def test_setup_level_table_schema_uses_level_as_default_column():
+    tools = build_tools_openai()
+    setup_level = next(tool for tool in tools if tool["function"]["name"] == "setup_level_table")
+    assert setup_level["function"]["parameters"]["properties"]["level_column"]["default"] == "level"
+
+
 def test_get_table_schema_returns_compact_matrix_metadata():
     conn = _new_conn()
     _prepare_3d_table(conn)
@@ -195,3 +201,105 @@ def test_read_3d_table_full_returns_canonical_three_axis_payload():
     assert data["axes"]["metric"]["keys"][0]["display_name"] == "攻击加成"
     assert data["column_formulas"]["atk_bonus"]["type"] == "row"
     assert data["data"]["1"]["atk"]["atk_bonus"] == 1.0565
+
+
+def test_read_table_level_range_defaults_to_level_column():
+    conn = _new_conn()
+    dispatch_tool(
+        "setup_level_table",
+        {
+            "table_name": "num_base_framework",
+            "max_level": 3,
+            "columns": [
+                {"name": "level", "sql_type": "INTEGER", "display_name": "等级"},
+                {"name": "atk", "sql_type": "REAL", "display_name": "攻击"},
+            ],
+        },
+        _project_db(conn),
+    )
+
+    result = json.loads(
+        dispatch_tool(
+            "read_table",
+            {"table_name": "num_base_framework", "level_min": 2, "level_max": 2},
+            _project_db(conn),
+        )
+    )
+
+    assert result["status"] == "success"
+    assert len(result["data"]["rows"]) == 1
+    assert result["data"]["rows"][0]["row_id"] == "2"
+    assert result["data"]["rows"][0]["level"] == 2
+
+
+def test_read_table_level_range_falls_back_to_row_id_when_level_missing():
+    conn = _new_conn()
+    conn.execute('CREATE TABLE "rowid_only_table" (row_id TEXT PRIMARY KEY, "value" REAL)')
+    conn.execute(
+        "INSERT INTO _table_registry (table_name, schema_json) VALUES (?, ?)",
+        ("rowid_only_table", "{}"),
+    )
+    conn.executemany(
+        'INSERT INTO "rowid_only_table" (row_id, "value") VALUES (?, ?)',
+        [("1", 10.0), ("2", 20.0), ("3", 30.0)],
+    )
+    conn.commit()
+
+    result = json.loads(
+        dispatch_tool(
+            "read_table",
+            {"table_name": "rowid_only_table", "level_min": 2, "level_max": 2},
+            _project_db(conn),
+        )
+    )
+
+    assert result["status"] == "success"
+    assert len(result["data"]["rows"]) == 1
+    assert result["data"]["rows"][0]["row_id"] == "2"
+    assert result["data"]["rows"][0]["value"] == 20.0
+
+
+def test_execute_formula_level_range_defaults_to_level_column():
+    conn = _new_conn()
+    conn.execute('CREATE TABLE "formula_level_table" (row_id TEXT PRIMARY KEY, "level" INTEGER, "value" REAL)')
+    conn.execute(
+        "INSERT INTO _table_registry (table_name, schema_json) VALUES (?, ?)",
+        ("formula_level_table", "{}"),
+    )
+    conn.executemany(
+        'INSERT INTO "formula_level_table" (row_id, "level", "value") VALUES (?, ?, ?)',
+        [("lv_1", 1, 0.0), ("lv_2", 2, 0.0), ("lv_3", 3, 0.0)],
+    )
+    conn.commit()
+
+    reg = json.loads(
+        dispatch_tool(
+            "register_formula",
+            {
+                "table_name": "formula_level_table",
+                "column_name": "value",
+                "formula_string": "@T[level] * 10",
+            },
+            _project_db(conn),
+        )
+    )
+    assert reg["status"] == "success"
+    conn.execute('UPDATE "formula_level_table" SET "value" = 0')
+    conn.commit()
+
+    result = json.loads(
+        dispatch_tool(
+            "execute_formula",
+            {"table_name": "formula_level_table", "column_name": "value", "level_min": 2, "level_max": 2},
+            _project_db(conn),
+        )
+    )
+    assert result["status"] == "success"
+    assert result["data"]["rows_updated"] == 1
+
+    rows = conn.execute('SELECT row_id, level, value FROM "formula_level_table" ORDER BY level').fetchall()
+    assert [(r["row_id"], r["level"], r["value"]) for r in rows] == [
+        ("lv_1", 1, 0.0),
+        ("lv_2", 2, 20.0),
+        ("lv_3", 3, 0.0),
+    ]
