@@ -2474,3 +2474,96 @@ pre {
 .sl-toast.success .sl-toast-icon { background: var(--green); color: #fff; }
 .sl-toast.error .sl-toast-icon { background: #b91c1c; color: #fff; }
 @keyframes sl-toast-in { from { transform: translateY(-6px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+/* ===== Skill Library V2: dev/ai 输入区分 + 自适应 textarea + 置顶预览 ===== */
+
+/* 开发者可见（AI 不可见）字段：灰底 + 虚线边 + 角标 */
+.sl-input-dev,
+input.sl-input-dev,
+textarea.sl-input-dev {
+  background: #f3f4f6;
+  border: 1px dashed #b8bec7;
+  color: #2c3138;
+}
+.sl-input-dev:focus,
+input.sl-input-dev:focus,
+textarea.sl-input-dev:focus {
+  border-color: #6c7280;
+  background: #fff;
+  box-shadow: 0 0 0 2px rgba(108,114,128,.18);
+}
+.sl-input-dev[readonly] { background: #eceff3; color: #5a6068; }
+
+/* AI 可见字段：白底 + 实线绿色描边 + 角标 */
+.sl-input-ai,
+textarea.sl-input-ai,
+input.sl-input-ai {
+  background: #fff;
+  border: 1px solid var(--green);
+  border-left-width: 3px;
+  color: var(--text);
+}
+.sl-input-ai:focus,
+textarea.sl-input-ai:focus {
+  border-color: var(--green-dark);
+  box-shadow: 0 0 0 2px rgba(33,115,70,.18);
+}
+
+/* 字段标签处的可见性角标 */
+.sl-vis-tag { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.66rem; padding: 0.05rem 0.4rem; border-radius: 999px; margin-left: 0.4rem; font-weight: 600; vertical-align: middle; letter-spacing: 0.02em; }
+.sl-vis-tag.dev { background: #e9ecef; color: #495057; border: 1px dashed #adb5bd; }
+.sl-vis-tag.ai { background: rgba(33,115,70,.12); color: #1b7f43; border: 1px solid rgba(33,115,70,.35); }
+
+/* 自适应 textarea：行数+1，超过 10 行启用滚动条；禁止手动 resize */
+.sl-autoresize {
+  resize: none;
+  overflow: hidden;
+  display: block;
+}
+
+/* 主区改成上下两栏：固定预览 + 可滚动编辑区 */
+.sl-main { overflow: hidden; padding-right: 0; display: grid; grid-template-rows: auto 1fr; }
+.sl-preview-pane {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #0f172a;
+  color: #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  max-height: 38vh;
+  min-height: 180px;
+  overflow: hidden;
+  margin-bottom: 0.85rem;
+  box-shadow: 0 4px 14px rgba(15,23,42,.18);
+}
+.sl-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 0.95rem;
+  background: rgba(255,255,255,.06);
+  border-bottom: 1px solid rgba(255,255,255,.1);
+  flex-shrink: 0;
+}
+.sl-preview-head .sl-preview-title { font-size: 0.85rem; font-weight: 700; letter-spacing: 0.01em; color: #f8fafc; display: flex; align-items: center; gap: 0.4rem; }
+.sl-preview-head .sl-preview-meta { font-size: 0.74rem; color: rgba(226,232,240,.7); font-family: var(--font-mono, ui-monospace, monospace); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
+.sl-preview-pane .sl-preview-body {
+  flex: 1;
+  overflow: auto;
+  white-space: pre-wrap;
+  padding: 0.85rem 1.15rem;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.8rem;
+  line-height: 1.6;
+  margin: 0;
+}
+.sl-preview-pane .sl-preview-body.empty { color: rgba(226,232,240,.55); font-style: italic; }
+.sl-preview-pinbadge { font-size: 0.66rem; padding: 0.05rem 0.4rem; border-radius: 999px; background: rgba(33,115,70,.55); color: #fff; letter-spacing: 0.04em; }
+
+.sl-editor-pane { overflow: auto; padding-right: 0.25rem; min-height: 0; }
+.sl-editor-pane .sl-main-inner { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 1rem; padding-bottom: 0.5rem; }
+
+/* 模块卡内 textarea 不再使用 min-height（交给自适应） */
+.sl-module-content { margin-top: 0.7rem; min-height: 0; line-height: 1.55; font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.83rem; }
+.sl-field > textarea.sl-autoresize { min-height: 0; }

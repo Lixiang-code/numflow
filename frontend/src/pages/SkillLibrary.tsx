@@ -1,6 +1,60 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { TextareaHTMLAttributes } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { apiFetch, projectHeaders } from '../api'
+
+/**
+ * 自适应高度文本框：默认显示「内容行数 + 1」行，超过 10 行则定高 + 出现滚动条。
+ * 同时禁用拖动 resize，以保证页面节奏稳定。
+ */
+type AutoTextareaProps = TextareaHTMLAttributes<HTMLTextAreaElement> & { value: string }
+const MAX_AUTO_ROWS = 10
+
+function AutoTextarea({ value, className, onInput, ...rest }: AutoTextareaProps) {
+  const ref = useRef<HTMLTextAreaElement | null>(null)
+
+  const resize = useCallback(() => {
+    const el = ref.current
+    if (!el) return
+    const cs = window.getComputedStyle(el)
+    const lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.4 || 20
+    const pt = parseFloat(cs.paddingTop) || 0
+    const pb = parseFloat(cs.paddingBottom) || 0
+    const bt = parseFloat(cs.borderTopWidth) || 0
+    const bb = parseFloat(cs.borderBottomWidth) || 0
+    const maxH = lh * MAX_AUTO_ROWS + pt + pb + bt + bb
+    el.style.height = 'auto'
+    // scrollHeight 含 padding，加 1 行 buffer 让用户继续输入
+    const desired = el.scrollHeight + lh + bt + bb
+    const finalH = Math.min(desired, maxH)
+    el.style.height = `${finalH}px`
+    el.style.overflowY = desired > maxH ? 'auto' : 'hidden'
+  }, [])
+
+  useLayoutEffect(() => {
+    resize()
+  }, [resize, value])
+
+  useEffect(() => {
+    const handle = () => resize()
+    window.addEventListener('resize', handle)
+    return () => window.removeEventListener('resize', handle)
+  }, [resize])
+
+  return (
+    <textarea
+      ref={ref}
+      value={value}
+      className={['sl-autoresize', className].filter(Boolean).join(' ')}
+      onInput={(e) => {
+        resize()
+        onInput?.(e)
+      }}
+      rows={1}
+      {...rest}
+    />
+  )
+}
 
 type PromptModule = {
   id?: number
@@ -577,273 +631,286 @@ export default function SkillLibrary() {
         </aside>
 
         <main className="sl-main">
-          <div className="sl-main-inner">
-            {tab === 'skill' ? (
-              skillDraft ? (
-                <>
-                  <section className="sl-card">
-                    <div className="sl-card-head">
-                      <div>
-                        <h3>基本信息</h3>
-                        <div className="sl-sub">SKILL 元数据，将作为 Markdown 头部 YAML 写入。</div>
-                      </div>
-                    </div>
-                    <div className="sl-grid cols-2">
-                      <label className="sl-field">
-                        <span className="sl-label">标题</span>
-                        <input value={skillDraft.title} onChange={(e) => updateSkillDraft('title', e.target.value)} placeholder="例如：表格补全规则" />
-                      </label>
-                      <label className="sl-field">
-                        <span className="sl-label">Slug</span>
-                        <input value={skillDraft.slug ?? ''} onChange={(e) => updateSkillDraft('slug', e.target.value)} placeholder="kebab-case-id" />
-                      </label>
-                      <label className="sl-field">
-                        <span className="sl-label">绑定步骤 ID</span>
-                        <input value={skillDraft.step_id} onChange={(e) => updateSkillDraft('step_id', e.target.value)} placeholder="step.execute / step.review …" />
-                      </label>
-                      <label className="sl-field">
-                        <span className="sl-label">来源</span>
-                        <input value={skillDraft.source} onChange={(e) => updateSkillDraft('source', e.target.value)} placeholder="user / system" />
-                      </label>
-                    </div>
-
-                    <div className="sl-field sl-field-row area-md">
-                      <span className="sl-label">摘要</span>
-                      <textarea value={skillDraft.summary} onChange={(e) => updateSkillDraft('summary', e.target.value)} placeholder="一两句话说明这个 SKILL 解决的问题" />
-                    </div>
-
-                    <div className="sl-field sl-field-row area-lg">
-                      <span className="sl-label">说明</span>
-                      <textarea value={skillDraft.description} onChange={(e) => updateSkillDraft('description', e.target.value)} placeholder="详细描述使用场景、输入输出约束等" />
-                    </div>
-
-                    <div className="sl-checks">
-                      <label>
-                        <input type="checkbox" checked={skillDraft.default_exposed} onChange={(e) => updateSkillDraft('default_exposed', e.target.checked)} />
-                        默认暴露给 AI
-                      </label>
-                      <label>
-                        <input type="checkbox" checked={skillDraft.enabled} onChange={(e) => updateSkillDraft('enabled', e.target.checked)} />
-                        启用
-                      </label>
-                      <span className="muted">被调用次数：{skillDraft.usage_count}</span>
-                    </div>
-                  </section>
-
-                  <section className="sl-card">
-                    <div className="sl-card-head">
-                      <div>
-                        <h3>内容模块</h3>
-                        <div className="sl-sub">默认仅显示必要模块与已启用的可选模块。</div>
-                      </div>
-                      <div className="sl-card-actions">
-                        <button type="button" className="btn tiny" onClick={() => setShowAllSkillModules((v) => !v)}>
-                          {showAllSkillModules ? '仅看必要/启用' : '显示全部'}
-                        </button>
-                        <button type="button" className="btn tiny" onClick={addSkillModule}>+ 新增模块</button>
-                      </div>
-                    </div>
-
-                    {!showAllSkillModules && hiddenSkillModuleCount > 0 && (
-                      <p className="muted" style={{ marginBottom: '0.8rem', fontSize: '0.82rem' }}>
-                        当前还有 {hiddenSkillModuleCount} 个未启用的可选模块，可点击"显示全部"查看。
-                      </p>
-                    )}
-
-                    <div className="sl-modules">
-                      {visibleSkillModules.map((module) => {
-                        const realIndex = skillDraft.modules.indexOf(module)
-                        return (
-                          <div key={`${module.id ?? 'new'}-${realIndex}`} className={`sl-module${module.required ? ' required' : ''}`}>
-                            <div className="sl-module-head">
-                              <input
-                                className="sl-mtitle"
-                                value={module.title}
-                                onChange={(e) => updateSkillModule(realIndex, { title: e.target.value })}
-                                placeholder="模块标题"
-                              />
-                              <div className="sl-flags">
-                                <label>
-                                  <input
-                                    type="checkbox"
-                                    checked={module.required}
-                                    onChange={(e) => updateSkillModule(realIndex, { required: e.target.checked, enabled: e.target.checked ? true : module.enabled })}
-                                  />
-                                  必要
-                                </label>
-                                <label style={{ opacity: module.required ? 0.55 : 1 }}>
-                                  <input
-                                    type="checkbox"
-                                    checked={module.enabled || module.required}
-                                    disabled={module.required}
-                                    onChange={(e) => updateSkillModule(realIndex, { enabled: e.target.checked })}
-                                  />
-                                  启用
-                                </label>
-                              </div>
-                            </div>
-                            <textarea
-                              className="sl-module-content"
-                              value={module.content}
-                              onChange={(e) => updateSkillModule(realIndex, { content: e.target.value })}
-                              placeholder="模块内容（支持 Markdown）"
-                            />
-                            <div className="sl-module-foot">
-                              <button type="button" className="btn tiny danger" disabled={module.required} onClick={() => removeSkillModule(realIndex)}>
-                                删除模块
-                              </button>
-                            </div>
+          {tab === 'skill' ? (
+            <>
+              <div className="sl-preview-pane">
+                <div className="sl-preview-head">
+                  <div className="sl-preview-title">
+                    📄 实际 SKILL 文件
+                    <span className="sl-preview-pinbadge">置顶</span>
+                  </div>
+                  <div className="sl-preview-meta">{skillDraft?.generated_file_path || '保存后将自动生成 Markdown + YAML'}</div>
+                </div>
+                <pre className={`sl-preview-body${skillDraft?.generated_content ? '' : ' empty'}`}>
+                  {skillDraft?.generated_content || '尚未生成。点击右上角"生成实际文件"按钮即可生成。'}
+                </pre>
+              </div>
+              <div className="sl-editor-pane">
+                <div className="sl-main-inner">
+                  {skillDraft ? (
+                    <>
+                      <section className="sl-card">
+                        <div className="sl-card-head">
+                          <div>
+                            <h3>基本信息<span className="sl-vis-tag dev">仅开发者</span></h3>
+                            <div className="sl-sub">SKILL 元数据，将作为 Markdown 头部 YAML 写入；不会单独发送给 AI。</div>
                           </div>
-                        )
-                      })}
-                      {visibleSkillModules.length === 0 && (
-                        <div className="sl-empty">尚未添加内容模块，点击"新增模块"开始。</div>
-                      )}
-                    </div>
-                  </section>
-
-                  <section className="sl-card">
-                    <div className="sl-card-head">
-                      <div>
-                        <h3>实际 SKILL 文件</h3>
-                        <div className="sl-sub">{skillDraft.generated_file_path || '保存后将自动生成 Markdown + YAML 头格式'}</div>
-                      </div>
-                    </div>
-                    <pre className="sl-preview">
-                      {skillDraft.generated_content || '尚未生成。点击右上角"生成实际文件"按钮即可生成。'}
-                    </pre>
-                  </section>
-                </>
-              ) : (
-                <section className="sl-card">
-                  <div className="sl-empty">暂无可编辑的 SKILL。</div>
-                </section>
-              )
-            ) : promptDraft ? (
-              <>
-                <section className="sl-card">
-                  <div className="sl-card-head">
-                    <div>
-                      <h3>提示词信息</h3>
-                      <div className="sl-sub">{tab === 'system' ? '系统提示词' : '工具提示词'}的元数据与说明。</div>
-                    </div>
-                  </div>
-                  <div className="sl-grid cols-2">
-                    <label className="sl-field">
-                      <span className="sl-label">标题</span>
-                      <input value={promptDraft.title} onChange={(e) => updatePromptDraft('title', e.target.value)} />
-                    </label>
-                    <label className="sl-field">
-                      <span className="sl-label">引用 Key</span>
-                      <input value={promptDraft.prompt_key} readOnly style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)' }} />
-                    </label>
-                  </div>
-
-                  <div className="sl-field sl-field-row area-md">
-                    <span className="sl-label">摘要</span>
-                    <textarea value={promptDraft.summary} onChange={(e) => updatePromptDraft('summary', e.target.value)} placeholder="简要说明此提示词的用途" />
-                  </div>
-
-                  <div className="sl-field sl-field-row area-md">
-                    <span className="sl-label">引用说明</span>
-                    <textarea value={promptDraft.reference_note} onChange={(e) => updatePromptDraft('reference_note', e.target.value)} placeholder="说明在哪些场景被引用、注入位置等" />
-                  </div>
-
-                  <div className="sl-field sl-field-row area-md">
-                    <span className="sl-label">说明</span>
-                    <textarea value={promptDraft.description} onChange={(e) => updatePromptDraft('description', e.target.value)} placeholder="补充信息、注意事项" />
-                  </div>
-
-                  <div className="sl-checks">
-                    <label>
-                      <input type="checkbox" checked={promptDraft.enabled} onChange={(e) => updatePromptDraft('enabled', e.target.checked)} />
-                      启用
-                    </label>
-                    <span className="muted">{promptDraft.override ? '当前已覆盖默认内容' : '当前使用系统默认内容'}</span>
-                  </div>
-                </section>
-
-                <section className="sl-card">
-                  <div className="sl-card-head">
-                    <div>
-                      <h3>内容模块</h3>
-                      <div className="sl-sub">系统/工具提示词按模块保存；工具提示词模块 key 对应 schema 中的 description 路径。</div>
-                    </div>
-                    <div className="sl-card-actions">
-                      <button type="button" className="btn tiny" onClick={() => setShowAllPromptModules((v) => !v)}>
-                        {showAllPromptModules ? '仅看必要/启用' : '显示全部'}
-                      </button>
-                    </div>
-                  </div>
-
-                  {!showAllPromptModules && hiddenPromptModuleCount > 0 && (
-                    <p className="muted" style={{ marginBottom: '0.8rem', fontSize: '0.82rem' }}>
-                      当前还有 {hiddenPromptModuleCount} 个未启用的模块，可点击"显示全部"查看。
-                    </p>
-                  )}
-
-                  <div className="sl-modules">
-                    {visiblePromptModules.map((module) => {
-                      const realIndex = promptDraft.modules.indexOf(module)
-                      return (
-                        <div key={`${module.id ?? 'default'}-${module.module_key ?? realIndex}`} className={`sl-module${module.required ? ' required' : ''}`}>
-                          <div className="sl-module-head">
-                            <input className="sl-mkey" value={module.module_key ?? ''} readOnly title={module.module_key ?? ''} />
-                            <input
-                              className="sl-mtitle"
-                              value={module.title}
-                              onChange={(e) => updatePromptModule(realIndex, { title: e.target.value })}
-                              placeholder="模块标题"
-                            />
-                            <div className="sl-flags">
-                              <label>
-                                <input type="checkbox" checked={module.required} disabled />
-                                必要
-                              </label>
-                              <label>
-                                <input
-                                  type="checkbox"
-                                  checked={module.enabled || module.required}
-                                  disabled={module.required}
-                                  onChange={(e) => updatePromptModule(realIndex, { enabled: e.target.checked })}
-                                />
-                                启用
-                              </label>
-                            </div>
-                          </div>
-                          <textarea
-                            className="sl-module-content"
-                            value={module.content}
-                            onChange={(e) => updatePromptModule(realIndex, { content: e.target.value })}
-                            placeholder="模块内容（支持 Markdown）"
-                          />
                         </div>
-                      )
-                    })}
-                    {visiblePromptModules.length === 0 && (
-                      <div className="sl-empty">该提示词暂无可见模块。</div>
-                    )}
-                  </div>
-                </section>
+                        <div className="sl-grid cols-2">
+                          <label className="sl-field">
+                            <span className="sl-label">标题</span>
+                            <input className="sl-input-dev" value={skillDraft.title} onChange={(e) => updateSkillDraft('title', e.target.value)} placeholder="例如：表格补全规则" />
+                          </label>
+                          <label className="sl-field">
+                            <span className="sl-label">Slug</span>
+                            <input className="sl-input-dev" value={skillDraft.slug ?? ''} onChange={(e) => updateSkillDraft('slug', e.target.value)} placeholder="kebab-case-id" />
+                          </label>
+                          <label className="sl-field">
+                            <span className="sl-label">绑定步骤 ID</span>
+                            <input className="sl-input-dev" value={skillDraft.step_id} onChange={(e) => updateSkillDraft('step_id', e.target.value)} placeholder="step.execute / step.review …" />
+                          </label>
+                          <label className="sl-field">
+                            <span className="sl-label">来源</span>
+                            <input className="sl-input-dev" value={skillDraft.source} onChange={(e) => updateSkillDraft('source', e.target.value)} placeholder="user / system" />
+                          </label>
+                        </div>
 
-                <section className="sl-card">
-                  <div className="sl-card-head">
-                    <div>
-                      <h3>运行时引用预览</h3>
-                      <div className="sl-sub" style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>{promptDraft.prompt_key}</div>
-                    </div>
+                        <div className="sl-field sl-field-row">
+                          <span className="sl-label">摘要</span>
+                          <AutoTextarea className="sl-input-dev" value={skillDraft.summary} onChange={(e) => updateSkillDraft('summary', e.target.value)} placeholder="一两句话说明这个 SKILL 解决的问题" />
+                        </div>
+
+                        <div className="sl-field sl-field-row">
+                          <span className="sl-label">说明</span>
+                          <AutoTextarea className="sl-input-dev" value={skillDraft.description} onChange={(e) => updateSkillDraft('description', e.target.value)} placeholder="详细描述使用场景、输入输出约束等" />
+                        </div>
+
+                        <div className="sl-checks">
+                          <label>
+                            <input type="checkbox" checked={skillDraft.default_exposed} onChange={(e) => updateSkillDraft('default_exposed', e.target.checked)} />
+                            默认暴露给 AI
+                          </label>
+                          <label>
+                            <input type="checkbox" checked={skillDraft.enabled} onChange={(e) => updateSkillDraft('enabled', e.target.checked)} />
+                            启用
+                          </label>
+                          <span className="muted">被调用次数：{skillDraft.usage_count}</span>
+                        </div>
+                      </section>
+
+                      <section className="sl-card">
+                        <div className="sl-card-head">
+                          <div>
+                            <h3>内容模块<span className="sl-vis-tag ai">AI 可见</span></h3>
+                            <div className="sl-sub">模块内容会被实际拼装注入到 AI 上下文；模块标题仅供开发者识别。</div>
+                          </div>
+                          <div className="sl-card-actions">
+                            <button type="button" className="btn tiny" onClick={() => setShowAllSkillModules((v) => !v)}>
+                              {showAllSkillModules ? '仅看必要/启用' : '显示全部'}
+                            </button>
+                            <button type="button" className="btn tiny" onClick={addSkillModule}>+ 新增模块</button>
+                          </div>
+                        </div>
+
+                        {!showAllSkillModules && hiddenSkillModuleCount > 0 && (
+                          <p className="muted" style={{ marginBottom: '0.8rem', fontSize: '0.82rem' }}>
+                            当前还有 {hiddenSkillModuleCount} 个未启用的可选模块，可点击"显示全部"查看。
+                          </p>
+                        )}
+
+                        <div className="sl-modules">
+                          {visibleSkillModules.map((module) => {
+                            const realIndex = skillDraft.modules.indexOf(module)
+                            return (
+                              <div key={`${module.id ?? 'new'}-${realIndex}`} className={`sl-module${module.required ? ' required' : ''}`}>
+                                <div className="sl-module-head">
+                                  <input
+                                    className="sl-mtitle sl-input-dev"
+                                    value={module.title}
+                                    onChange={(e) => updateSkillModule(realIndex, { title: e.target.value })}
+                                    placeholder="模块标题（仅开发者）"
+                                    title="模块标题仅供开发者识别，不会发送给 AI"
+                                  />
+                                  <div className="sl-flags">
+                                    <label>
+                                      <input
+                                        type="checkbox"
+                                        checked={module.required}
+                                        onChange={(e) => updateSkillModule(realIndex, { required: e.target.checked, enabled: e.target.checked ? true : module.enabled })}
+                                      />
+                                      必要
+                                    </label>
+                                    <label style={{ opacity: module.required ? 0.55 : 1 }}>
+                                      <input
+                                        type="checkbox"
+                                        checked={module.enabled || module.required}
+                                        disabled={module.required}
+                                        onChange={(e) => updateSkillModule(realIndex, { enabled: e.target.checked })}
+                                      />
+                                      启用
+                                    </label>
+                                  </div>
+                                </div>
+                                <AutoTextarea
+                                  className="sl-module-content sl-input-ai"
+                                  value={module.content}
+                                  onChange={(e) => updateSkillModule(realIndex, { content: e.target.value })}
+                                  placeholder="模块内容（AI 可见，支持 Markdown）"
+                                />
+                                <div className="sl-module-foot">
+                                  <button type="button" className="btn tiny danger" disabled={module.required} onClick={() => removeSkillModule(realIndex)}>
+                                    删除模块
+                                  </button>
+                                </div>
+                              </div>
+                            )
+                          })}
+                          {visibleSkillModules.length === 0 && (
+                            <div className="sl-empty">尚未添加内容模块，点击"新增模块"开始。</div>
+                          )}
+                        </div>
+                      </section>
+                    </>
+                  ) : (
+                    <section className="sl-card">
+                      <div className="sl-empty">暂无可编辑的 SKILL。</div>
+                    </section>
+                  )}
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="sl-preview-pane">
+                <div className="sl-preview-head">
+                  <div className="sl-preview-title">
+                    🔭 运行时引用预览
+                    <span className="sl-preview-pinbadge">置顶</span>
                   </div>
-                  <pre className="sl-preview">
-                    {runtimePreview || '当前无启用模块内容。'}
-                  </pre>
-                </section>
-              </>
-            ) : (
-              <section className="sl-card">
-                <div className="sl-empty">请选择左侧列表中的一项进行编辑。</div>
-              </section>
-            )}
-          </div>
+                  <div className="sl-preview-meta">{promptDraft?.prompt_key || '—'}</div>
+                </div>
+                <pre className={`sl-preview-body${runtimePreview ? '' : ' empty'}`}>
+                  {runtimePreview || '当前无启用模块内容。'}
+                </pre>
+              </div>
+              <div className="sl-editor-pane">
+                <div className="sl-main-inner">
+                  {promptDraft ? (
+                    <>
+                      <section className="sl-card">
+                        <div className="sl-card-head">
+                          <div>
+                            <h3>提示词信息<span className="sl-vis-tag dev">仅开发者</span></h3>
+                            <div className="sl-sub">{tab === 'system' ? '系统提示词' : '工具提示词'}的元数据与说明，仅用于团队协作记录。</div>
+                          </div>
+                        </div>
+                        <div className="sl-grid cols-2">
+                          <label className="sl-field">
+                            <span className="sl-label">标题</span>
+                            <input className="sl-input-dev" value={promptDraft.title} onChange={(e) => updatePromptDraft('title', e.target.value)} />
+                          </label>
+                          <label className="sl-field">
+                            <span className="sl-label">引用 Key</span>
+                            <input className="sl-input-dev" value={promptDraft.prompt_key} readOnly style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)' }} />
+                          </label>
+                        </div>
+
+                        <div className="sl-field sl-field-row">
+                          <span className="sl-label">摘要</span>
+                          <AutoTextarea className="sl-input-dev" value={promptDraft.summary} onChange={(e) => updatePromptDraft('summary', e.target.value)} placeholder="简要说明此提示词的用途" />
+                        </div>
+
+                        <div className="sl-field sl-field-row">
+                          <span className="sl-label">引用说明</span>
+                          <AutoTextarea className="sl-input-dev" value={promptDraft.reference_note} onChange={(e) => updatePromptDraft('reference_note', e.target.value)} placeholder="说明在哪些场景被引用、注入位置等" />
+                        </div>
+
+                        <div className="sl-field sl-field-row">
+                          <span className="sl-label">说明</span>
+                          <AutoTextarea className="sl-input-dev" value={promptDraft.description} onChange={(e) => updatePromptDraft('description', e.target.value)} placeholder="补充信息、注意事项" />
+                        </div>
+
+                        <div className="sl-checks">
+                          <label>
+                            <input type="checkbox" checked={promptDraft.enabled} onChange={(e) => updatePromptDraft('enabled', e.target.checked)} />
+                            启用
+                          </label>
+                          <span className="muted">{promptDraft.override ? '当前已覆盖默认内容' : '当前使用系统默认内容'}</span>
+                        </div>
+                      </section>
+
+                      <section className="sl-card">
+                        <div className="sl-card-head">
+                          <div>
+                            <h3>内容模块<span className="sl-vis-tag ai">AI 可见</span></h3>
+                            <div className="sl-sub">模块内容会被运行时拼装注入；模块 key / 标题仅供开发者识别。</div>
+                          </div>
+                          <div className="sl-card-actions">
+                            <button type="button" className="btn tiny" onClick={() => setShowAllPromptModules((v) => !v)}>
+                              {showAllPromptModules ? '仅看必要/启用' : '显示全部'}
+                            </button>
+                          </div>
+                        </div>
+
+                        {!showAllPromptModules && hiddenPromptModuleCount > 0 && (
+                          <p className="muted" style={{ marginBottom: '0.8rem', fontSize: '0.82rem' }}>
+                            当前还有 {hiddenPromptModuleCount} 个未启用的模块，可点击"显示全部"查看。
+                          </p>
+                        )}
+
+                        <div className="sl-modules">
+                          {visiblePromptModules.map((module) => {
+                            const realIndex = promptDraft.modules.indexOf(module)
+                            return (
+                              <div key={`${module.id ?? 'default'}-${module.module_key ?? realIndex}`} className={`sl-module${module.required ? ' required' : ''}`}>
+                                <div className="sl-module-head">
+                                  <input className="sl-mkey sl-input-dev" value={module.module_key ?? ''} readOnly title={module.module_key ?? ''} />
+                                  <input
+                                    className="sl-mtitle sl-input-dev"
+                                    value={module.title}
+                                    onChange={(e) => updatePromptModule(realIndex, { title: e.target.value })}
+                                    placeholder="模块标题（仅开发者）"
+                                  />
+                                  <div className="sl-flags">
+                                    <label>
+                                      <input type="checkbox" checked={module.required} disabled />
+                                      必要
+                                    </label>
+                                    <label>
+                                      <input
+                                        type="checkbox"
+                                        checked={module.enabled || module.required}
+                                        disabled={module.required}
+                                        onChange={(e) => updatePromptModule(realIndex, { enabled: e.target.checked })}
+                                      />
+                                      启用
+                                    </label>
+                                  </div>
+                                </div>
+                                <AutoTextarea
+                                  className="sl-module-content sl-input-ai"
+                                  value={module.content}
+                                  onChange={(e) => updatePromptModule(realIndex, { content: e.target.value })}
+                                  placeholder="模块内容（AI 可见，支持 Markdown）"
+                                />
+                              </div>
+                            )
+                          })}
+                          {visiblePromptModules.length === 0 && (
+                            <div className="sl-empty">该提示词暂无可见模块。</div>
+                          )}
+                        </div>
+                      </section>
+                    </>
+                  ) : (
+                    <section className="sl-card">
+                      <div className="sl-empty">请选择左侧列表中的一项进行编辑。</div>
+                    </section>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
         </main>
       </div>
 
