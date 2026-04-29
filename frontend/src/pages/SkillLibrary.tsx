@@ -161,24 +161,14 @@ function deepEqual(a: unknown, b: unknown): boolean {
  */
 function renderSkillMarkdown(skill: SkillItem): string {
   const chosen = skill.modules.filter((m) => m.required || m.enabled)
-  const yamlEscape = (s: string): string => {
-    if (s === '') return '""'
-    if (/[:#\-?&*!|>'"%@`{}\[\],\n]/.test(s) || /^\s|\s$/.test(s)) {
-      return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
-    }
-    return s
-  }
-  const meta: [string, string][] = [
-    ['skill_slug', yamlEscape(skill.slug ?? '')],
-    ['title', yamlEscape(skill.title ?? '')],
-    ['step_id', yamlEscape(skill.step_id ?? '')],
-    ['source', yamlEscape(skill.source || 'user')],
-    ['default_exposed', skill.default_exposed ? 'true' : 'false'],
-  ]
   const lines: string[] = ['---']
-  for (const [k, v] of meta) lines.push(`${k}: ${v}`)
+  lines.push(`skill_slug: ${JSON.stringify(skill.slug ?? '')}`)
+  lines.push(`title: ${JSON.stringify(skill.title ?? '')}`)
+  lines.push(`step_id: ${JSON.stringify(skill.step_id ?? '')}`)
+  lines.push(`source: ${JSON.stringify(skill.source || 'user')}`)
+  lines.push(`default_exposed: ${skill.default_exposed ? 'true' : 'false'}`)
   lines.push('enabled_module_keys:')
-  for (const m of chosen) lines.push(`  - ${yamlEscape(m.module_key || m.title)}`)
+  for (const m of chosen) lines.push(`  - ${JSON.stringify(m.module_key || m.title)}`)
   lines.push('---')
   lines.push(`# ${skill.title || ''}`)
   if (skill.summary) { lines.push(''); lines.push(`> ${skill.summary}`) }
@@ -1141,7 +1131,10 @@ export default function SkillLibrary() {
                         <div className="sl-card-head">
                           <div>
                             <h3>内容模块<span className="sl-vis-tag ai">AI 可见</span></h3>
-                            <div className="sl-sub">模块内容会被实际拼装注入到 AI 上下文；模块标题仅供开发者识别。</div>
+                            <div className="sl-sub">
+                              模块内容会被实际拼装注入到 AI 上下文；模块标题仅供开发者识别。<strong>必要</strong> = 总是发送给 AI；
+                              <strong>启用</strong> = 仅对可选模块生效，勾选后才发送。
+                            </div>
                           </div>
                           <div className="sl-card-actions">
                             <button type="button" className="btn tiny" onClick={() => setShowAllSkillModules((v) => !v)}>
@@ -1180,7 +1173,7 @@ export default function SkillLibrary() {
                                         checked={module.required}
                                         onChange={(e) => updateSkillModule(realIndex, { required: e.target.checked, enabled: e.target.checked ? true : module.enabled })}
                                       />
-                                      必要
+                                      必要（总是发送）
                                     </label>
                                     <label style={{ opacity: module.required ? 0.55 : 1 }}>
                                       <input
@@ -1189,7 +1182,7 @@ export default function SkillLibrary() {
                                         disabled={module.required}
                                         onChange={(e) => updateSkillModule(realIndex, { enabled: e.target.checked })}
                                       />
-                                      启用
+                                      启用（仅可选模块）
                                     </label>
                                   </div>
                                 </div>
