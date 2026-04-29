@@ -5,8 +5,9 @@ html { font-size: 14px; }
 
 body {
   margin: 0;
-  font-family: 'Segoe UI', -apple-system, system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-family: 'Inter', system-ui, -apple-system, 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
   font-size: 1rem;
+  font-weight: 450;
   line-height: 1.5;
   color: #212121;
   background: #f0f0f0;
