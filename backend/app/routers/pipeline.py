@@ -140,6 +140,16 @@ def pipeline_advance(body: AdvanceBody, p: ProjectDB = Depends(get_project_write
         )
     done.append(expected)
     nxt = expanded[n + 1] if n + 1 < len(expanded) else ""
+
+    # Auto-skip remaining gameplay_table.* steps when all registered tables are done
+    if expected.startswith("gameplay_table."):
+        tables = _get_registered_gameplay_tables(p.conn)
+        if tables and all(t["status"] == "已完成" for t in tables):
+            remaining_gt = [s for s in expanded if s not in done and s.startswith("gameplay_table.")]
+            if remaining_gt:
+                done = done + remaining_gt
+                nxt = next((s for s in expanded if s not in done), "")
+
     set_pipeline_state(p.conn, current_step=nxt, completed_steps=done)
 
     spec = get_step_spec(expected) or get_step_spec(expected.split(".")[0])

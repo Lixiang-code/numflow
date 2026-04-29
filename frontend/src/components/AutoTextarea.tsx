@@ -125,7 +125,7 @@ export default function AutoTextarea({
     const desired = el.scrollHeight + lh + bt + bb
     const finalH = Math.min(desired, maxH)
     el.style.height = `${finalH}px`
-    el.style.overflowY = desired > maxH ? 'auto' : 'hidden'
+    el.style.overflowY = 'auto'
   }, [maxRows])
 
   useLayoutEffect(() => {
@@ -138,11 +138,17 @@ export default function AutoTextarea({
     return () => window.removeEventListener('resize', handle)
   }, [resize])
 
+  // Re-calculate height after CSS focus transitions finish (font-size/line-height may change)
+  const handleFocus = useCallback(() => {
+    setTimeout(resize, 300)
+  }, [resize])
+
   return (
     <textarea
       ref={ref}
       value={value}
       className={['app-autoresize', className].filter(Boolean).join(' ')}
+      onFocus={handleFocus}
       onInput={(e) => {
         resize()
         onInput?.(e)

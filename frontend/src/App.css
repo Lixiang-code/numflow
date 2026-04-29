@@ -2660,6 +2660,8 @@ textarea.sl-input-ai:focus {
 .sl-autoresize {
   resize: none;
   overflow: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   display: block;
 }
 
