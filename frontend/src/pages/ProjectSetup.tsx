@@ -171,8 +171,8 @@ function PhasePanel({ phaseKey, label, state, tools, live }: {
   tools?: ToolEntry[]; live?: boolean
 }) {
   // 默认：进行中的阶段展开，已完成/历史阶段折叠
-  const [open, setOpen] = useState(!!live)
-  useEffect(() => { if (live) setOpen(true) }, [live])
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null)
+  const open = manualOpen ?? !!live
 
   const paired = useMemo(() => pairTools(tools ?? []), [tools])
   const badge = phaseKey as 'route' | 'design' | 'review' | 'execute'
@@ -190,7 +190,7 @@ function PhasePanel({ phaseKey, label, state, tools, live }: {
 
   return (
     <div className="am-phase-panel">
-      <div className="am-phase-header" onClick={() => setOpen(o => !o)}>
+      <div className="am-phase-header" onClick={() => setManualOpen((prev) => !(prev ?? !!live))}>
         <span className={`am-phase-badge ${badge}`}>{label}</span>
         <span className="am-phase-title">
           {state.error
@@ -362,7 +362,7 @@ export default function ProjectSetup() {
       } else {
         setCurrentStep(plData.next_expected_step)
         // Check if there's a persisted session for this step
-        void checkExistingSession(plData.next_expected_step, plData.completed_steps ?? [])
+        void checkExistingSession(plData.next_expected_step)
       }
     } catch (e) {
       setLoadErr(String(e))
@@ -370,7 +370,7 @@ export default function ProjectSetup() {
   }, [headers, pid]) // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Restore a server-persisted session for the current step */
-  const checkExistingSession = useCallback(async (stepId: string, _completedSteps: string[]) => {
+  const checkExistingSession = useCallback(async (stepId: string) => {
     setSessionStatus('loading')
     try {
       const data = await apiFetch(`/pipeline/step/${stepId}/session`, { headers }) as { session: ServerSession | null }
@@ -437,7 +437,12 @@ export default function ProjectSetup() {
     }
   }, [headers]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => { void loadPipeline() }, [loadPipeline])
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadPipeline()
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [loadPipeline])
 
   // ── 初始化 phase state ───────────────────────────────────────────
   function initPhase(): PhaseState {

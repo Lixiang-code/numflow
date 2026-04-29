@@ -558,8 +558,15 @@ export default function NewProject() {
   }
 
   function addCustomSubsystem(pathId: string, label: string) {
-    const id = `customsub_${Date.now()}`
     setGameSystems((gs) => {
+      const existing = new Set((gs.customSubsByPath[pathId] ?? []).map((item) => item.id))
+      const pathTag = pathId.replace(/[^A-Za-z0-9_-]+/g, '_')
+      let nextIndex = (gs.customSubsByPath[pathId] ?? []).length + 1
+      let id = `customsub_${pathTag}_${nextIndex}`
+      while (existing.has(id)) {
+        nextIndex += 1
+        id = `customsub_${pathTag}_${nextIndex}`
+      }
       const cur = new Set(gs.subsystemsByPath[pathId] ?? [])
       cur.add(id)
       return {

@@ -53,37 +53,38 @@ export default function ThreeDimTableEditor({
   canRecalculate?: boolean
 }) {
   const [snapshot, setSnapshot] = useState<ThreeDimSnapshot | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [loadedRequestKey, setLoadedRequestKey] = useState('')
   const [err, setErr] = useState<string | null>(null)
   const [rowAxis, setRowAxis] = useState<AxisKey>('dim1')
   const [colAxis, setColAxis] = useState<AxisKey>('metric')
   const [fixedValue, setFixedValue] = useState<string | null>(null)
   const [recalculating, setRecalculating] = useState(false)
+  const requestKey = tableName
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
     ;(async () => {
       try {
         const res = (await apiFetch(`/meta/3d-matrix/${encodeURIComponent(tableName)}`, { headers })) as ThreeDimSnapshot
         if (cancelled) return
         setSnapshot(res)
         setErr(null)
+        setLoadedRequestKey(requestKey)
       } catch (e) {
         if (cancelled) return
         setErr(String(e))
-      } finally {
-        if (!cancelled) setLoading(false)
+        setLoadedRequestKey(requestKey)
       }
     })()
     return () => { cancelled = true }
-  }, [headers, tableName])
+  }, [headers, requestKey, tableName])
 
   const refreshSnapshot = useCallback(async () => {
     const res = (await apiFetch(`/meta/3d-matrix/${encodeURIComponent(tableName)}`, { headers })) as ThreeDimSnapshot
     setSnapshot(res)
     setErr(null)
-  }, [headers, tableName])
+    setLoadedRequestKey(requestKey)
+  }, [headers, requestKey, tableName])
 
   const glossaryMap = useMemo(
     () => new Map(glossary.map((item) => [item.term_en, item.term_zh])),
@@ -142,15 +143,10 @@ export default function ThreeDimTableEditor({
         title: (key: string) => metricMetaMap.get(key)?.display_name || glossaryMap.get(key) || key,
         subTitle: (key: string) => key,
       },
-    } satisfies Record<AxisKey, { label: string; keys: string[]; title: (key: string) => string; subTitle: (key: string) => string }>
+      } satisfies Record<AxisKey, { label: string; keys: string[]; title: (key: string) => string; subTitle: (key: string) => string }>
   }, [dim1DisplayMap, dim1Keys, dim2DisplayMap, dim2Keys, glossaryMap, metricKeys, metricMetaMap, snapshot])
-
-  useEffect(() => {
-    if (!fixedAxis || !axisOptions) return
-    const keys = axisOptions[fixedAxis].keys
-    if (fixedValue && keys.includes(fixedValue)) return
-    setFixedValue(keys[0] ?? null)
-  }, [axisOptions, fixedAxis, fixedValue])
+  const fixedKeys = fixedAxis && axisOptions ? axisOptions[fixedAxis].keys : []
+  const effectiveFixedValue = fixedValue && fixedKeys.includes(fixedValue) ? fixedValue : (fixedKeys[0] ?? null)
 
   const formulaEntries = useMemo(
     () => (snapshot?.cols || [])
@@ -185,12 +181,12 @@ export default function ThreeDimTableEditor({
 
   const relevantFormulaEntries = useMemo(() => {
     if (!fixedAxis) return formulaEntries
-    if (fixedAxis === 'metric' && fixedValue) {
-      return formulaEntries.filter(({ col }) => col.key === fixedValue)
+    if (fixedAxis === 'metric' && effectiveFixedValue) {
+      return formulaEntries.filter(({ col }) => col.key === effectiveFixedValue)
     }
     if (rowAxis === 'metric' || colAxis === 'metric') return formulaEntries
     return formulaEntries
-  }, [fixedAxis, fixedValue, formulaEntries, rowAxis, colAxis])
+  }, [colAxis, effectiveFixedValue, fixedAxis, formulaEntries, rowAxis])
 
   const pickRowAxis = (next: AxisKey) => {
     if (next === colAxis) {
@@ -221,6 +217,7 @@ export default function ThreeDimTableEditor({
       setRecalculating(false)
     }
   }
+  const loading = loadedRequestKey !== requestKey
 
   if (loading) return <div className="muted small" style={{ padding: '1rem' }}>加载三维表中…</div>
   if (err) return <div className="err small" style={{ padding: '1rem' }}>加载失败：{err}</div>
@@ -228,8 +225,6 @@ export default function ThreeDimTableEditor({
 
   const rowKeys = axisOptions[rowAxis].keys
   const colKeys = axisOptions[colAxis].keys
-  const fixedKeys = axisOptions[fixedAxis].keys
-  const effectiveFixedValue = fixedValue && fixedKeys.includes(fixedValue) ? fixedValue : (fixedKeys[0] ?? null)
 
   const getValue = (rowKey: string, colKey: string): unknown => {
     if (!effectiveFixedValue) return null

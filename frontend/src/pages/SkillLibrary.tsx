@@ -221,6 +221,10 @@ export default function SkillLibrary() {
   // ── Draft cache: preserves edits across item / tab switches ──────────────
   const skillCache  = useRef(new Map<string, SkillCacheEntry>())
   const promptCache = useRef(new Map<string, PromptCacheEntry>())
+  const [skillCacheView, setSkillCacheView] = useState<Record<string, SkillCacheEntry>>({})
+  const [promptCacheView, setPromptCacheView] = useState<Record<string, PromptCacheEntry>>({})
+  const [activeSkillBaseline, setActiveSkillBaseline] = useState<SkillItem | null>(null)
+  const [activePromptBaseline, setActivePromptBaseline] = useState<PromptItem | null>(null)
   const [dirtySkillIds,   setDirtySkillIds]   = useState<Set<string>>(new Set())
   const [dirtyPromptKeys, setDirtyPromptKeys] = useState<Set<string>>(new Set())
   const [conflictSkill,  setConflictSkill]  = useState<{ key: string; local: SkillItem;  server: SkillItem  } | null>(null)
@@ -265,6 +269,42 @@ export default function SkillLibrary() {
     }, 2600)
   }, [])
 
+  const applySkillSelection = useCallback((skillId: number | 'new' | null, draft: SkillItem | null, baseline: SkillItem | null) => {
+    setEditingSkillId(skillId)
+    setSkillDraft(draft)
+    setActiveSkillBaseline(baseline)
+  }, [])
+
+  const applyPromptSelection = useCallback((promptKey: string | null, draft: PromptItem | null, baseline: PromptItem | null) => {
+    setEditingPromptKey(promptKey)
+    setPromptDraft(draft)
+    setActivePromptBaseline(baseline)
+  }, [])
+
+  const syncSkillCacheView = useCallback(() => {
+    const next: Record<string, SkillCacheEntry> = {}
+    skillCache.current.forEach((entry, key) => {
+      next[key] = {
+        draft: cloneValue(entry.draft),
+        baseline: cloneValue(entry.baseline),
+        serverConflict: entry.serverConflict ? cloneValue(entry.serverConflict) : undefined,
+      }
+    })
+    setSkillCacheView(next)
+  }, [])
+
+  const syncPromptCacheView = useCallback(() => {
+    const next: Record<string, PromptCacheEntry> = {}
+    promptCache.current.forEach((entry, key) => {
+      next[key] = {
+        draft: cloneValue(entry.draft),
+        baseline: cloneValue(entry.baseline),
+        serverConflict: entry.serverConflict ? cloneValue(entry.serverConflict) : undefined,
+      }
+    })
+    setPromptCacheView(next)
+  }, [])
+
   const loadSkills = useCallback(async (selectId?: number | 'new' | null, fromEffect = false) => {
     if (!pid) return
     if (!fromEffect) { setSkillLoading(true); setErr(null) }
@@ -291,32 +331,42 @@ export default function SkillLibrary() {
           }
         }
       }
+      syncSkillCacheView()
       // Resolve selected item
       const resolveSkillDraft = (id: number): SkillItem => {
         const entry = skillCache.current.get(skillCacheKey(id))
         const found = next.find((s) => s.id === id)!
         return entry ? cloneValue(entry.draft) : cloneValue(found)
       }
+      const resolveSkillBaseline = (id: number): SkillItem => {
+        const entry = skillCache.current.get(skillCacheKey(id))
+        const found = next.find((s) => s.id === id)!
+        return entry ? cloneValue(entry.baseline) : cloneValue(found)
+      }
       if (selectId === 'new') {
-        setEditingSkillId('new')
-        setSkillDraft(blankSkill())
+        const blank = blankSkill()
+        applySkillSelection('new', blank, cloneValue(blank))
       } else if (typeof selectId === 'number') {
         const found = next.find((item) => item.id === selectId)
-        if (found) { setEditingSkillId(selectId); setSkillDraft(resolveSkillDraft(selectId)) }
+        if (found) applySkillSelection(selectId, resolveSkillDraft(selectId), resolveSkillBaseline(selectId))
       } else if (next.length > 0) {
         const first = next[0]
-        setEditingSkillId(first.id ?? null)
-        setSkillDraft(first.id != null ? resolveSkillDraft(first.id) : cloneValue(first))
+        if (first.id != null) {
+          applySkillSelection(first.id, resolveSkillDraft(first.id), resolveSkillBaseline(first.id))
+        } else {
+          const firstDraft = cloneValue(first)
+          applySkillSelection(null, firstDraft, cloneValue(firstDraft))
+        }
       } else {
-        setEditingSkillId('new')
-        setSkillDraft(blankSkill())
+        const blank = blankSkill()
+        applySkillSelection('new', blank, cloneValue(blank))
       }
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
       setSkillLoading(false)
     }
-  }, [headers, pid, markSkillConflict, clearSkillConflict])
+  }, [applySkillSelection, headers, pid, markSkillConflict, clearSkillConflict, syncSkillCacheView])
 
   const loadPromptItems = useCallback(async (category: 'system' | 'tool', selectKey?: string | null, fromEffect = false) => {
     if (!pid) return
@@ -342,25 +392,39 @@ export default function SkillLibrary() {
           }
         }
       }
+      syncPromptCacheView()
       const resolvePromptDraft = (pk: string): PromptItem => {
         const key = promptCacheKey(category, pk)
         const entry = promptCache.current.get(key)
         const found = next.find((i) => i.prompt_key === pk)!
         return entry ? cloneValue(entry.draft) : cloneValue(found)
       }
+      const resolvePromptBaseline = (pk: string): PromptItem => {
+        const key = promptCacheKey(category, pk)
+        const entry = promptCache.current.get(key)
+        const found = next.find((i) => i.prompt_key === pk)!
+        return entry ? cloneValue(entry.baseline) : cloneValue(found)
+      }
       if (selectKey) {
         const found = next.find((item) => item.prompt_key === selectKey)
-        if (found) { setEditingPromptKey(selectKey); setPromptDraft(resolvePromptDraft(selectKey)); return }
+        if (found) {
+          applyPromptSelection(selectKey, resolvePromptDraft(selectKey), resolvePromptBaseline(selectKey))
+          return
+        }
       }
       const first = next[0] ?? null
-      setEditingPromptKey(first?.prompt_key ?? null)
-      setPromptDraft(first ? resolvePromptDraft(first.prompt_key) : blankPrompt())
+      if (first) {
+        applyPromptSelection(first.prompt_key, resolvePromptDraft(first.prompt_key), resolvePromptBaseline(first.prompt_key))
+      } else {
+        const blank = blankPrompt()
+        applyPromptSelection(null, blank, cloneValue(blank))
+      }
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
       setPromptLoading(false)
     }
-  }, [headers, pid, markPromptConflict, clearPromptConflict])
+  }, [applyPromptSelection, headers, pid, markPromptConflict, clearPromptConflict, syncPromptCacheView])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -373,22 +437,9 @@ export default function SkillLibrary() {
     return () => window.clearTimeout(timer)
   }, [loadPromptItems, loadSkills, tab])
 
-  function selectSkill(skillId: number) {
-    const key = skillCacheKey(skillId)
-    const entry = skillCache.current.get(key)
-    if (entry?.serverConflict) {
-      setConflictSkill({ key, local: entry.draft, server: entry.serverConflict })
-      return
-    }
-    const draft = entry ? cloneValue(entry.draft) : cloneValue(skills.find((s) => s.id === skillId)!)
-    setEditingSkillId(skillId)
-    setSkillDraft(draft)
-    setShowAllSkillModules(false)
-  }
-
   function createSkill() {
-    setEditingSkillId('new')
-    setSkillDraft(blankSkill())
+    const blank = blankSkill()
+    applySkillSelection('new', blank, cloneValue(blank))
     setShowAllSkillModules(true)
   }
 
@@ -474,7 +525,9 @@ export default function SkillLibrary() {
       const savedKey = skillCacheKey(saved.id ?? 'new')
       const savedSnap = cloneValue(saved)
       skillCache.current.set(savedKey, { draft: savedSnap, baseline: cloneValue(saved) })
+      syncSkillCacheView()
       setSkillDraft(cloneValue(saved))
+      setActiveSkillBaseline(cloneValue(saved))
       clearSkillDirty(savedKey)
       clearSkillConflict(savedKey)
       pushToast('success', `SKILL「${saved.title || skillDraft.title || '未命名'}」已保存`)
@@ -485,7 +538,7 @@ export default function SkillLibrary() {
     } finally {
       setSkillSaving(false)
     }
-  }, [headers, loadSkills, pushToast, skillDraft, clearSkillDirty, clearSkillConflict])
+  }, [headers, loadSkills, pushToast, skillDraft, clearSkillDirty, clearSkillConflict, syncSkillCacheView])
 
   async function regenerateSkill() {
     if (!skillDraft?.id) return
@@ -506,19 +559,6 @@ export default function SkillLibrary() {
     } finally {
       setSkillGenerating(false)
     }
-  }
-
-  function selectPrompt(promptKey: string) {
-    const key = promptCacheKey(tab as 'system' | 'tool', promptKey)
-    const entry = promptCache.current.get(key)
-    if (entry?.serverConflict) {
-      setConflictPrompt({ key, local: entry.draft, server: entry.serverConflict })
-      return
-    }
-    const draft = entry ? cloneValue(entry.draft) : cloneValue(promptItems.find((i) => i.prompt_key === promptKey)!)
-    setEditingPromptKey(promptKey)
-    setPromptDraft(draft)
-    setShowAllPromptModules(false)
   }
 
   function updatePromptDraft<K extends keyof PromptItem>(key: K, value: PromptItem[K]) {
@@ -571,7 +611,9 @@ export default function SkillLibrary() {
       const serverItem = savedPEntry?.serverConflict ?? savedPEntry?.draft ?? promptDraft
       const serverSnap = cloneValue(serverItem)
       promptCache.current.set(savedPKey, { draft: serverSnap, baseline: cloneValue(serverItem) })
+      syncPromptCacheView()
       setPromptDraft(cloneValue(serverItem))
+      setActivePromptBaseline(cloneValue(serverItem))
       clearPromptDirty(savedPKey)
       clearPromptConflict(savedPKey)
       pushToast('success', `提示词「${promptDraft.title || promptDraft.prompt_key}」已保存`)
@@ -582,7 +624,7 @@ export default function SkillLibrary() {
     } finally {
       setPromptSaving(false)
     }
-  }, [headers, loadPromptItems, promptDraft, pushToast, tab, clearPromptDirty, clearPromptConflict])
+  }, [headers, loadPromptItems, promptDraft, pushToast, tab, clearPromptDirty, clearPromptConflict, syncPromptCacheView])
 
   async function resetPrompt() {
     if (!promptDraft || tab === 'skill') return
@@ -741,49 +783,41 @@ export default function SkillLibrary() {
 
   // ── Per-module and section dirty detection ────────────────────────────────
   const dirtySkillModuleIndices = useMemo((): Set<number> => {
-    if (!editingSkillId || !skillDraft) return new Set()
-    const entry = skillCache.current.get(skillCacheKey(editingSkillId))
-    if (!entry) return new Set()
+    if (!editingSkillId || !skillDraft || !activeSkillBaseline) return new Set()
     const result = new Set<number>()
-    const bMods = entry.baseline.modules
+    const bMods = activeSkillBaseline.modules
     skillDraft.modules.forEach((mod, i) => {
       if (i >= bMods.length || !deepEqual(mod, bMods[i])) result.add(i)
     })
     return result
-  }, [editingSkillId, skillDraft])
+  }, [activeSkillBaseline, editingSkillId, skillDraft])
 
   const dirtyPromptModuleIndices = useMemo((): Set<number> => {
-    if (!editingPromptKey || !promptDraft || tab === 'skill') return new Set()
-    const entry = promptCache.current.get(promptCacheKey(tab, editingPromptKey))
-    if (!entry) return new Set()
+    if (!editingPromptKey || !promptDraft || !activePromptBaseline || tab === 'skill') return new Set()
     const result = new Set<number>()
-    const bMods = entry.baseline.modules
+    const bMods = activePromptBaseline.modules
     promptDraft.modules.forEach((mod, i) => {
       if (i >= bMods.length || !deepEqual(mod, bMods[i])) result.add(i)
     })
     return result
-  }, [editingPromptKey, promptDraft, tab])
+  }, [activePromptBaseline, editingPromptKey, promptDraft, tab])
 
   const skillBasicDirty = useMemo(() => {
-    if (!editingSkillId || !skillDraft) return false
-    const entry = skillCache.current.get(skillCacheKey(editingSkillId))
-    if (!entry) return false
-    const b = entry.baseline
+    if (!editingSkillId || !skillDraft || !activeSkillBaseline) return false
+    const b = activeSkillBaseline
     return skillDraft.title !== b.title || skillDraft.slug !== b.slug ||
       skillDraft.step_id !== b.step_id || skillDraft.source !== b.source ||
       skillDraft.summary !== b.summary || skillDraft.description !== b.description ||
       skillDraft.default_exposed !== b.default_exposed || skillDraft.enabled !== b.enabled
-  }, [editingSkillId, skillDraft])
+  }, [activeSkillBaseline, editingSkillId, skillDraft])
 
   const promptBasicDirty = useMemo(() => {
-    if (!editingPromptKey || !promptDraft || tab === 'skill') return false
-    const entry = promptCache.current.get(promptCacheKey(tab, editingPromptKey))
-    if (!entry) return false
-    const b = entry.baseline
+    if (!editingPromptKey || !promptDraft || !activePromptBaseline || tab === 'skill') return false
+    const b = activePromptBaseline
     return promptDraft.title !== b.title || promptDraft.summary !== b.summary ||
       promptDraft.description !== b.description || promptDraft.reference_note !== b.reference_note ||
       promptDraft.enabled !== b.enabled
-  }, [editingPromptKey, promptDraft, tab])
+  }, [activePromptBaseline, editingPromptKey, promptDraft, tab])
 
   const loading = tab === 'skill' ? skillLoading : promptLoading
   const isMac = typeof navigator !== 'undefined' && navigator.platform.toLowerCase().includes('mac')
@@ -819,19 +853,15 @@ export default function SkillLibrary() {
 
   // ── 页面级控制栏脏状态（启用 / 默认暴露 与 baseline 不一致时高亮）──
   const skillControlsDirty = useMemo(() => {
-    if (!editingSkillId || !skillDraft) return false
-    const entry = skillCache.current.get(skillCacheKey(editingSkillId))
-    if (!entry) return false
-    return skillDraft.enabled !== entry.baseline.enabled
-      || skillDraft.default_exposed !== entry.baseline.default_exposed
-  }, [editingSkillId, skillDraft])
+    if (!editingSkillId || !skillDraft || !activeSkillBaseline) return false
+    return skillDraft.enabled !== activeSkillBaseline.enabled
+      || skillDraft.default_exposed !== activeSkillBaseline.default_exposed
+  }, [activeSkillBaseline, editingSkillId, skillDraft])
 
   const promptControlsDirty = useMemo(() => {
-    if (!editingPromptKey || !promptDraft || tab === 'skill') return false
-    const entry = promptCache.current.get(promptCacheKey(tab, editingPromptKey))
-    if (!entry) return false
-    return promptDraft.enabled !== entry.baseline.enabled
-  }, [editingPromptKey, promptDraft, tab])
+    if (!editingPromptKey || !promptDraft || !activePromptBaseline || tab === 'skill') return false
+    return promptDraft.enabled !== activePromptBaseline.enabled
+  }, [activePromptBaseline, editingPromptKey, promptDraft, tab])
 
   return (
     <div className="sl-page">
@@ -931,7 +961,29 @@ export default function SkillLibrary() {
                       <button
                         key={skill.id ?? skill.slug}
                         type="button"
-                        onClick={() => skill.id && selectSkill(skill.id)}
+                        onClick={() => {
+                          if (skill.id == null) return
+                          const nextSkillCacheView = { ...skillCacheView }
+                          if (editingSkillId != null && skillDraft && activeSkillBaseline) {
+                            const currentKey = skillCacheKey(editingSkillId)
+                            nextSkillCacheView[currentKey] = {
+                              draft: cloneValue(skillDraft),
+                              baseline: cloneValue(activeSkillBaseline),
+                              serverConflict: nextSkillCacheView[currentKey]?.serverConflict,
+                            }
+                            setSkillCacheView(nextSkillCacheView)
+                          }
+                          const key = skillCacheKey(skill.id)
+                          const entry = nextSkillCacheView[key]
+                          if (entry?.serverConflict) {
+                            setConflictSkill({ key, local: entry.draft, server: entry.serverConflict })
+                            return
+                          }
+                          const draft = entry ? cloneValue(entry.draft) : cloneValue(skill)
+                          const baseline = entry ? cloneValue(entry.baseline) : cloneValue(skill)
+                          applySkillSelection(skill.id, draft, baseline)
+                          setShowAllSkillModules(false)
+                        }}
                         className={`sl-list-item${active ? ' active' : ''}${dirty ? ' sl-dirty-item' : ''}${conflict ? ' sl-conflict-item' : ''}`}
                       >
                         <div className="sl-row">
@@ -986,7 +1038,28 @@ export default function SkillLibrary() {
                       <button
                         key={item.prompt_key}
                         type="button"
-                        onClick={() => selectPrompt(item.prompt_key)}
+                        onClick={() => {
+                          const nextPromptCacheView = { ...promptCacheView }
+                          if (editingPromptKey && promptDraft && activePromptBaseline) {
+                            const currentKey = promptCacheKey(tab as 'system' | 'tool', editingPromptKey)
+                            nextPromptCacheView[currentKey] = {
+                              draft: cloneValue(promptDraft),
+                              baseline: cloneValue(activePromptBaseline),
+                              serverConflict: nextPromptCacheView[currentKey]?.serverConflict,
+                            }
+                            setPromptCacheView(nextPromptCacheView)
+                          }
+                          const key = promptCacheKey(tab as 'system' | 'tool', item.prompt_key)
+                          const entry = nextPromptCacheView[key]
+                          if (entry?.serverConflict) {
+                            setConflictPrompt({ key, local: entry.draft, server: entry.serverConflict })
+                            return
+                          }
+                          const draft = entry ? cloneValue(entry.draft) : cloneValue(item)
+                          const baseline = entry ? cloneValue(entry.baseline) : cloneValue(item)
+                          applyPromptSelection(item.prompt_key, draft, baseline)
+                          setShowAllPromptModules(false)
+                        }}
                         className={`sl-list-item${active ? ' active' : ''}${dirty ? ' sl-dirty-item' : ''}${conflict ? ' sl-conflict-item' : ''}`}
                       >
                         <div className="sl-row">
@@ -1466,9 +1539,11 @@ export default function SkillLibrary() {
                 onClick={() => {
                   const entry = skillCache.current.get(conflictSkill.key)
                   if (entry) delete entry.serverConflict
+                  syncSkillCacheView()
                   clearSkillConflict(conflictSkill.key)
                   setEditingSkillId(Number(conflictSkill.key))
                   setSkillDraft(cloneValue(conflictSkill.local))
+                  setActiveSkillBaseline(entry ? cloneValue(entry.baseline) : cloneValue(conflictSkill.local))
                   setConflictSkill(null)
                 }}
               >保留本地编辑</button>
@@ -1482,10 +1557,12 @@ export default function SkillLibrary() {
                     entry.baseline = cloneValue(conflictSkill.server)
                     delete entry.serverConflict
                   }
+                  syncSkillCacheView()
                   clearSkillDirty(conflictSkill.key)
                   clearSkillConflict(conflictSkill.key)
                   setEditingSkillId(Number(conflictSkill.key))
                   setSkillDraft(cloneValue(conflictSkill.server))
+                  setActiveSkillBaseline(cloneValue(conflictSkill.server))
                   setConflictSkill(null)
                 }}
               >使用服务端版本</button>
@@ -1522,9 +1599,11 @@ export default function SkillLibrary() {
                 onClick={() => {
                   const entry = promptCache.current.get(conflictPrompt.key)
                   if (entry) delete entry.serverConflict
+                  syncPromptCacheView()
                   clearPromptConflict(conflictPrompt.key)
                   setEditingPromptKey(conflictPrompt.local.prompt_key)
                   setPromptDraft(cloneValue(conflictPrompt.local))
+                  setActivePromptBaseline(entry ? cloneValue(entry.baseline) : cloneValue(conflictPrompt.local))
                   setConflictPrompt(null)
                 }}
               >保留本地编辑</button>
@@ -1538,10 +1617,12 @@ export default function SkillLibrary() {
                     entry.baseline = cloneValue(conflictPrompt.server)
                     delete entry.serverConflict
                   }
+                  syncPromptCacheView()
                   clearPromptDirty(conflictPrompt.key)
                   clearPromptConflict(conflictPrompt.key)
                   setEditingPromptKey(conflictPrompt.server.prompt_key)
                   setPromptDraft(cloneValue(conflictPrompt.server))
+                  setActivePromptBaseline(cloneValue(conflictPrompt.server))
                   setConflictPrompt(null)
                 }}
               >使用服务端版本</button>

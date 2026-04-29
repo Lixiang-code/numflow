@@ -73,11 +73,12 @@ export default function MatrixEditor({
   glossary: GlossaryItem[]
 }) {
   const [snapshot, setSnapshot] = useState<MatrixSnapshot | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [loadedRequestKey, setLoadedRequestKey] = useState('')
   const [err, setErr] = useState<string | null>(null)
   const [activeLevel, setActiveLevel] = useState<string | null>(null)
   const [previewLevel, setPreviewLevel] = useState<string>('')
   const [pendingLevel, setPendingLevel] = useState<string>('')
+  const requestKey = `${tableName}::${previewLevel}`
 
   const glossaryMap = new Map(glossary.map((g) => [g.term_en, g.term_zh]))
   const meta = matrixMeta as Partial<MatrixMeta>
@@ -98,11 +99,11 @@ export default function MatrixEditor({
   const colBriefMap = new Map(metaCols.map((c) => [c.key, c.brief || '']))
 
   useEffect(() => {
-    setLoading(true)
-    setErr(null)
+    let cancelled = false
     const query = previewLevel ? `?level=${encodeURIComponent(previewLevel)}` : ''
     apiFetch(`/meta/matrix/${encodeURIComponent(tableName)}${query}`, { headers })
       .then((d) => {
+        if (cancelled) return
         const snap = d as MatrixSnapshot
         setSnapshot(snap)
         const appliedLevel = snap.preview_level != null ? String(snap.preview_level) : ''
@@ -116,12 +117,20 @@ export default function MatrixEditor({
               ? Object.values(snap.data)
                   .flatMap((cols) => Object.values(cols).flatMap((lv) => Object.keys(lv)))
                   .find((l) => l !== '_') || '_'
-              : '_'),
+                : '_'),
         )
+        setErr(null)
+        setLoadedRequestKey(requestKey)
       })
-      .catch((e) => setErr(String(e)))
-      .finally(() => setLoading(false))
-  }, [tableName, headers, previewLevel])
+      .catch((e) => {
+        if (cancelled) return
+        setErr(String(e))
+        setLoadedRequestKey(requestKey)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [headers, previewLevel, requestKey, tableName])
 
   const formulaEntries = useMemo(() => {
     const out: Array<{ row: string; col: string; formula: FormulaInfo }> = []
@@ -133,6 +142,7 @@ export default function MatrixEditor({
     }
     return out
   }, [snapshot])
+  const loading = loadedRequestKey !== requestKey
 
   if (loading) return <div className="muted small" style={{ padding: '1rem' }}>加载 Matrix 数据中…</div>
   if (err) return <div className="err small" style={{ padding: '1rem' }}>加载失败：{err}</div>

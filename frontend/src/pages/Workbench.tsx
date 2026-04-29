@@ -818,6 +818,10 @@ export default function Workbench() {
       } catch { /* ignore */ }
     }
     host.addEventListener('mouseup', onUniverMouseUp)
+    const loadedSheets = loadedSheetsRef.current
+    const tableRowsCache = tableRowsCacheRef.current
+    const tableColsCache = tableColsCacheRef.current
+    const tableFormulasCache = tableFormulasCacheRef.current
 
     return () => {
       host.removeEventListener('mouseup', onUniverMouseUp)
@@ -826,10 +830,10 @@ export default function Workbench() {
       univerRef.current = null
       univerAPIRef.current = null
       workbookRef.current = null
-      loadedSheetsRef.current.clear()
-      tableRowsCacheRef.current.clear()
-      tableColsCacheRef.current.clear()
-      tableFormulasCacheRef.current.clear()
+      loadedSheets.clear()
+      tableRowsCache.clear()
+      tableColsCache.clear()
+      tableFormulasCache.clear()
       activeTableRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
