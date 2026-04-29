@@ -2682,6 +2682,16 @@ textarea.sl-input-ai:focus {
   color: #e2e8f0;
   padding: 1rem 1.1rem 0.9rem;
   margin-bottom: 1.5rem;
+  /* P0.3.1：粘性置顶，跟随但不消失 */
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  box-shadow: 0 6px 16px rgba(15,23,42,.18);
+}
+.sl-preview-inline .sl-preview-tokens {
+  margin-left: 0.4rem;
+  color: #94a3b8;
+  font-family: var(--font-mono, ui-monospace, monospace);
 }
 .sl-preview-inline .sl-preview-head {
   display: flex; align-items: center; justify-content: space-between;
@@ -2756,4 +2766,47 @@ textarea.sl-input-ai:focus {
   font-size: 0.79rem;
   color: #64748b;
   margin-left: auto;
+}
+
+/* ===== Skill Library: P0/P1 增量样式 ===== */
+
+/* P0.3.2 页面控制栏脏状态：橙色底边 + 控件高亮 */
+.sl-page-controls.sl-pc-dirty {
+  border-bottom-color: #f59e0b;
+  border-bottom-width: 2px;
+  background: linear-gradient(0deg, rgba(245,158,11,.06), rgba(245,158,11,0));
+}
+.sl-page-controls.sl-pc-dirty::after {
+  content: "未保存";
+  font-size: 0.7rem;
+  color: #b45309;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  margin-left: 0.5rem;
+  font-weight: 600;
+}
+
+/* P0.3.3 侧边栏冲突项 ⚡ 提示 */
+.sl-list-item.sl-conflict-item { box-shadow: inset 3px 0 0 #f97316; }
+.sl-conflict-icon-inline {
+  display: inline-block;
+  margin-right: 0.25rem;
+  color: #f97316;
+  font-size: 0.85rem;
+}
+
+/* P1.3.5 未启用分组可折叠：分组头复用 button */
+.sl-group-toggle {
+  display: flex; align-items: center; gap: 0.35rem;
+  width: 100%; text-align: left;
+  background: transparent; border: 0; cursor: pointer;
+  font: inherit; color: inherit;
+  /* 继承 .sl-group-label 的视觉，但保留点击可视效果 */
+}
+.sl-group-toggle:hover { background: rgba(148,163,184,.08); }
+.sl-group-caret {
+  display: inline-block; width: 0.85rem;
+  font-size: 0.7rem; color: #94a3b8;
 }

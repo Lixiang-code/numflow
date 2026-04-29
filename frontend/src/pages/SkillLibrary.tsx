@@ -165,7 +165,24 @@ function renderToolModules(modules: PromptModule[]): string {
 type SkillCacheEntry  = { draft: SkillItem;  baseline: SkillItem;  serverConflict?: SkillItem  }
 type PromptCacheEntry = { draft: PromptItem; baseline: PromptItem; serverConflict?: PromptItem }
 
-function deepEqual(a: unknown, b: unknown): boolean { return JSON.stringify(a) === JSON.stringify(b) }
+/** 稳定比较：对对象 key 排序后再 JSON.stringify，避免后端字段顺序变化导致的假冲突。 */
+function deepEqual(a: unknown, b: unknown): boolean {
+  const stable = (v: unknown): unknown => {
+    if (v === null || typeof v !== 'object') return v
+    if (Array.isArray(v)) return v.map(stable)
+    const obj = v as Record<string, unknown>
+    const out: Record<string, unknown> = {}
+    for (const k of Object.keys(obj).sort()) out[k] = stable(obj[k])
+    return out
+  }
+  return JSON.stringify(stable(a)) === JSON.stringify(stable(b))
+}
+
+/** 简易 token 估算：中英文混排时按 3.5 字符 ≈ 1 token 粗略估计。 */
+function estimateTokens(text: string): number {
+  if (!text) return 0
+  return Math.max(1, Math.round(text.length / 3.5))
+}
 function skillCacheKey(id: number | 'new'): string   { return String(id) }
 function promptCacheKey(tabKey: string, key: string): string { return `${tabKey}::${key}` }
 
@@ -205,6 +222,31 @@ export default function SkillLibrary() {
   const [dirtyPromptKeys, setDirtyPromptKeys] = useState<Set<string>>(new Set())
   const [conflictSkill,  setConflictSkill]  = useState<{ key: string; local: SkillItem;  server: SkillItem  } | null>(null)
   const [conflictPrompt, setConflictPrompt] = useState<{ key: string; local: PromptItem; server: PromptItem } | null>(null)
+  // 侧边栏"⚡冲突"提示用：记录哪些条目存在未解决的服务端冲突
+  const [conflictSkillKeys,  setConflictSkillKeys]  = useState<Set<string>>(new Set())
+  const [conflictPromptKeys, setConflictPromptKeys] = useState<Set<string>>(new Set())
+  const markSkillConflict   = useCallback((key: string) => setConflictSkillKeys(p   => { const n = new Set(p); n.add(key); return n }),    [])
+  const clearSkillConflict  = useCallback((key: string) => setConflictSkillKeys(p   => { const n = new Set(p); n.delete(key); return n }), [])
+  const markPromptConflict  = useCallback((key: string) => setConflictPromptKeys(p => { const n = new Set(p); n.add(key); return n }),    [])
+  const clearPromptConflict = useCallback((key: string) => setConflictPromptKeys(p => { const n = new Set(p); n.delete(key); return n }), [])
+
+  // 侧边栏"未启用"分组折叠状态（按 tab 区分，持久化到 localStorage）
+  const DISABLED_COLLAPSE_KEY = 'sl_disabled_collapsed_v1'
+  const [disabledCollapsed, setDisabledCollapsed] = useState<Record<PromptTab, boolean>>(() => {
+    if (typeof window === 'undefined') return { skill: false, system: false, tool: false }
+    try {
+      const raw = window.localStorage.getItem(DISABLED_COLLAPSE_KEY)
+      if (raw) return { skill: false, system: false, tool: false, ...JSON.parse(raw) }
+    } catch { /* ignore */ }
+    return { skill: false, system: false, tool: false }
+  })
+  const toggleDisabledCollapsed = useCallback((t: PromptTab) => {
+    setDisabledCollapsed((prev) => {
+      const next = { ...prev, [t]: !prev[t] }
+      try { window.localStorage.setItem(DISABLED_COLLAPSE_KEY, JSON.stringify(next)) } catch { /* ignore */ }
+      return next
+    })
+  }, [])
 
   const markSkillDirty   = useCallback((key: string) => setDirtySkillIds(p   => { const n = new Set(p); n.add(key); return n }),    [])
   const clearSkillDirty  = useCallback((key: string) => setDirtySkillIds(p   => { const n = new Set(p); n.delete(key); return n }), [])
@@ -238,9 +280,11 @@ export default function SkillLibrary() {
           if (!deepEqual(entry.draft, entry.baseline)) {
             // Server changed while we had local edits → conflict
             skillCache.current.set(key, { ...entry, serverConflict: server })
+            markSkillConflict(key)
           } else {
             // No local edits, just update to latest server data
             skillCache.current.set(key, { draft: server, baseline: server })
+            clearSkillConflict(key)
           }
         }
       }
@@ -269,7 +313,7 @@ export default function SkillLibrary() {
     } finally {
       setSkillLoading(false)
     }
-  }, [headers, pid])
+  }, [headers, pid, markSkillConflict, clearSkillConflict])
 
   const loadPromptItems = useCallback(async (category: 'system' | 'tool', selectKey?: string | null, fromEffect = false) => {
     if (!pid) return
@@ -288,8 +332,10 @@ export default function SkillLibrary() {
         } else if (!deepEqual(entry.baseline, server)) {
           if (!deepEqual(entry.draft, entry.baseline)) {
             promptCache.current.set(key, { ...entry, serverConflict: server })
+            markPromptConflict(key)
           } else {
             promptCache.current.set(key, { draft: server, baseline: server })
+            clearPromptConflict(key)
           }
         }
       }
@@ -311,7 +357,7 @@ export default function SkillLibrary() {
     } finally {
       setPromptLoading(false)
     }
-  }, [headers, pid])
+  }, [headers, pid, markPromptConflict, clearPromptConflict])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -424,6 +470,7 @@ export default function SkillLibrary() {
       const savedEntry = skillCache.current.get(savedKey)
       if (savedEntry) { savedEntry.baseline = cloneValue(saved); delete savedEntry.serverConflict }
       clearSkillDirty(savedKey)
+      clearSkillConflict(savedKey)
       pushToast('success', `SKILL「${saved.title || skillDraft.title || '未命名'}」已保存`)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -432,7 +479,7 @@ export default function SkillLibrary() {
     } finally {
       setSkillSaving(false)
     }
-  }, [headers, loadSkills, pushToast, skillDraft])
+  }, [headers, loadSkills, pushToast, skillDraft, clearSkillDirty, clearSkillConflict])
 
   async function regenerateSkill() {
     if (!skillDraft?.id) return
@@ -516,6 +563,7 @@ export default function SkillLibrary() {
       const savedPEntry = promptCache.current.get(savedPKey)
       if (savedPEntry) { savedPEntry.baseline = cloneValue(promptDraft); delete savedPEntry.serverConflict }
       clearPromptDirty(savedPKey)
+      clearPromptConflict(savedPKey)
       pushToast('success', `提示词「${promptDraft.title || promptDraft.prompt_key}」已保存`)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -524,7 +572,7 @@ export default function SkillLibrary() {
     } finally {
       setPromptSaving(false)
     }
-  }, [headers, loadPromptItems, promptDraft, pushToast, tab])
+  }, [headers, loadPromptItems, promptDraft, pushToast, tab, clearPromptDirty, clearPromptConflict])
 
   async function resetPrompt() {
     if (!promptDraft || tab === 'skill') return
@@ -555,15 +603,33 @@ export default function SkillLibrary() {
       if (mod && (e.key === 's' || e.key === 'S')) {
         e.preventDefault()
         if (tab === 'skill') {
-          if (skillDraft && !skillSaving) void saveSkill()
+          if (!skillDraft) { pushToast('error', '请先选择或新建一个 SKILL'); return }
+          if (skillSaving) return
+          if (!skillDraft.title.trim()) { pushToast('error', '请先填写标题再保存'); return }
+          void saveSkill()
         } else {
-          if (promptDraft && !promptSaving) void savePrompt()
+          if (!promptDraft) { pushToast('error', '请先选择一个提示词'); return }
+          if (promptSaving) return
+          if (!promptDraft.title.trim()) { pushToast('error', '请先填写标题再保存'); return }
+          void savePrompt()
         }
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [promptDraft, promptSaving, savePrompt, saveSkill, skillDraft, skillSaving, tab])
+  }, [promptDraft, promptSaving, savePrompt, saveSkill, skillDraft, skillSaving, tab, pushToast])
+
+  // 离开页面前警告：存在未保存草稿时阻止刷新/关闭
+  useEffect(() => {
+    const hasDirty = dirtySkillIds.size > 0 || dirtyPromptKeys.size > 0
+    if (!hasDirty) return
+    function onBeforeUnload(e: BeforeUnloadEvent) {
+      e.preventDefault()
+      e.returnValue = ''
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [dirtySkillIds, dirtyPromptKeys])
 
   // ── Sync active draft to cache → update dirty badges ─────────────────────
   useEffect(() => {
@@ -680,9 +746,32 @@ export default function SkillLibrary() {
   const canSave = tab === 'skill' ? !!skillDraft && !skillSaving : !!promptDraft && !promptSaving
   const saving = tab === 'skill' ? skillSaving : promptSaving
   const handleSave = () => {
-    if (tab === 'skill') void saveSkill()
-    else void savePrompt()
+    if (tab === 'skill') {
+      if (!skillDraft) { pushToast('error', '请先选择或新建一个 SKILL'); return }
+      if (!skillDraft.title.trim()) { pushToast('error', '请先填写标题再保存'); return }
+      void saveSkill()
+    } else {
+      if (!promptDraft) { pushToast('error', '请先选择一个提示词'); return }
+      if (!promptDraft.title.trim()) { pushToast('error', '请先填写标题再保存'); return }
+      void savePrompt()
+    }
   }
+
+  // ── 页面级控制栏脏状态（启用 / 默认暴露 与 baseline 不一致时高亮）──
+  const skillControlsDirty = useMemo(() => {
+    if (!editingSkillId || !skillDraft) return false
+    const entry = skillCache.current.get(skillCacheKey(editingSkillId))
+    if (!entry) return false
+    return skillDraft.enabled !== entry.baseline.enabled
+      || skillDraft.default_exposed !== entry.baseline.default_exposed
+  }, [editingSkillId, skillDraft])
+
+  const promptControlsDirty = useMemo(() => {
+    if (!editingPromptKey || !promptDraft || tab === 'skill') return false
+    const entry = promptCache.current.get(promptCacheKey(tab, editingPromptKey))
+    if (!entry) return false
+    return promptDraft.enabled !== entry.baseline.enabled
+  }, [editingPromptKey, promptDraft, tab])
 
   return (
     <div className="sl-page">
@@ -775,15 +864,19 @@ export default function SkillLibrary() {
                   const renderSkill = (skill: SkillItem) => {
                     const active = skill.id === editingSkillId
                     const dirty  = skill.id != null && isSkillDirty(skill.id)
+                    const conflict = skill.id != null && conflictSkillKeys.has(skillCacheKey(skill.id))
                     return (
                       <button
                         key={skill.id ?? skill.slug}
                         type="button"
                         onClick={() => skill.id && selectSkill(skill.id)}
-                        className={`sl-list-item${active ? ' active' : ''}${dirty ? ' sl-dirty-item' : ''}`}
+                        className={`sl-list-item${active ? ' active' : ''}${dirty ? ' sl-dirty-item' : ''}${conflict ? ' sl-conflict-item' : ''}`}
                       >
                         <div className="sl-row">
-                          <span className="sl-name">{skill.title || '(未命名)'}</span>
+                          <span className="sl-name">
+                            {conflict && <span className="sl-conflict-icon-inline" title="存在未解决的服务端冲突">⚡</span>}
+                            {skill.title || '(未命名)'}
+                          </span>
                           <span className="sl-meta">{dirty ? <span className="sl-dirty-tag">编辑中</span> : `调用 ${skill.usage_count}`}</span>
                         </div>
                         <div className="sl-key">{skill.step_id || '未绑定步骤'}</div>
@@ -794,6 +887,7 @@ export default function SkillLibrary() {
                       </button>
                     )
                   }
+                  const collapsed = disabledCollapsed.skill
                   return (
                     <>
                       {enabled.length > 0 && (
@@ -804,8 +898,16 @@ export default function SkillLibrary() {
                       )}
                       {disabled.length > 0 && (
                         <>
-                          <div className="sl-group-label muted">未启用 ({disabled.length})</div>
-                          {disabled.map(renderSkill)}
+                          <button
+                            type="button"
+                            className="sl-group-label muted sl-group-toggle"
+                            onClick={() => toggleDisabledCollapsed('skill')}
+                            title={collapsed ? '展开未启用分组' : '折叠未启用分组'}
+                          >
+                            <span className="sl-group-caret">{collapsed ? '▸' : '▾'}</span>
+                            未启用 ({disabled.length})
+                          </button>
+                          {!collapsed && disabled.map(renderSkill)}
                         </>
                       )}
                     </>
@@ -817,21 +919,26 @@ export default function SkillLibrary() {
                   const renderPrompt = (item: PromptItem) => {
                     const active = item.prompt_key === editingPromptKey
                     const dirty  = isPromptDirty(item.prompt_key)
+                    const conflict = conflictPromptKeys.has(promptCacheKey(tab as 'system' | 'tool', item.prompt_key))
                     return (
                       <button
                         key={item.prompt_key}
                         type="button"
                         onClick={() => selectPrompt(item.prompt_key)}
-                        className={`sl-list-item${active ? ' active' : ''}${dirty ? ' sl-dirty-item' : ''}`}
+                        className={`sl-list-item${active ? ' active' : ''}${dirty ? ' sl-dirty-item' : ''}${conflict ? ' sl-conflict-item' : ''}`}
                       >
                         <div className="sl-row">
-                          <span className="sl-name">{item.title}</span>
+                          <span className="sl-name">
+                            {conflict && <span className="sl-conflict-icon-inline" title="存在未解决的服务端冲突">⚡</span>}
+                            {item.title}
+                          </span>
                           <span className="sl-meta">{dirty ? <span className="sl-dirty-tag">编辑中</span> : (item.override ? '已覆盖' : '默认')}</span>
                         </div>
                         <div className="sl-key">{item.prompt_key}</div>
                       </button>
                     )
                   }
+                  const collapsed = disabledCollapsed[tab]
                   return (
                     <>
                       {enabled.length > 0 && (
@@ -842,8 +949,16 @@ export default function SkillLibrary() {
                       )}
                       {disabled.length > 0 && (
                         <>
-                          <div className="sl-group-label muted">未启用 ({disabled.length})</div>
-                          {disabled.map(renderPrompt)}
+                          <button
+                            type="button"
+                            className="sl-group-label muted sl-group-toggle"
+                            onClick={() => toggleDisabledCollapsed(tab)}
+                            title={collapsed ? '展开未启用分组' : '折叠未启用分组'}
+                          >
+                            <span className="sl-group-caret">{collapsed ? '▸' : '▾'}</span>
+                            未启用 ({disabled.length})
+                          </button>
+                          {!collapsed && disabled.map(renderPrompt)}
                         </>
                       )}
                     </>
@@ -860,7 +975,7 @@ export default function SkillLibrary() {
                   {skillDraft ? (
                     <>
                       {/* ── 页面级控制栏（启用/暴露，始终可见）────────── */}
-                      <div className="sl-page-controls">
+                      <div className={`sl-page-controls${skillControlsDirty ? ' sl-pc-dirty' : ''}`}>
                         <label className="sl-pc-check">
                           <input type="checkbox" checked={skillDraft.enabled} onChange={(e) => updateSkillDraft('enabled', e.target.checked)} />
                           启用
@@ -931,7 +1046,14 @@ export default function SkillLibrary() {
                       <div className="sl-preview-inline">
                         <div className="sl-preview-head">
                           <div className="sl-preview-title">📄 实际 SKILL 文件</div>
-                          <div className="sl-preview-meta">{skillDraft.generated_file_path || '保存后将自动生成 Markdown + YAML'}</div>
+                          <div className="sl-preview-meta">
+                            {skillDraft.generated_file_path || '保存后将自动生成 Markdown + YAML'}
+                            {skillDraft.generated_content && (
+                              <span className="sl-preview-tokens" title="按 3.5 字符 ≈ 1 token 粗略估算">
+                                · 约 {estimateTokens(skillDraft.generated_content)} tokens
+                              </span>
+                            )}
+                          </div>
                         </div>
                         <pre className={`sl-preview-body${skillDraft.generated_content ? '' : ' empty'}`}>
                           {skillDraft.generated_content || '尚未生成。点击右上角"生成实际文件"按钮即可生成。'}
@@ -1031,7 +1153,7 @@ export default function SkillLibrary() {
                   {promptDraft ? (
                     <>
                       {/* ── 页面级控制栏 ─────────────────────────────── */}
-                      <div className="sl-page-controls">
+                      <div className={`sl-page-controls${promptControlsDirty ? ' sl-pc-dirty' : ''}`}>
                         <label className="sl-pc-check">
                           <input type="checkbox" checked={promptDraft.enabled} onChange={(e) => updatePromptDraft('enabled', e.target.checked)} />
                           启用
@@ -1096,7 +1218,14 @@ export default function SkillLibrary() {
                           <div className="sl-preview-title">
                             {tab === 'tool' ? '🔧 工具字段预览（发送给 AI 的 description 内容）' : '🔭 运行时拼装预览（发送给 AI 的文本）'}
                           </div>
-                          <div className="sl-preview-meta">{promptDraft.prompt_key || '—'}</div>
+                          <div className="sl-preview-meta">
+                            {promptDraft.prompt_key || '—'}
+                            {runtimePreview && (
+                              <span className="sl-preview-tokens" title="按 3.5 字符 ≈ 1 token 粗略估算">
+                                · 约 {estimateTokens(runtimePreview)} tokens
+                              </span>
+                            )}
+                          </div>
                         </div>
                         <pre className={`sl-preview-body${runtimePreview ? '' : ' empty'}`}>
                           {runtimePreview || '当前无启用模块内容。'}
@@ -1222,6 +1351,7 @@ export default function SkillLibrary() {
                 onClick={() => {
                   const entry = skillCache.current.get(conflictSkill.key)
                   if (entry) delete entry.serverConflict
+                  clearSkillConflict(conflictSkill.key)
                   setEditingSkillId(Number(conflictSkill.key))
                   setSkillDraft(cloneValue(conflictSkill.local))
                   setConflictSkill(null)
@@ -1238,6 +1368,7 @@ export default function SkillLibrary() {
                     delete entry.serverConflict
                   }
                   clearSkillDirty(conflictSkill.key)
+                  clearSkillConflict(conflictSkill.key)
                   setEditingSkillId(Number(conflictSkill.key))
                   setSkillDraft(cloneValue(conflictSkill.server))
                   setConflictSkill(null)
@@ -1276,6 +1407,7 @@ export default function SkillLibrary() {
                 onClick={() => {
                   const entry = promptCache.current.get(conflictPrompt.key)
                   if (entry) delete entry.serverConflict
+                  clearPromptConflict(conflictPrompt.key)
                   setEditingPromptKey(conflictPrompt.local.prompt_key)
                   setPromptDraft(cloneValue(conflictPrompt.local))
                   setConflictPrompt(null)
@@ -1292,6 +1424,7 @@ export default function SkillLibrary() {
                     delete entry.serverConflict
                   }
                   clearPromptDirty(conflictPrompt.key)
+                  clearPromptConflict(conflictPrompt.key)
                   setEditingPromptKey(conflictPrompt.server.prompt_key)
                   setPromptDraft(cloneValue(conflictPrompt.server))
                   setConflictPrompt(null)
