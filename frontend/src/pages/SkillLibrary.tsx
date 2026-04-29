@@ -859,6 +859,19 @@ export default function SkillLibrary() {
                 <div className="sl-main-inner">
                   {skillDraft ? (
                     <>
+                      {/* ── 页面级控制栏（启用/暴露，始终可见）────────── */}
+                      <div className="sl-page-controls">
+                        <label className="sl-pc-check">
+                          <input type="checkbox" checked={skillDraft.enabled} onChange={(e) => updateSkillDraft('enabled', e.target.checked)} />
+                          启用
+                        </label>
+                        <label className="sl-pc-check">
+                          <input type="checkbox" checked={skillDraft.default_exposed} onChange={(e) => updateSkillDraft('default_exposed', e.target.checked)} />
+                          默认暴露给 AI
+                        </label>
+                        <span className="sl-pc-meta">调用次数：{skillDraft.usage_count}</span>
+                      </div>
+
                       {/* ── 基本信息（可收起） ───────────────────────── */}
                       <section className={`sl-card${skillBasicDirty ? ' sl-section-dirty' : ''}`}>
                         <div className="sl-card-head">
@@ -879,14 +892,6 @@ export default function SkillLibrary() {
                             <span className="sl-cs-title">{skillDraft.title || '(未命名)'}</span>
                             <span className="sl-cs-sep">·</span>
                             <span className="sl-cs-meta">{skillDraft.step_id || '未绑定步骤'}</span>
-                            <label className="sl-cs-check">
-                              <input type="checkbox" checked={skillDraft.enabled} onChange={(e) => updateSkillDraft('enabled', e.target.checked)} />
-                              启用
-                            </label>
-                            <label className="sl-cs-check">
-                              <input type="checkbox" checked={skillDraft.default_exposed} onChange={(e) => updateSkillDraft('default_exposed', e.target.checked)} />
-                              默认暴露
-                            </label>
                           </div>
                         ) : (
                           <>
@@ -917,18 +922,6 @@ export default function SkillLibrary() {
                             <div className="sl-field sl-field-row">
                               <span className="sl-label">说明</span>
                               <AutoTextarea className="sl-input-dev" value={skillDraft.description} onChange={(e) => updateSkillDraft('description', e.target.value)} placeholder="详细描述使用场景、输入输出约束等" />
-                            </div>
-
-                            <div className="sl-checks">
-                              <label>
-                                <input type="checkbox" checked={skillDraft.default_exposed} onChange={(e) => updateSkillDraft('default_exposed', e.target.checked)} />
-                                默认暴露给 AI
-                              </label>
-                              <label>
-                                <input type="checkbox" checked={skillDraft.enabled} onChange={(e) => updateSkillDraft('enabled', e.target.checked)} />
-                                启用
-                              </label>
-                              <span className="muted">被调用次数：{skillDraft.usage_count}</span>
                             </div>
                           </>
                         )}
@@ -1037,6 +1030,15 @@ export default function SkillLibrary() {
                 <div className="sl-main-inner">
                   {promptDraft ? (
                     <>
+                      {/* ── 页面级控制栏 ─────────────────────────────── */}
+                      <div className="sl-page-controls">
+                        <label className="sl-pc-check">
+                          <input type="checkbox" checked={promptDraft.enabled} onChange={(e) => updatePromptDraft('enabled', e.target.checked)} />
+                          启用
+                        </label>
+                        <span className="sl-pc-meta">{promptDraft.override ? '已覆盖默认内容' : '使用系统默认内容'}</span>
+                      </div>
+
                       <section className={`sl-card${promptBasicDirty ? ' sl-section-dirty' : ''}`}>
                         <div className="sl-card-head">
                           <div>
@@ -1056,10 +1058,6 @@ export default function SkillLibrary() {
                             <span className="sl-cs-title">{promptDraft.title}</span>
                             <span className="sl-cs-sep">·</span>
                             <span className="sl-cs-meta">{promptDraft.prompt_key}</span>
-                            <label className="sl-cs-check">
-                              <input type="checkbox" checked={promptDraft.enabled} onChange={(e) => updatePromptDraft('enabled', e.target.checked)} />
-                              启用
-                            </label>
                           </div>
                         ) : (
                           <>
@@ -1087,14 +1085,6 @@ export default function SkillLibrary() {
                             <div className="sl-field sl-field-row">
                               <span className="sl-label">说明</span>
                               <AutoTextarea className="sl-input-dev" value={promptDraft.description} onChange={(e) => updatePromptDraft('description', e.target.value)} placeholder="补充信息、注意事项" />
-                            </div>
-
-                            <div className="sl-checks">
-                              <label>
-                                <input type="checkbox" checked={promptDraft.enabled} onChange={(e) => updatePromptDraft('enabled', e.target.checked)} />
-                                启用
-                              </label>
-                              <span className="muted">{promptDraft.override ? '当前已覆盖默认内容' : '当前使用系统默认内容'}</span>
                             </div>
                           </>
                         )}
