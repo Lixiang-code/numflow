@@ -71,7 +71,8 @@ def _extract_gather_hint(prompt: str) -> str:
 DEFAULT_STEP_PROMPTS: Dict[str, str] = {
     "environment_global_readme": (
         _NAMING_HEADER
-        + "【步骤 1/11 环境与全局 README】\n"
+        + "【步骤 1/7+N 环境与全局 README】\n"
+        "（流水线共 7 个固定步骤 + N 个动态玩法落地步骤；本步为第 1 步）\n"
         "目标：固化项目级元数据与全局 README，为后续所有步骤提供数值基线。\n"
         "【操作流程】\n"
         "1. 调用 `get_project_config` 读取现有配置，重点提取 fixed_layer_config.core 下："
@@ -95,7 +96,7 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
     ),
     "base_attribute_framework": (
         _NAMING_HEADER
-        + "【步骤 2/7 基础属性框架（除 HP）】\n"
+        + "【步骤 3/7+N 基础属性框架（除 HP）】\n"
         "目标：定义角色基础属性骨架，输出 1..max_level 行的标准等级基础属性表（hp 列暂留空，下一步反推）。\n"
         "规则：\n"
         "  · 攻击力按膨胀速率单一公式贯穿全等级（禁止分段）；\n"
@@ -118,7 +119,7 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
     ),
     "hp_formula_derivation": (
         _NAMING_HEADER
-        + "【步骤 3/7 HP 反推公式推导】\n"
+        + "【步骤 4/7+N HP 反推公式推导】\n"
         "目标：基于已建立的 atk/def 曲线与战斗节奏假设，通过公式反推推导出 hp 列，\n"
         "确保每一等级的 HP 都有战斗设计依据，而非拍脑袋填数。\n"
         "核心推导路径：\n"
@@ -137,7 +138,7 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
     ),
     "gameplay_allocation": (
         _NAMING_HEADER
-        + "【步骤 4/7 玩法属性分配（matrix 表）】\n"
+        + "【步骤 5/7+N 玩法属性分配（matrix 表）】\n"
         "目标：把第2轮的『方案』+『分配表』合并为一张行=玩法子系统、列=属性的 matrix 表。\n"
         "操作：\n"
         "  1. 列出所有玩法子系统（必须把父系统拆为子系统：equip_base / equip_enhance / equip_amplify / "
@@ -155,8 +156,8 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
     ),
     "cultivation_resource_framework": (
         _NAMING_HEADER
-        + "【步骤 4/6 养成资源框架（第3轮合并）】\n"
-        "目标：把第2轮的『资源设计』+『资源框架表』合并为一步。\n"
+        + "【步骤 6/7+N 养成资源框架】\n"
+        "目标：设计资源产出曲线，建立资源框架表。\n"
         "操作：\n"
         "  1. 设计阶段先列出所有资源（≥2 货币 + 各父玩法的专属道具；RPG 类型必须含 experience），"
         "先 `glossary_register` 每个资源；\n"
@@ -175,7 +176,7 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
     ),
     "cultivation_allocation": (
         _NAMING_HEADER
-        + "【步骤 5/6 养成资源分配（matrix 表）】\n"
+        + "【步骤 7/7+N 养成资源分配（matrix 表）】\n"
         "目标：行=玩法子系统（与 gameplay_attr_alloc 一致），列=资源，单元格=该子系统对该资源的投放比例。\n"
         "操作：\n"
         "  1. `create_matrix_table(name='gameplay_res_alloc', kind='matrix_resource', "
@@ -193,7 +194,8 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
     ),
     "gameplay_planning": (
         _NAMING_HEADER
-        + "【步骤 2/N 玩法规划】\n"
+        + "【步骤 2/7+N 玩法规划】\n"
+        "（本步完成后将注册 N 张动态玩法落地表，形成步骤 8..7+N）\n"
         "目标：分析游戏配置，规划所有需要单独出落地表的玩法系统，注册到玩法表清单。\n"
         "操作：\n"
         "  1. `get_project_config` → 读取 fixed_layer_config.game_systems 了解启用的玩法系统；\n"
@@ -213,7 +215,7 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
     ),
     "gameplay_table": (
         _NAMING_HEADER
-        + "【玩法落地表执行步骤】\n"
+        + "【步骤 8+/7+N 玩法落地表（动态步骤）】\n"
         "目标：完成 user_message 中明确指定的那张玩法表，完成后检查是否有待修订任务可顺带处理。\n\n"
         "【主流程（必须完成）】\n"
         "  1. `get_gameplay_table_list` → 定位本步分配的表（user_message 中已注明 table_id），\n"
@@ -239,7 +241,8 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
     ),
     "gameplay_landing_tables": (
         _NAMING_HEADER
-        + "【步骤 6/6 玩法落地表（按子系统拆分）】\n"
+        + "【旧版步骤 — gameplay_landing_tables（已废弃，仅旧项目兼容）】\n"
+        "⚠ 本步骤已被动态 gameplay_table.* 步骤取代，新项目请勿使用。\n"
         "目标：本步骤已被拆为 per-subsystem 子步（如 11.equip / 11.gem / 11.dungeon ...）。\n"
         "通用要求：\n"
         "（1）所有数值通过 `call_calculator(name=gameplay_attr_alloc_lookup|gameplay_res_alloc_lookup, ...)` 取，禁止硬编码。\n"

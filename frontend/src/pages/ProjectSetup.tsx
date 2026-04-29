@@ -283,19 +283,16 @@ function PhaseProgress({ current, status }: { current: string; status: string })
 
 // ─── step init messages ───────────────────────────────────────────────────────
 const STEP_INIT_MESSAGES: Record<string, string> = {
-  environment_global_readme: '请初始化本项目，阅读项目配置，建立全局 README，说明游戏数值体系的整体结构、设计目标与各模块关系。',
-  gameplay_planning: '请分析游戏配置，规划所有需要单独出落地表的玩法系统，使用 register_gameplay_table 工具注册每张表（含设计目标 README 和推荐顺序）。注意：本步仅注册规划，不创建任何数值表。',
-  base_attribute_framework: '请根据游戏类型和属性配置，构建基本属性基础框架表（level_growth、stat_base 等），包含等级范围、成长系数基础定义。',
-  gameplay_attribute_scheme: '请构建玩法系统属性方案表，明确各玩法子系统（战斗/养成/经济等）的属性分配策略，写出方案 README。',
-  gameplay_allocation_tables: '请构建玩法系统属性分配表，将各玩法属性方案落地为具体数值，每个子系统一张表，含 README。',
-  second_order_framework: '请构建基本属性二阶框架表（stat_scale、stat_delta），用于描述属性随等级变化的增长阶段曲线。',
-  gameplay_attribute_tables: '请构建玩法系统属性表，将基础框架与分配方案合并为可执行的各玩法系统属性数值表。',
-  cultivation_resource_design: '请设计养成资源体系：确定货币、材料、碎片等各类资源的类型、用途、获取来源，写出资源设计 README。',
-  cultivation_resource_framework: '请构建养成资源基础框架表，按资源类型建立基础数量与稀有度梯度框架。',
-  cultivation_allocation_tables: '请构建养成资源分配表，针对各养成路径（等级升级、技能升级、装备强化等）给出详细的资源消耗数值。',
-  cultivation_quant_tables: '请构建养成资源定量表，整合所有养成路径的资源消耗，给出全生命周期的资源总量预算。',
-  gameplay_landing_tables: '请构建玩法系统落地表，将各玩法属性表与养成数值整合，输出最终可供验证的完整数值落地表。',
-  gameplay_table: '请查看本步骤需要执行的玩法落地表（通过 get_gameplay_table_list 确认），先标记为「进行中」，完成完整数值设计后标记为「已完成」。',
+  // ── 固定流水线步骤（顺序与 PIPELINE_STEPS_BASE 一致）──
+  environment_global_readme: '请初始化本项目：阅读项目配置，用 set_project_setting 写入 max_level/currencies/stat_keys/resource_keys，用 glossary_register 登记核心术语，用 const_register 写入项目级常数，最后用 update_global_readme 写出全局 README。',
+  gameplay_planning: '请分析游戏配置，规划所有需要单独出落地表的玩法系统，使用 register_gameplay_table 工具注册每张表（含设计目标 README、推荐顺序、依赖关系）。注意：本步仅注册规划，严禁调用任何建表/写数工具。',
+  base_attribute_framework: '请构建基础属性框架表 num_base_framework：读取已配置的 stat_keys 和 max_level，用 setup_level_table 建立 1..max_level 行的等级-属性表（hp 列建好留空，由下一步反推），所有成长系数先 const_register 再以 ${name} 引用。',
+  hp_formula_derivation: '请推导 HP 反推公式：基于 num_base_framework 中的 atk/def 曲线和战斗节奏假设（survive_seconds / attacks_per_second），通过 update_formula 登记 hp_formula，然后用 update_rows 将 hp 列回填到 num_base_framework，最后更新表 README 写出验证数据。',
+  gameplay_allocation: '请构建玩法属性分配 matrix 表 gameplay_attr_alloc（行=玩法子系统，列=属性，值=投放占比 0~1），并注册 calculator gameplay_attr_alloc_lookup，供后续玩法落地表查询每个子系统的属性投放比例。',
+  cultivation_resource_framework: '请构建养成资源框架表 num_resource_framework：设计所有资源的时间产出曲线（<res>_per_hour），推导 stay_hours_per_level 与 stay_hours_cumulative，计算各资源的 per_level 和 cumulative 列，末行累计时长应约等于生命周期总时长。',
+  cultivation_allocation: '请构建养成资源分配 matrix 表 gameplay_res_alloc（行=玩法子系统，列=资源，值=投放比例），并注册 calculator gameplay_res_alloc_lookup（含 grain 形参：per_hour/per_level/cumulative），供玩法落地表查询每个子系统的资源消耗。',
+  // ── 旧版步骤（遗留，仅旧项目兼容，不用于新流水线）──
+  gameplay_landing_tables: '【旧版步骤】请构建玩法系统落地表（旧流水线）。',
 }
 
 function buildInitMessage(stepId: string, projectInfo: ProjectInfo, completedSteps: string[]): string {
