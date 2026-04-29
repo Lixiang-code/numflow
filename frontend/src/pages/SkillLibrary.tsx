@@ -138,7 +138,7 @@ function renderModules(modules: PromptModule[]): string {
     .filter((module) => module.required || module.enabled)
     .map((module) => module.content.trim())
     .filter(Boolean)
-    .join('\n\n')
+    .join('\n')
 }
 
 /** 工具提示词：每个模块是 JSON schema 里的一个 description 字段，用分段格式展示 */
@@ -160,6 +160,14 @@ function renderToolModules(modules: PromptModule[]): string {
     })
     .join('\n\n' + '─'.repeat(48) + '\n\n')
 }
+
+// ── Draft cache types ─────────────────────────────────────────────────────
+type SkillCacheEntry  = { draft: SkillItem;  baseline: SkillItem;  serverConflict?: SkillItem  }
+type PromptCacheEntry = { draft: PromptItem; baseline: PromptItem; serverConflict?: PromptItem }
+
+function deepEqual(a: unknown, b: unknown): boolean { return JSON.stringify(a) === JSON.stringify(b) }
+function skillCacheKey(id: number | 'new'): string   { return String(id) }
+function promptCacheKey(tabKey: string, key: string): string { return `${tabKey}::${key}` }
 
 export default function SkillLibrary() {
   const { projectId } = useParams()
@@ -188,6 +196,19 @@ export default function SkillLibrary() {
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const toastId = useRef(0)
 
+  // ── Draft cache: preserves edits across item / tab switches ──────────────
+  const skillCache  = useRef(new Map<string, SkillCacheEntry>())
+  const promptCache = useRef(new Map<string, PromptCacheEntry>())
+  const [dirtySkillIds,   setDirtySkillIds]   = useState<Set<string>>(new Set())
+  const [dirtyPromptKeys, setDirtyPromptKeys] = useState<Set<string>>(new Set())
+  const [conflictSkill,  setConflictSkill]  = useState<{ key: string; local: SkillItem;  server: SkillItem  } | null>(null)
+  const [conflictPrompt, setConflictPrompt] = useState<{ key: string; local: PromptItem; server: PromptItem } | null>(null)
+
+  const markSkillDirty   = useCallback((key: string) => setDirtySkillIds(p   => { const n = new Set(p); n.add(key); return n }),    [])
+  const clearSkillDirty  = useCallback((key: string) => setDirtySkillIds(p   => { const n = new Set(p); n.delete(key); return n }), [])
+  const markPromptDirty  = useCallback((key: string) => setDirtyPromptKeys(p => { const n = new Set(p); n.add(key); return n }),    [])
+  const clearPromptDirty = useCallback((key: string) => setDirtyPromptKeys(p => { const n = new Set(p); n.delete(key); return n }), [])
+
   const pushToast = useCallback((type: ToastItem['type'], message: string) => {
     toastId.current += 1
     const id = toastId.current
@@ -199,27 +220,44 @@ export default function SkillLibrary() {
 
   const loadSkills = useCallback(async (selectId?: number | 'new' | null, fromEffect = false) => {
     if (!pid) return
-    if (!fromEffect) {
-      setSkillLoading(true)
-      setErr(null)
-    }
+    if (!fromEffect) { setSkillLoading(true); setErr(null) }
     try {
       const data = (await apiFetch('/skills', { headers })) as { skills?: SkillItem[] }
       const next = data.skills ?? []
       setSkills(next)
+      // Update draft cache: detect conflicts for dirty items, update baseline otherwise
+      for (const item of next) {
+        const key = skillCacheKey(item.id!)
+        const server = cloneValue(item)
+        const entry = skillCache.current.get(key)
+        if (!entry) {
+          skillCache.current.set(key, { draft: server, baseline: server })
+        } else if (!deepEqual(entry.baseline, server)) {
+          if (!deepEqual(entry.draft, entry.baseline)) {
+            // Server changed while we had local edits → conflict
+            skillCache.current.set(key, { ...entry, serverConflict: server })
+          } else {
+            // No local edits, just update to latest server data
+            skillCache.current.set(key, { draft: server, baseline: server })
+          }
+        }
+      }
+      // Resolve selected item
+      const resolveSkillDraft = (id: number): SkillItem => {
+        const entry = skillCache.current.get(skillCacheKey(id))
+        const found = next.find((s) => s.id === id)!
+        return entry ? cloneValue(entry.draft) : cloneValue(found)
+      }
       if (selectId === 'new') {
         setEditingSkillId('new')
         setSkillDraft(blankSkill())
       } else if (typeof selectId === 'number') {
         const found = next.find((item) => item.id === selectId)
-        if (found) {
-          setEditingSkillId(selectId)
-          setSkillDraft(cloneValue(found))
-        }
+        if (found) { setEditingSkillId(selectId); setSkillDraft(resolveSkillDraft(selectId)) }
       } else if (next.length > 0) {
         const first = next[0]
         setEditingSkillId(first.id ?? null)
-        setSkillDraft(cloneValue(first))
+        setSkillDraft(first.id != null ? resolveSkillDraft(first.id) : cloneValue(first))
       } else {
         setEditingSkillId('new')
         setSkillDraft(blankSkill())
@@ -233,25 +271,39 @@ export default function SkillLibrary() {
 
   const loadPromptItems = useCallback(async (category: 'system' | 'tool', selectKey?: string | null, fromEffect = false) => {
     if (!pid) return
-    if (!fromEffect) {
-      setPromptLoading(true)
-      setErr(null)
-    }
+    if (!fromEffect) { setPromptLoading(true); setErr(null) }
     try {
       const data = (await apiFetch(`/prompts?category=${category}`, { headers })) as { items?: PromptItem[] }
       const next = data.items ?? []
       setPromptItems(next)
+      // Update draft cache
+      for (const item of next) {
+        const key = promptCacheKey(category, item.prompt_key)
+        const server = cloneValue(item)
+        const entry = promptCache.current.get(key)
+        if (!entry) {
+          promptCache.current.set(key, { draft: server, baseline: server })
+        } else if (!deepEqual(entry.baseline, server)) {
+          if (!deepEqual(entry.draft, entry.baseline)) {
+            promptCache.current.set(key, { ...entry, serverConflict: server })
+          } else {
+            promptCache.current.set(key, { draft: server, baseline: server })
+          }
+        }
+      }
+      const resolvePromptDraft = (pk: string): PromptItem => {
+        const key = promptCacheKey(category, pk)
+        const entry = promptCache.current.get(key)
+        const found = next.find((i) => i.prompt_key === pk)!
+        return entry ? cloneValue(entry.draft) : cloneValue(found)
+      }
       if (selectKey) {
         const found = next.find((item) => item.prompt_key === selectKey)
-        if (found) {
-          setEditingPromptKey(found.prompt_key)
-          setPromptDraft(cloneValue(found))
-          return
-        }
+        if (found) { setEditingPromptKey(selectKey); setPromptDraft(resolvePromptDraft(selectKey)); return }
       }
       const first = next[0] ?? null
       setEditingPromptKey(first?.prompt_key ?? null)
-      setPromptDraft(first ? cloneValue(first) : blankPrompt())
+      setPromptDraft(first ? resolvePromptDraft(first.prompt_key) : blankPrompt())
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
@@ -271,10 +323,15 @@ export default function SkillLibrary() {
   }, [loadPromptItems, loadSkills, tab])
 
   function selectSkill(skillId: number) {
-    const found = skills.find((item) => item.id === skillId)
-    if (!found) return
+    const key = skillCacheKey(skillId)
+    const entry = skillCache.current.get(key)
+    if (entry?.serverConflict) {
+      setConflictSkill({ key, local: entry.draft, server: entry.serverConflict })
+      return
+    }
+    const draft = entry ? cloneValue(entry.draft) : cloneValue(skills.find((s) => s.id === skillId)!)
     setEditingSkillId(skillId)
-    setSkillDraft(cloneValue(found))
+    setSkillDraft(draft)
     setShowAllSkillModules(false)
   }
 
@@ -360,6 +417,11 @@ export default function SkillLibrary() {
         body: JSON.stringify(body),
       })) as SkillItem
       await loadSkills(saved.id ?? null)
+      // Clear dirty state for the saved item
+      const savedKey = skillCacheKey(saved.id ?? 'new')
+      const savedEntry = skillCache.current.get(savedKey)
+      if (savedEntry) { savedEntry.baseline = cloneValue(saved); delete savedEntry.serverConflict }
+      clearSkillDirty(savedKey)
       pushToast('success', `SKILL「${saved.title || skillDraft.title || '未命名'}」已保存`)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -392,10 +454,15 @@ export default function SkillLibrary() {
   }
 
   function selectPrompt(promptKey: string) {
-    const found = promptItems.find((item) => item.prompt_key === promptKey)
-    if (!found) return
+    const key = promptCacheKey(tab as 'system' | 'tool', promptKey)
+    const entry = promptCache.current.get(key)
+    if (entry?.serverConflict) {
+      setConflictPrompt({ key, local: entry.draft, server: entry.serverConflict })
+      return
+    }
+    const draft = entry ? cloneValue(entry.draft) : cloneValue(promptItems.find((i) => i.prompt_key === promptKey)!)
     setEditingPromptKey(promptKey)
-    setPromptDraft(cloneValue(found))
+    setPromptDraft(draft)
     setShowAllPromptModules(false)
   }
 
@@ -442,6 +509,11 @@ export default function SkillLibrary() {
         }),
       })
       await loadPromptItems(category, promptDraft.prompt_key)
+      // Clear dirty state for the saved prompt
+      const savedPKey = promptCacheKey(category, promptDraft.prompt_key)
+      const savedPEntry = promptCache.current.get(savedPKey)
+      if (savedPEntry) { savedPEntry.baseline = cloneValue(promptDraft); delete savedPEntry.serverConflict }
+      clearPromptDirty(savedPKey)
       pushToast('success', `提示词「${promptDraft.title || promptDraft.prompt_key}」已保存`)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -491,6 +563,27 @@ export default function SkillLibrary() {
     return () => window.removeEventListener('keydown', onKey)
   }, [promptDraft, promptSaving, savePrompt, saveSkill, skillDraft, skillSaving, tab])
 
+  // ── Sync active draft to cache → update dirty badges ─────────────────────
+  useEffect(() => {
+    if (!skillDraft || editingSkillId == null) return
+    const key = skillCacheKey(editingSkillId)
+    const entry = skillCache.current.get(key)
+    if (!entry) return
+    entry.draft = cloneValue(skillDraft)
+    if (deepEqual(skillDraft, entry.baseline)) clearSkillDirty(key)
+    else markSkillDirty(key)
+  }, [clearSkillDirty, editingSkillId, markSkillDirty, skillDraft])
+
+  useEffect(() => {
+    if (!promptDraft || !editingPromptKey || tab === 'skill') return
+    const key = promptCacheKey(tab, editingPromptKey)
+    const entry = promptCache.current.get(key)
+    if (!entry) return
+    entry.draft = cloneValue(promptDraft)
+    if (deepEqual(promptDraft, entry.baseline)) clearPromptDirty(key)
+    else markPromptDirty(key)
+  }, [clearPromptDirty, editingPromptKey, markPromptDirty, promptDraft, tab])
+
   const visibleSkillModules = useMemo(() => {
     if (!skillDraft) return []
     return skillDraft.modules.filter((item) => showAllSkillModules || item.required || item.enabled)
@@ -521,6 +614,18 @@ export default function SkillLibrary() {
   const loading = tab === 'skill' ? skillLoading : promptLoading
   const isMac = typeof navigator !== 'undefined' && navigator.platform.toLowerCase().includes('mac')
   const shortcut = isMac ? '⌘S' : 'Ctrl+S'
+
+  // ── Dirty / conflict helpers (reactive off dirtySkillIds / dirtyPromptKeys) ──
+  const isSkillDirty   = (id: number | 'new') => dirtySkillIds.has(skillCacheKey(id))
+  const isPromptDirty  = (pk: string) => dirtyPromptKeys.has(promptCacheKey(tab as 'system' | 'tool', pk))
+  const tabHasDirty    = (t: PromptTab) =>
+    t === 'skill'
+      ? dirtySkillIds.size > 0
+      : [...dirtyPromptKeys].some((k) => k.startsWith(t + '::'))
+  const currentDirty   =
+    tab === 'skill'
+      ? (editingSkillId != null && isSkillDirty(editingSkillId))
+      : (editingPromptKey != null && isPromptDirty(editingPromptKey))
 
   const canSave = tab === 'skill' ? !!skillDraft && !skillSaving : !!promptDraft && !promptSaving
   const saving = tab === 'skill' ? skillSaving : promptSaving
@@ -601,6 +706,7 @@ export default function SkillLibrary() {
                 className={tab === key ? 'active' : ''}
               >
                 {label}
+                {tabHasDirty(key) && <span className="sl-dirty-dot" title="有未保存内容" />}
               </button>
             ))}
           </div>
@@ -615,16 +721,17 @@ export default function SkillLibrary() {
             {tab === 'skill'
               ? skills.map((skill) => {
                   const active = skill.id === editingSkillId
+                  const dirty = skill.id != null && isSkillDirty(skill.id)
                   return (
                     <button
                       key={skill.id ?? skill.slug}
                       type="button"
                       onClick={() => skill.id && selectSkill(skill.id)}
-                      className={`sl-list-item${active ? ' active' : ''}`}
+                      className={`sl-list-item${active ? ' active' : ''}${dirty ? ' sl-dirty-item' : ''}`}
                     >
                       <div className="sl-row">
                         <span className="sl-name">{skill.title || '(未命名)'}</span>
-                        <span className="sl-meta">调用 {skill.usage_count}</span>
+                        <span className="sl-meta">{dirty ? <span className="sl-dirty-tag">编辑中</span> : `调用 ${skill.usage_count}`}</span>
                       </div>
                       <div className="sl-key">{skill.step_id || '未绑定步骤'}</div>
                       <div className="sl-chips">
@@ -637,16 +744,17 @@ export default function SkillLibrary() {
                 })
               : promptItems.map((item) => {
                   const active = item.prompt_key === editingPromptKey
+                  const dirty = isPromptDirty(item.prompt_key)
                   return (
                     <button
                       key={item.prompt_key}
                       type="button"
                       onClick={() => selectPrompt(item.prompt_key)}
-                      className={`sl-list-item${active ? ' active' : ''}`}
+                      className={`sl-list-item${active ? ' active' : ''}${dirty ? ' sl-dirty-item' : ''}`}
                     >
                       <div className="sl-row">
                         <span className="sl-name">{item.title}</span>
-                        <span className="sl-meta">{item.override ? '已覆盖' : '默认'}</span>
+                        <span className="sl-meta">{dirty ? <span className="sl-dirty-tag">编辑中</span> : (item.override ? '已覆盖' : '默认')}</span>
                       </div>
                       <div className="sl-key">{item.prompt_key}</div>
                     </button>
@@ -655,7 +763,7 @@ export default function SkillLibrary() {
           </div>
         </aside>
 
-        <main className="sl-main">
+        <main className={`sl-main${currentDirty ? ' sl-item-dirty' : ''}`}>
           {tab === 'skill' ? (
             <>
               <div className="sl-preview-pane">
@@ -951,6 +1059,114 @@ export default function SkillLibrary() {
           </div>
         ))}
       </div>
+
+      {/* ── 冲突对话框：SKILL ───────────────────────────────────────────── */}
+      {conflictSkill && (
+        <div className="sl-conflict-overlay">
+          <div className="sl-conflict-dialog">
+            <div className="sl-conflict-icon">⚠️</div>
+            <h3>编辑冲突</h3>
+            <p>
+              你对 <strong>{conflictSkill.local.title || conflictSkill.key}</strong> 有未保存的本地编辑，
+              同时服务端该条目已被更新。请选择保留哪个版本：
+            </p>
+            <div className="sl-conflict-diff">
+              <div className="sl-conflict-side local">
+                <div className="sl-conflict-side-title">📝 本地编辑版本</div>
+                <div className="sl-conflict-side-body">{conflictSkill.local.title}<br />{conflictSkill.local.summary}</div>
+              </div>
+              <div className="sl-conflict-side server">
+                <div className="sl-conflict-side-title">☁️ 服务端最新版本</div>
+                <div className="sl-conflict-side-body">{conflictSkill.server.title}<br />{conflictSkill.server.summary}</div>
+              </div>
+            </div>
+            <div className="sl-conflict-actions">
+              <button
+                type="button"
+                className="btn primary"
+                onClick={() => {
+                  const entry = skillCache.current.get(conflictSkill.key)
+                  if (entry) delete entry.serverConflict
+                  setEditingSkillId(Number(conflictSkill.key))
+                  setSkillDraft(cloneValue(conflictSkill.local))
+                  setConflictSkill(null)
+                }}
+              >保留本地编辑</button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  const entry = skillCache.current.get(conflictSkill.key)
+                  if (entry) {
+                    entry.draft = cloneValue(conflictSkill.server)
+                    entry.baseline = cloneValue(conflictSkill.server)
+                    delete entry.serverConflict
+                  }
+                  clearSkillDirty(conflictSkill.key)
+                  setEditingSkillId(Number(conflictSkill.key))
+                  setSkillDraft(cloneValue(conflictSkill.server))
+                  setConflictSkill(null)
+                }}
+              >使用服务端版本</button>
+              <button type="button" className="btn ghost" onClick={() => setConflictSkill(null)}>稍后再说</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 冲突对话框：提示词 ──────────────────────────────────────────── */}
+      {conflictPrompt && (
+        <div className="sl-conflict-overlay">
+          <div className="sl-conflict-dialog">
+            <div className="sl-conflict-icon">⚠️</div>
+            <h3>编辑冲突</h3>
+            <p>
+              你对 <strong>{conflictPrompt.local.title || conflictPrompt.local.prompt_key}</strong> 有未保存的本地编辑，
+              同时服务端该条目已被更新。请选择保留哪个版本：
+            </p>
+            <div className="sl-conflict-diff">
+              <div className="sl-conflict-side local">
+                <div className="sl-conflict-side-title">📝 本地编辑版本</div>
+                <div className="sl-conflict-side-body">{conflictPrompt.local.title}<br />{conflictPrompt.local.summary}</div>
+              </div>
+              <div className="sl-conflict-side server">
+                <div className="sl-conflict-side-title">☁️ 服务端最新版本</div>
+                <div className="sl-conflict-side-body">{conflictPrompt.server.title}<br />{conflictPrompt.server.summary}</div>
+              </div>
+            </div>
+            <div className="sl-conflict-actions">
+              <button
+                type="button"
+                className="btn primary"
+                onClick={() => {
+                  const entry = promptCache.current.get(conflictPrompt.key)
+                  if (entry) delete entry.serverConflict
+                  setEditingPromptKey(conflictPrompt.local.prompt_key)
+                  setPromptDraft(cloneValue(conflictPrompt.local))
+                  setConflictPrompt(null)
+                }}
+              >保留本地编辑</button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  const entry = promptCache.current.get(conflictPrompt.key)
+                  if (entry) {
+                    entry.draft = cloneValue(conflictPrompt.server)
+                    entry.baseline = cloneValue(conflictPrompt.server)
+                    delete entry.serverConflict
+                  }
+                  clearPromptDirty(conflictPrompt.key)
+                  setEditingPromptKey(conflictPrompt.server.prompt_key)
+                  setPromptDraft(cloneValue(conflictPrompt.server))
+                  setConflictPrompt(null)
+                }}
+              >使用服务端版本</button>
+              <button type="button" className="btn ghost" onClick={() => setConflictPrompt(null)}>稍后再说</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

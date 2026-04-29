@@ -2572,3 +2572,70 @@ textarea.sl-input-ai:focus {
 /* 模块卡内 textarea 不再使用 min-height（交给自适应） */
 .sl-module-content { margin-top: 0.7rem; min-height: 0; width: 100%; box-sizing: border-box; line-height: 1.55; font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.83rem; }
 .sl-field > textarea.sl-autoresize { min-height: 0; }
+
+/* ===== Skill Library: 脏状态 + 冲突对话框 ===== */
+
+/* Tab header 脏状态圆点 */
+.sl-tabs button { position: relative; }
+.sl-dirty-dot {
+  display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: #f59e0b; margin-left: 5px; vertical-align: middle;
+  flex-shrink: 0; box-shadow: 0 0 0 1.5px #fff;
+}
+
+/* 侧边栏条目脏状态 */
+.sl-dirty-item { border-left: 2px solid #f59e0b !important; }
+.sl-dirty-tag {
+  font-size: 0.65rem; padding: 0.05rem 0.38rem; border-radius: 999px;
+  background: #fef3c7; color: #92400e; border: 1px solid #fcd34d;
+  font-weight: 600; white-space: nowrap;
+}
+
+/* 编辑中主区域：字段标签追加 [编辑中] 角标，输入框加琥珀色光晕 */
+.sl-item-dirty .sl-label::after {
+  content: " [编辑中]";
+  font-size: 0.65rem; font-weight: 600;
+  color: #b45309; margin-left: 4px;
+  font-style: normal;
+}
+.sl-item-dirty textarea.sl-input-ai,
+.sl-item-dirty input.sl-input-ai {
+  border-color: #f59e0b !important;
+  box-shadow: 0 0 0 2px rgba(245,158,11,.18);
+}
+.sl-item-dirty textarea.sl-input-dev,
+.sl-item-dirty input.sl-input-dev {
+  border-color: #fbbf24 !important;
+  box-shadow: 0 0 0 2px rgba(251,191,36,.12);
+}
+
+/* 冲突对话框 overlay */
+.sl-conflict-overlay {
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(15,23,42,.55); backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center;
+  padding: 1.5rem;
+}
+.sl-conflict-dialog {
+  background: #fff; border-radius: 16px; padding: 2rem;
+  max-width: 560px; width: 100%; box-shadow: 0 24px 64px rgba(15,23,42,.28);
+  display: flex; flex-direction: column; gap: 1rem;
+}
+.sl-conflict-icon { font-size: 2rem; line-height: 1; }
+.sl-conflict-dialog h3 { margin: 0; font-size: 1.2rem; color: #0f172a; }
+.sl-conflict-dialog p { margin: 0; color: #475569; font-size: 0.92rem; line-height: 1.55; }
+.sl-conflict-diff {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;
+}
+.sl-conflict-side {
+  border-radius: 10px; padding: 0.75rem 0.9rem; font-size: 0.82rem;
+}
+.sl-conflict-side.local  { background: #fffbeb; border: 1px solid #fcd34d; }
+.sl-conflict-side.server { background: #f0fdf4; border: 1px solid #86efac; }
+.sl-conflict-side-title { font-weight: 700; margin-bottom: 0.35rem; font-size: 0.78rem; }
+.sl-conflict-side-body  { color: #475569; line-height: 1.45; }
+.sl-conflict-actions { display: flex; gap: 0.65rem; flex-wrap: wrap; }
+.sl-conflict-actions .btn { padding: 0.55rem 1.1rem; border-radius: 8px; font-size: 0.88rem; font-weight: 600; cursor: pointer; border: 1px solid var(--border); background: #fff; color: var(--text); }
+.sl-conflict-actions .btn.primary { background: var(--green); color: #fff; border-color: var(--green); }
+.sl-conflict-actions .btn.ghost { color: #64748b; background: transparent; border-color: transparent; }
+.sl-conflict-actions .btn:hover { filter: brightness(0.95); }
