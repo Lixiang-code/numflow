@@ -2980,6 +2980,16 @@ body:has(.sl-input-ai:focus) .sl-focus-overlay {
   border-color: #2e4a3e !important;
   color: #7a95b8 !important;
 }
+/* 聚焦模块：必要/启用等标签文字适配深色 */
+.sl-module:focus-within .sl-flags label {
+  color: #8fabc9 !important;
+}
+.sl-module:focus-within .sl-flags input[type='checkbox'] {
+  accent-color: #5ccea0;
+}
+.sl-module:focus-within .sl-mtitle {
+  color: #c8d8ee !important;
+}
 
 /* 聚焦模块：主内容 textarea 放大 + 深色 */
 .sl-module:focus-within .sl-module-content.sl-input-ai {
