@@ -29,6 +29,16 @@ type ColumnMeta = { name: string; sql_type?: string; display_name?: string; dtyp
 type FormulaInfo = { formula: string; type: string }
 type FormulaMap = Record<string, FormulaInfo>
 
+const MIN_UNIVER_SHEET_ROWS = 1000
+const MIN_UNIVER_SHEET_COLUMNS = 50
+
+type SheetCapacityHandle = {
+  getMaxRows?: () => number
+  getMaxColumns?: () => number
+  setRowCount?: (rowCount: number) => unknown
+  setColumnCount?: (columnCount: number) => unknown
+}
+
 type CalculatorAxis = { name: string; source: string; default?: string }
 type CalculatorItem = {
   name: string
@@ -107,6 +117,19 @@ function applyNumberFormat(value: unknown, fmt: string): string | number {
     result = parts.join('.')
   }
   return result
+}
+
+function ensureSheetCapacity(sheet: SheetCapacityHandle | null | undefined, requiredRows: number, requiredCols: number): void {
+  if (!sheet) return
+  const targetRows = Math.max(MIN_UNIVER_SHEET_ROWS, requiredRows)
+  const targetCols = Math.max(MIN_UNIVER_SHEET_COLUMNS, requiredCols)
+
+  if ((sheet.getMaxRows?.() ?? 0) < targetRows) {
+    sheet.setRowCount?.(targetRows)
+  }
+  if ((sheet.getMaxColumns?.() ?? 0) < targetCols) {
+    sheet.setColumnCount?.(targetCols)
+  }
 }
 
 type ConstantItem = {
@@ -732,7 +755,15 @@ export default function Workbench() {
     const wb = univerAPI.createWorkbook({
       id: `wb_${pid}`,
       name: `项目 ${pid}`,
-      sheets: { __placeholder__: { id: '__placeholder__', name: '加载中…', cellData: {} } },
+      sheets: {
+        __placeholder__: {
+          id: '__placeholder__',
+          name: '加载中…',
+          rowCount: MIN_UNIVER_SHEET_ROWS,
+          columnCount: MIN_UNIVER_SHEET_COLUMNS,
+          cellData: {},
+        },
+      },
       sheetOrder: ['__placeholder__'],
     })
     univerRef.current = univer
@@ -854,7 +885,13 @@ export default function Workbench() {
       const sheetTitle = displayName ? `${displayName}（${tableName}）` : tableName
       let sheet = wb.getSheetByName(sheetTitle) ?? wb.getSheetByName(tableName)
       if (!sheet) {
-        sheet = wb.insertSheet(sheetTitle) ?? wb.getSheetByName(sheetTitle)
+        sheet = wb.insertSheet(sheetTitle, {
+          sheet: {
+            rowCount: MIN_UNIVER_SHEET_ROWS,
+            columnCount: MIN_UNIVER_SHEET_COLUMNS,
+            cellData: {},
+          },
+        }) ?? wb.getSheetByName(sheetTitle)
         try {
           const placeholder = wb.getSheetByName('加载中…')
           if (placeholder) wb.deleteSheet(placeholder)
@@ -891,6 +928,7 @@ export default function Workbench() {
         }))
       }
       const numCols = Math.max(1, cols.length)
+      ensureSheetCapacity(sheet as SheetCapacityHandle, matrix.length, numCols)
       suppressEditRef.current = true
       try {
         try {
