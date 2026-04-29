@@ -1,179 +1,7 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { KeyboardEvent as ReactKeyboardEvent, TextareaHTMLAttributes } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { apiFetch, projectHeaders } from '../api'
-
-/**
- * 轻量 Markdown 编辑增强（避免引入完整 MD 编辑器以减小构建体积）：
- *   - Tab / Shift+Tab：插入/删除 2 空格缩进；多行选区时整体缩进
- *   - Enter：自动续 `- ` `* ` `+ ` `>` `1.` 等列表前缀；空列表项再次 Enter 则清除
- *   - Cmd/Ctrl+B / Cmd/Ctrl+I：将选区包裹为 `**bold**` / `*italic*`
- * 通过 document.execCommand('insertText') 写入，保留浏览器原生 undo/redo 历史。
- */
-const INDENT = '  '
-function mdInsert(el: HTMLTextAreaElement, text: string): void {
-  // execCommand 仍是保留 undo 栈的最佳手段；失败则回退到 setRangeText。
-  if (!document.execCommand || !document.execCommand('insertText', false, text)) {
-    const { selectionStart: s, selectionEnd: e } = el
-    el.setRangeText(text, s, e, 'end')
-    el.dispatchEvent(new Event('input', { bubbles: true }))
-  }
-}
-function handleMarkdownKeyDown(e: ReactKeyboardEvent<HTMLTextAreaElement>): void {
-  const el = e.currentTarget
-  const { selectionStart: s, selectionEnd: ee, value } = el
-
-  // ── Tab / Shift+Tab：始终对"当前行/选区覆盖的整行"做缩进 ────
-  if (e.key === 'Tab') {
-    e.preventDefault()
-    const lineStart = value.lastIndexOf('\n', s - 1) + 1
-    // 选区末尾若正好落在换行符上（即整行被选中），不要把下一行也算进来
-    const probeEnd = ee > s ? ee - 1 : ee
-    const lineEndIdx = value.indexOf('\n', probeEnd)
-    const lineEnd = lineEndIdx === -1 ? value.length : lineEndIdx
-    const block = value.slice(lineStart, lineEnd)
-    const lines = block.split('\n')
-    let delta = 0
-    let firstDelta = 0
-    const next = lines.map((l, i) => {
-      if (e.shiftKey) {
-        let removed = 0
-        let out = l
-        if (l.startsWith(INDENT)) { out = l.slice(INDENT.length); removed = INDENT.length }
-        else if (l.startsWith(' ')) { out = l.slice(1); removed = 1 }
-        if (i === 0) firstDelta = -removed
-        delta -= removed
-        return out
-      } else {
-        if (i === 0) firstDelta = INDENT.length
-        delta += INDENT.length
-        return INDENT + l
-      }
-    })
-    const replaced = next.join('\n')
-    el.setSelectionRange(lineStart, lineEnd)
-    mdInsert(el, replaced)
-    if (s === ee) {
-      // 无选区：光标按当前行的缩进变化平移，行尾按 Tab 不再追加字符
-      const cursor = Math.max(lineStart, s + firstDelta)
-      el.setSelectionRange(cursor, cursor)
-    } else {
-      // 有选区：保持覆盖整个新 block；起点跟随首行缩进变化
-      const newStart = Math.max(lineStart, s + firstDelta)
-      const newEnd = lineStart + block.length + delta
-      el.setSelectionRange(newStart, newEnd)
-    }
-    return
-  }
-
-  // ── Enter：列表续行 ───────────────────────────────────────────
-  if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
-    if (s !== ee) return
-    const lineStart = value.lastIndexOf('\n', s - 1) + 1
-    const lineEndIdx = value.indexOf('\n', s)
-    const lineEnd = lineEndIdx === -1 ? value.length : lineEndIdx
-    const line = value.slice(lineStart, lineEnd)
-    // 匹配：可选缩进 + 列表前缀（- * + > 或 N.） + 至少一个空格 + 内容
-    const m = line.match(/^(\s*)(?:([-*+>])|(\d+)\.)(\s+)(.*)$/)
-    if (!m) return
-    const indent = m[1] ?? ''
-    const space = m[4]
-    const rest = m[5]
-    const beforeCursor = value.slice(lineStart, s)
-    const prefixLen = (m[1] ?? '').length + (m[2] ? 1 : (m[3]!.length + 1)) + space.length
-    // 光标必须在前缀之后才触发（避免在前缀中间按 Enter 时干扰）
-    if (beforeCursor.length < prefixLen) return
-    if (rest.trim() === '') {
-      // 空列表项：清除当前行前缀
-      e.preventDefault()
-      el.setSelectionRange(lineStart, lineEnd)
-      mdInsert(el, '')
-      return
-    }
-    e.preventDefault()
-    const newBullet = m[2] ? m[2] : `${Number(m[3]) + 1}.`
-    mdInsert(el, '\n' + indent + newBullet + space)
-    return
-  }
-
-  // ── Cmd/Ctrl+B / I：粗体 / 斜体 ───────────────────────────────
-  if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 'b' || e.key === 'B' || e.key === 'i' || e.key === 'I')) {
-    const isBold = e.key === 'b' || e.key === 'B'
-    e.preventDefault()
-    const sel = value.slice(s, ee)
-    const wrap = isBold ? '**' : '*'
-    const placeholder = isBold ? '粗体' : '斜体'
-    const inner = sel || placeholder
-    mdInsert(el, `${wrap}${inner}${wrap}`)
-    if (!sel) {
-      const cursor = s + wrap.length
-      el.setSelectionRange(cursor, cursor + placeholder.length)
-    }
-    return
-  }
-}
-
-/**
- * 自适应高度文本框：默认显示「内容行数 + 1」行，超过 10 行则定高 + 出现滚动条。
- * 同时禁用拖动 resize，以保证页面节奏稳定。
- * 传入 `markdown` 时，启用 Tab 缩进 / 列表续行 / 粗斜体快捷键。
- */
-type AutoTextareaProps = TextareaHTMLAttributes<HTMLTextAreaElement> & {
-  value: string
-  maxRows?: number
-  markdown?: boolean
-}
-const DEFAULT_MAX_ROWS = 10
-
-function AutoTextarea({ value, className, onInput, onKeyDown, maxRows = DEFAULT_MAX_ROWS, markdown, ...rest }: AutoTextareaProps) {
-  const ref = useRef<HTMLTextAreaElement | null>(null)
-
-  const resize = useCallback(() => {
-    const el = ref.current
-    if (!el) return
-    const cs = window.getComputedStyle(el)
-    const lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.4 || 20
-    const pt = parseFloat(cs.paddingTop) || 0
-    const pb = parseFloat(cs.paddingBottom) || 0
-    const bt = parseFloat(cs.borderTopWidth) || 0
-    const bb = parseFloat(cs.borderBottomWidth) || 0
-    const maxH = lh * maxRows + pt + pb + bt + bb
-    el.style.height = 'auto'
-    // scrollHeight 含 padding，加 1 行 buffer 让用户继续输入
-    const desired = el.scrollHeight + lh + bt + bb
-    const finalH = Math.min(desired, maxH)
-    el.style.height = `${finalH}px`
-    el.style.overflowY = desired > maxH ? 'auto' : 'hidden'
-  }, [maxRows])
-
-  useLayoutEffect(() => {
-    resize()
-  }, [resize, value])
-
-  useEffect(() => {
-    const handle = () => resize()
-    window.addEventListener('resize', handle)
-    return () => window.removeEventListener('resize', handle)
-  }, [resize])
-
-  return (
-    <textarea
-      ref={ref}
-      value={value}
-      className={['sl-autoresize', className].filter(Boolean).join(' ')}
-      onInput={(e) => {
-        resize()
-        onInput?.(e)
-      }}
-      onKeyDown={(e) => {
-        if (markdown) handleMarkdownKeyDown(e)
-        if (!e.defaultPrevented) onKeyDown?.(e)
-      }}
-      rows={1}
-      {...rest}
-    />
-  )
-}
+import AutoTextarea from '../components/AutoTextarea'
 
 type PromptModule = {
   id?: number
@@ -211,6 +39,17 @@ type PromptItem = {
   enabled: boolean
   override?: boolean
   display_order?: number
+  default_title?: string
+  default_summary?: string
+  default_description?: string
+  default_reference_note?: string
+  default_enabled?: boolean
+  default_modules?: PromptModule[]
+  diagnostics?: {
+    default_module_keys?: string[]
+    extra_module_keys?: string[]
+    orphan_module_keys?: string[]
+  }
   modules: PromptModule[]
 }
 
@@ -840,6 +679,44 @@ export default function SkillLibrary() {
       : renderModules(promptDraft?.modules || []),
     [promptDraft, tab],
   )
+  const defaultRuntimePreview = useMemo(
+    () => tab === 'tool'
+      ? renderToolModules(promptDraft?.default_modules || [])
+      : renderModules(promptDraft?.default_modules || []),
+    [promptDraft, tab],
+  )
+  const promptDefaultChanged = useMemo(
+    () => runtimePreview.trim() !== defaultRuntimePreview.trim(),
+    [defaultRuntimePreview, runtimePreview],
+  )
+  const promptModuleDiff = useMemo(() => {
+    if (!promptDraft) {
+      return { changed: 0, added: 0, enabledChanged: 0, orphanKeys: [] as string[] }
+    }
+    const baseModules = promptDraft.default_modules || []
+    const baseByKey = new Map(baseModules.map((module, idx) => [module.module_key || `__default_${idx}`, module]))
+    let changed = 0
+    let added = 0
+    let enabledChanged = 0
+    for (const [idx, module] of promptDraft.modules.entries()) {
+      const key = module.module_key || `__draft_${idx}`
+      const base = baseByKey.get(key)
+      if (!base) {
+        added += 1
+        continue
+      }
+      if (module.content !== base.content || module.title !== base.title) changed += 1
+      const enabledNow = Boolean(module.required || module.enabled)
+      const enabledBase = Boolean(base.required || base.enabled)
+      if (enabledNow !== enabledBase) enabledChanged += 1
+    }
+    return {
+      changed,
+      added,
+      enabledChanged,
+      orphanKeys: promptDraft.diagnostics?.orphan_module_keys || [],
+    }
+  }, [promptDraft])
 
   // ── Per-module and section dirty detection ────────────────────────────────
   const dirtySkillModuleIndices = useMemo((): Set<number> => {
@@ -1386,6 +1263,8 @@ export default function SkillLibrary() {
                         <div className="sl-preview-head">
                           <div className="sl-preview-title">
                             {tab === 'tool' ? '🔧 工具字段预览（发送给 AI 的 description 内容）' : '🔭 运行时拼装预览（发送给 AI 的文本）'}
+                            {promptDefaultChanged && <span className="sl-preview-tag warn">已偏离默认</span>}
+                            {!promptDefaultChanged && promptDraft.default_modules?.length ? <span className="sl-preview-tag">与默认一致</span> : null}
                           </div>
                           <div className="sl-preview-meta">
                             {promptDraft.prompt_key || '—'}
@@ -1400,6 +1279,46 @@ export default function SkillLibrary() {
                           {runtimePreview || '当前无启用模块内容。'}
                         </pre>
                       </div>
+                      {(promptDefaultChanged || promptModuleDiff.orphanKeys.length > 0) && (
+                        <div className="sl-card" style={{ padding: '0.85rem 1rem' }}>
+                          <div className="sl-sub" style={{ marginBottom: promptModuleDiff.orphanKeys.length > 0 ? '0.55rem' : 0 }}>
+                            相对默认：
+                            {promptModuleDiff.changed > 0 ? ` 改写 ${promptModuleDiff.changed} 个模块；` : ' 内容未改写；'}
+                            {promptModuleDiff.enabledChanged > 0 ? ` 启停变化 ${promptModuleDiff.enabledChanged} 个；` : ''}
+                            {promptModuleDiff.added > 0 ? ` 额外模块 ${promptModuleDiff.added} 个；` : ''}
+                          </div>
+                          {promptModuleDiff.orphanKeys.length > 0 && (
+                            <div className="err small" style={{ marginBottom: '0.35rem' }}>
+                              以下 module_key 当前不会落到真实工具 schema，上线前应清理或迁回现有字段：
+                              <code style={{ marginLeft: 6 }}>{promptModuleDiff.orphanKeys.join(', ')}</code>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {promptDraft.default_modules?.length ? (
+                        <details className="sl-card">
+                          <summary style={{ cursor: 'pointer', fontWeight: 600 }}>查看系统默认版本</summary>
+                          <div className="sl-sub" style={{ marginTop: '0.65rem' }}>
+                            这里展示未覆盖时真正会发送给 AI 的默认内容，用来对照当前草稿是否偏离。
+                          </div>
+                          <div className="sl-preview-inline" style={{ marginTop: '0.75rem' }}>
+                            <div className="sl-preview-head">
+                              <div className="sl-preview-title">默认版本</div>
+                              <div className="sl-preview-meta">
+                                {promptDraft.prompt_key || '—'}
+                                {defaultRuntimePreview && (
+                                  <span className="sl-preview-tokens" title="按 3.5 字符 ≈ 1 token 粗略估算">
+                                    · 约 {estimateTokens(defaultRuntimePreview)} tokens
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <pre className={`sl-preview-body${defaultRuntimePreview ? '' : ' empty'}`}>
+                              {defaultRuntimePreview || '默认版本当前无启用模块内容。'}
+                            </pre>
+                          </div>
+                        </details>
+                      ) : null}
 
                       <section className="sl-card">
                         <div className="sl-card-head">

@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { apiFetch, projectHeaders } from '../api'
+import AutoTextarea from '../components/AutoTextarea'
 
 const LS_KEY = 'numflow_agent_monitor_v2'
 const MAX_HISTORY = 50
@@ -982,8 +983,14 @@ export default function AgentTest() {
                   </select>
                 </label>
               </div>
-              <textarea className="am-form-textarea" rows={3} value={message}
-                onChange={(e) => setMessage(e.target.value)} placeholder="用户消息…" />
+              <AutoTextarea
+                className="am-form-textarea"
+                maxRows={12}
+                markdown
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                placeholder="用户消息…"
+              />
               <div className="am-form-actions">
                 <button type="submit" className="btn primary" disabled={busy || projectId <= 0}>
                   {busy ? '⟳ 流式接收中…' : '▶ 开始调用'}

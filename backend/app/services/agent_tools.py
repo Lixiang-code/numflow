@@ -161,6 +161,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "读取三维数据表切片。默认返回兼容旧行为的按 dim2 分组紧凑投影视图；"
                 "若传 keep_axes，则可按 dim1 / dim2 / metric 任意组合切片，例如"
                 " keep_axes=['dim1','metric'] + dim2_keys=['atk'] 查看“所有攻击宝石的属性”，"
+                " keep_axes=['dim2','metric'] + dim1_keys=['1'] 查看“所有 1 级宝石的属性”，"
                 " keep_axes=['metric'] + dim1_keys=['1'] + dim2_keys=['atk'] 查看“1级攻击宝石的全部属性”。"
             ),
             "parameters": {

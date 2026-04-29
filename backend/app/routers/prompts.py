@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from app.deps import ProjectDB, get_project_read, get_project_write
 from app.services.agent_runner import get_agent_system_prompt_catalog
 from app.services.agent_tools import get_tool_prompt_catalog
-from app.services.prompt_overrides import delete_prompt_override, upsert_prompt_override
+from app.services.prompt_overrides import build_prompt_editor_item, delete_prompt_override, get_prompt_override, upsert_prompt_override
 from app.services.prompt_router import get_router_prompt_catalog
 
 router = APIRouter(prefix="/prompts", tags=["prompts"])
@@ -43,10 +43,10 @@ def _system_catalog(conn) -> List[Dict[str, Any]]:
     return items
 
 
-def _catalog_for_category(conn, category: PromptCategory) -> List[Dict[str, Any]]:
+def _catalog_for_category(conn, category: PromptCategory, *, merged: bool = True) -> List[Dict[str, Any]]:
     if category == "tool":
-        return get_tool_prompt_catalog(conn)
-    return _system_catalog(conn)
+        return get_tool_prompt_catalog(conn if merged else None)
+    return _system_catalog(conn if merged else None)
 
 
 @router.get("")
@@ -54,8 +54,16 @@ def prompt_list(
     category: PromptCategory = Query(...),
     p: ProjectDB = Depends(get_project_read),
 ) -> Dict[str, Any]:
+    defaults = _catalog_for_category(p.conn, category, merged=False)
     return {
-        "items": _catalog_for_category(p.conn, category),
+        "items": [
+            build_prompt_editor_item(
+                default_item=default_item,
+                override_item=get_prompt_override(p.conn, category=category, prompt_key=str(default_item["prompt_key"])),
+                category=category,
+            )
+            for default_item in defaults
+        ],
         "can_write": p.can_write,
     }
 
@@ -66,10 +74,14 @@ def prompt_detail(
     prompt_key: str,
     p: ProjectDB = Depends(get_project_read),
 ) -> Dict[str, Any]:
-    items = _catalog_for_category(p.conn, category)
-    for item in items:
-        if str(item.get("prompt_key") or "") == prompt_key:
-            return item
+    defaults = _catalog_for_category(p.conn, category, merged=False)
+    for default_item in defaults:
+        if str(default_item.get("prompt_key") or "") == prompt_key:
+            return build_prompt_editor_item(
+                default_item=default_item,
+                override_item=get_prompt_override(p.conn, category=category, prompt_key=prompt_key),
+                category=category,
+            )
     raise HTTPException(status_code=404, detail="提示词不存在")
 
 
@@ -98,4 +110,3 @@ def prompt_reset(
     p: ProjectDB = Depends(get_project_write),
 ) -> Dict[str, Any]:
     return {"ok": delete_prompt_override(p.conn, category=category, prompt_key=prompt_key)}
-

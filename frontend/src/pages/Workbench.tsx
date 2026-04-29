@@ -11,6 +11,7 @@ import UniverZhCN from '@univerjs/preset-sheets-core/locales/zh-CN'
 import '@univerjs/preset-sheets-core/lib/index.css'
 import MatrixEditor from './MatrixEditor'
 import ThreeDimTableEditor from './ThreeDimTableEditor'
+import AutoTextarea from '../components/AutoTextarea'
 
 type TableInfo = {
   table_name: string
@@ -1868,8 +1869,10 @@ export default function Workbench() {
                 })()}
                 {selected && readmeViewMode === 'edit' && (
                   <>
-                    <textarea
+                    <AutoTextarea
                       className="readme-textarea"
+                      maxRows={28}
+                      markdown
                       value={tableReadmeDraft}
                       onChange={(e) => setTableReadmeDraft(e.target.value)}
                       disabled={!canWrite || readOnly}
@@ -1909,8 +1912,10 @@ export default function Workbench() {
                 })()}
                 {readmeViewMode === 'edit' && (
                   <>
-                    <textarea
+                    <AutoTextarea
                       className="readme-textarea"
+                      maxRows={28}
+                      markdown
                       value={globalReadmeDraft}
                       onChange={(e) => setGlobalReadmeDraft(e.target.value)}
                       disabled={!canWrite || readOnly}

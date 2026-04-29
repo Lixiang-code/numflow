@@ -158,6 +158,30 @@ export default function ThreeDimTableEditor({
       .filter((item): item is { col: ValueCol; formula: FormulaInfo } => Boolean(item.formula)),
     [snapshot],
   )
+  const sliceExamples = useMemo(() => {
+    if (!axisOptions) return []
+    const firstDim1 = dim1Keys[0]
+    const firstDim2 = dim2Keys[0]
+    const firstMetric = metricKeys[0]
+    if (!firstDim1 || !firstDim2 || !firstMetric) return []
+    return [
+      {
+        title: '查看某个分类的全部属性',
+        description: `固定 ${axisOptions.dim2.label} = ${axisOptions.dim2.title(firstDim2)}，保留 ${axisOptions.dim1.label} × ${axisOptions.metric.label}`,
+        tool: `read_3d_table keep_axes=['dim1','metric'] + dim2_keys=['${firstDim2}']`,
+      },
+      {
+        title: '查看某个等级/档位的全部分类属性',
+        description: `固定 ${axisOptions.dim1.label} = ${axisOptions.dim1.title(firstDim1)}，保留 ${axisOptions.dim2.label} × ${axisOptions.metric.label}`,
+        tool: `read_3d_table keep_axes=['dim2','metric'] + dim1_keys=['${firstDim1}']`,
+      },
+      {
+        title: '查看单个三维点的完整属性列',
+        description: `固定 ${axisOptions.dim1.label} = ${axisOptions.dim1.title(firstDim1)} 且 ${axisOptions.dim2.label} = ${axisOptions.dim2.title(firstDim2)}，只保留 ${axisOptions.metric.label}`,
+        tool: `read_3d_table keep_axes=['metric'] + dim1_keys=['${firstDim1}'] + dim2_keys=['${firstDim2}']`,
+      },
+    ]
+  }, [axisOptions, dim1Keys, dim2Keys, metricKeys])
 
   const relevantFormulaEntries = useMemo(() => {
     if (!fixedAxis) return formulaEntries
@@ -238,6 +262,23 @@ export default function ThreeDimTableEditor({
           </button>
         )}
       </div>
+
+      {sliceExamples.length > 0 && (
+        <div className="panel" style={{ padding: '0.75rem 0.9rem', marginBottom: '0.75rem' }}>
+          <div className="muted small" style={{ marginBottom: '0.45rem' }}>
+            前端的“行轴 / 列轴 / 第三维”与 AI 工具 <code>read_3d_table</code> 的切片语义一致：保留的两个轴就是 <code>keep_axes</code>，固定项就是其余维度的 key 过滤。
+          </div>
+          <div style={{ display: 'grid', gap: '0.45rem' }}>
+            {sliceExamples.map((example) => (
+              <div key={example.tool}>
+                <strong>{example.title}</strong>
+                <div className="muted small">{example.description}</div>
+                <code style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{example.tool}</code>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="matrix-level-tabs" style={{ marginBottom: '0.5rem', flexWrap: 'wrap' }}>
         <span className="muted small" style={{ marginRight: '0.5rem' }}>行轴：</span>

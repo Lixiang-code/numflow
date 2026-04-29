@@ -11,8 +11,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from app.db.project_migrations import ensure_project_migrations
 from app.db.project_schema import init_project_db
 from app.services.agent_runner import _common_system
-from app.services.agent_tools import build_tools_openai
-from app.services.prompt_overrides import get_prompt_override, upsert_prompt_override
+from app.services.agent_tools import build_tools_openai, get_tool_prompt_catalog
+from app.services.prompt_overrides import build_prompt_editor_item, get_prompt_override, upsert_prompt_override
 from app.services.prompt_router import get_default_step_prompt, get_route_system_prompt
 
 
@@ -144,3 +144,45 @@ def test_tool_prompt_override_applies_to_schema_descriptions():
     assert read_table["function"]["description"] == "读取表数据（覆盖版）"
     assert read_table["function"]["parameters"]["properties"]["table_name"]["description"] == "目标表名（覆盖版）"
 
+
+def test_tool_prompt_editor_item_marks_orphan_modules():
+    conn = _new_conn()
+    upsert_prompt_override(
+        conn,
+        category="tool",
+        prompt_key="read_table",
+        payload={
+            "title": "工具：read_table",
+            "summary": "测试 orphan",
+            "description": "测试 orphan",
+            "reference_note": "测试 orphan",
+            "enabled": True,
+            "modules": [
+                {
+                    "module_key": "function.description",
+                    "title": "函数说明",
+                    "content": "读取表数据（覆盖版）",
+                    "required": True,
+                    "enabled": True,
+                    "sort_order": 1,
+                },
+                {
+                    "module_key": "function.parameters.properties.ghost_arg.description",
+                    "title": "幽灵参数",
+                    "content": "这个字段已经不存在",
+                    "required": False,
+                    "enabled": True,
+                    "sort_order": 2,
+                },
+            ],
+        },
+    )
+    default_item = next(item for item in get_tool_prompt_catalog() if item["prompt_key"] == "read_table")
+    editor_item = build_prompt_editor_item(
+        default_item,
+        get_prompt_override(conn, category="tool", prompt_key="read_table"),
+        category="tool",
+    )
+
+    assert editor_item["default_modules"]
+    assert "function.parameters.properties.ghost_arg.description" in editor_item["diagnostics"]["orphan_module_keys"]

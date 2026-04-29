@@ -174,6 +174,39 @@ def merge_prompt_item(default_item: Dict[str, Any], override_item: Optional[Dict
     return merged
 
 
+def build_prompt_editor_item(
+    default_item: Dict[str, Any],
+    override_item: Optional[Dict[str, Any]],
+    *,
+    category: str,
+) -> Dict[str, Any]:
+    merged = merge_prompt_item(default_item, override_item)
+    default_modules = _clone_modules(default_item.get("modules") or [])
+    default_module_keys = [
+        str(module.get("module_key") or "")
+        for module in default_modules
+        if str(module.get("module_key") or "").strip()
+    ]
+    default_key_set = set(default_module_keys)
+    extra_module_keys: List[str] = []
+    for module in merged.get("modules") or []:
+        module_key = str(module.get("module_key") or "").strip()
+        if module_key and module_key not in default_key_set and module_key not in extra_module_keys:
+            extra_module_keys.append(module_key)
+    merged["default_title"] = default_item.get("title") or ""
+    merged["default_summary"] = default_item.get("summary") or ""
+    merged["default_description"] = default_item.get("description") or ""
+    merged["default_reference_note"] = default_item.get("reference_note") or ""
+    merged["default_enabled"] = bool(default_item.get("enabled", True))
+    merged["default_modules"] = default_modules
+    merged["diagnostics"] = {
+        "default_module_keys": default_module_keys,
+        "extra_module_keys": extra_module_keys,
+        "orphan_module_keys": extra_module_keys if category == "tool" else [],
+    }
+    return merged
+
+
 def list_prompt_items(
     conn: sqlite3.Connection,
     *,

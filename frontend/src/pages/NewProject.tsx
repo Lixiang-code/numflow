@@ -4,6 +4,7 @@ import {
 } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { apiFetch } from '../api'
+import AutoTextarea from '../components/AutoTextarea'
 import {
   ATTR_GROUPS,
   RPG_GAME_TREE,
@@ -1173,8 +1174,9 @@ export default function NewProject() {
             </div>
             <div className="form-section" style={{ marginTop: '0.75rem' }}>
               <div className="form-section-title">项目描述</div>
-              <textarea
-                rows={12}
+              <AutoTextarea
+                maxRows={24}
+                markdown
                 value={promptText}
                 onChange={(e) => setPromptText(e.target.value)}
                 style={{ width: '100%' }}

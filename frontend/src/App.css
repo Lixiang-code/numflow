@@ -2515,6 +2515,7 @@ textarea.sl-input-ai:focus {
 .sl-vis-tag.ai { background: rgba(33,115,70,.12); color: #1b7f43; border: 1px solid rgba(33,115,70,.35); }
 
 /* 自适应 textarea：行数+1，超过 10 行启用滚动条；禁止手动 resize */
+.app-autoresize,
 .sl-autoresize {
   resize: none;
   overflow: hidden;
@@ -2571,6 +2572,7 @@ textarea.sl-input-ai:focus {
 
 /* 模块卡内 textarea 不再使用 min-height（交给自适应） */
 .sl-module-content { margin-top: 0.7rem; min-height: 0; width: 100%; box-sizing: border-box; line-height: 1.55; font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.83rem; }
+.sl-field > textarea.app-autoresize,
 .sl-field > textarea.sl-autoresize { min-height: 0; }
 
 /* ===== Skill Library: 脏状态 + 冲突对话框 ===== */

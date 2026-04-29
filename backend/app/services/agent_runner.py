@@ -243,7 +243,8 @@ def _base_common_system(mode_norm: str) -> str:
             "属性列（cols[]）可附 formula 字段，公式可用 @dim1列名/@dim2列名 同行引用：\n"
             "  例：atk_bonus 公式 = @level * ${gem_base_atk}（需先注册常量 gem_base_atk）\n"
             "若公式含 ${常量}，先 const_register；常量就绪后再重算整表，确保不要手填展开值。\n"
-            "读完整三轴结构用 read_3d_table_full；按任意维度切片用 read_3d_table。\n"
+            "读完整三轴结构用 read_3d_table_full；按任意维度切片用 read_3d_table。"
+            "典型切法：保留 等级×属性列 看某类全部属性；保留 分类×属性列 看某一级全部属性；只保留 属性列 看单个三维点。\n"
             "【伪三维表（matrix_resource）规则】第三维轴值（如等级）可手填；限制的是内容："
             "单切片允许常量，多切片必须全表 formula，不能混写。\n"
             "create_3d_table 同样必须传 display_name（中文）、directory、tags（≥1个）。",
