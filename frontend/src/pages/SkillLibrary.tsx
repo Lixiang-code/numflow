@@ -23,35 +23,46 @@ function handleMarkdownKeyDown(e: ReactKeyboardEvent<HTMLTextAreaElement>): void
   const el = e.currentTarget
   const { selectionStart: s, selectionEnd: ee, value } = el
 
-  // ── Tab / Shift+Tab：缩进 ─────────────────────────────────────
+  // ── Tab / Shift+Tab：始终对"当前行/选区覆盖的整行"做缩进 ────
   if (e.key === 'Tab') {
     e.preventDefault()
-    if (s === ee) {
-      if (e.shiftKey) {
-        const lineStart = value.lastIndexOf('\n', s - 1) + 1
-        const head = value.slice(lineStart, lineStart + INDENT.length)
-        if (head === INDENT) {
-          el.setSelectionRange(lineStart, lineStart + INDENT.length)
-          mdInsert(el, '')
-          el.setSelectionRange(s - INDENT.length, s - INDENT.length)
-        }
-      } else {
-        mdInsert(el, INDENT)
-      }
-      return
-    }
     const lineStart = value.lastIndexOf('\n', s - 1) + 1
-    const lineEndRaw = value.indexOf('\n', ee > s ? ee - 1 : ee)
-    const lineEnd = lineEndRaw === -1 ? value.length : lineEndRaw
+    // 选区末尾若正好落在换行符上（即整行被选中），不要把下一行也算进来
+    const probeEnd = ee > s ? ee - 1 : ee
+    const lineEndIdx = value.indexOf('\n', probeEnd)
+    const lineEnd = lineEndIdx === -1 ? value.length : lineEndIdx
     const block = value.slice(lineStart, lineEnd)
     const lines = block.split('\n')
-    const next = e.shiftKey
-      ? lines.map((l) => (l.startsWith(INDENT) ? l.slice(INDENT.length) : l.replace(/^ /, '')))
-      : lines.map((l) => INDENT + l)
+    let delta = 0
+    let firstDelta = 0
+    const next = lines.map((l, i) => {
+      if (e.shiftKey) {
+        let removed = 0
+        let out = l
+        if (l.startsWith(INDENT)) { out = l.slice(INDENT.length); removed = INDENT.length }
+        else if (l.startsWith(' ')) { out = l.slice(1); removed = 1 }
+        if (i === 0) firstDelta = -removed
+        delta -= removed
+        return out
+      } else {
+        if (i === 0) firstDelta = INDENT.length
+        delta += INDENT.length
+        return INDENT + l
+      }
+    })
     const replaced = next.join('\n')
     el.setSelectionRange(lineStart, lineEnd)
     mdInsert(el, replaced)
-    el.setSelectionRange(lineStart, lineStart + replaced.length)
+    if (s === ee) {
+      // 无选区：光标按当前行的缩进变化平移，行尾按 Tab 不再追加字符
+      const cursor = Math.max(lineStart, s + firstDelta)
+      el.setSelectionRange(cursor, cursor)
+    } else {
+      // 有选区：保持覆盖整个新 block；起点跟随首行缩进变化
+      const newStart = Math.max(lineStart, s + firstDelta)
+      const newEnd = lineStart + block.length + delta
+      el.setSelectionRange(newStart, newEnd)
+    }
     return
   }
 
