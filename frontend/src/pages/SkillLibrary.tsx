@@ -138,7 +138,27 @@ function renderModules(modules: PromptModule[]): string {
     .filter((module) => module.required || module.enabled)
     .map((module) => module.content.trim())
     .filter(Boolean)
-    .join('\n')
+    .join('\n\n')
+}
+
+/** 工具提示词：每个模块是 JSON schema 里的一个 description 字段，用分段格式展示 */
+function renderToolModules(modules: PromptModule[]): string {
+  const active = modules.filter((m) => m.required || m.enabled)
+  if (!active.length) return ''
+  return active
+    .map((m) => {
+      // 将 function.parameters.properties.foo.description → 参数 foo
+      const key = m.module_key ?? ''
+      let label = m.title || key
+      if (key === 'function.description') {
+        label = '函数说明（function.description）'
+      } else {
+        const paramMatch = key.match(/function\.parameters\.properties\.([^.]+)\.description$/)
+        if (paramMatch) label = `参数 ${paramMatch[1]}（${key}）`
+      }
+      return `▸ ${label}\n${m.content.trim()}`
+    })
+    .join('\n\n' + '─'.repeat(48) + '\n\n')
 }
 
 export default function SkillLibrary() {
@@ -491,7 +511,12 @@ export default function SkillLibrary() {
     return promptDraft.modules.filter((item) => !item.required && !item.enabled).length
   }, [promptDraft, showAllPromptModules])
 
-  const runtimePreview = useMemo(() => renderModules(promptDraft?.modules || []), [promptDraft])
+  const runtimePreview = useMemo(
+    () => tab === 'tool'
+      ? renderToolModules(promptDraft?.modules || [])
+      : renderModules(promptDraft?.modules || []),
+    [promptDraft, tab],
+  )
 
   const loading = tab === 'skill' ? skillLoading : promptLoading
   const isMac = typeof navigator !== 'undefined' && navigator.platform.toLowerCase().includes('mac')
@@ -784,7 +809,7 @@ export default function SkillLibrary() {
               <div className="sl-preview-pane">
                 <div className="sl-preview-head">
                   <div className="sl-preview-title">
-                    🔭 运行时引用预览
+                    {tab === 'tool' ? '🔧 工具字段预览（发送给 AI 的 description 内容）' : '🔭 运行时拼装预览（发送给 AI 的文本）'}
                     <span className="sl-preview-pinbadge">置顶</span>
                   </div>
                   <div className="sl-preview-meta">{promptDraft?.prompt_key || '—'}</div>
@@ -843,7 +868,11 @@ export default function SkillLibrary() {
                         <div className="sl-card-head">
                           <div>
                             <h3>内容模块<span className="sl-vis-tag ai">AI 可见</span></h3>
-                            <div className="sl-sub">模块内容会被运行时拼装注入；模块 key / 标题仅供开发者识别。</div>
+                            <div className="sl-sub">
+                              {tab === 'tool'
+                                ? '每个模块对应工具 JSON schema 里的一个 description 字段（路径即 module_key）。AI 收到工具列表时，这些文字就是它理解该工具和参数用途的依据。'
+                                : '模块内容会被运行时拼装注入；模块 key / 标题仅供开发者识别。'}
+                            </div>
                           </div>
                           <div className="sl-card-actions">
                             <button type="button" className="btn tiny" onClick={() => setShowAllPromptModules((v) => !v)}>
