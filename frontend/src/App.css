@@ -4,7 +4,7 @@
    ==================================================================== */
 
 :root {
-  --font-sans: 'Segoe UI', -apple-system, system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-sans: 'Inter', system-ui, -apple-system, 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
   --font-mono: 'Cascadia Code', ui-monospace, Consolas, monospace;
 
   /* 颜色体系 */
@@ -2856,4 +2856,74 @@ textarea.sl-input-ai:focus {
   background: #fef3c7;
   color: #92400e;
   border-color: #fcd34d;
+}
+
+/* ── 沉浸式聚焦效果 ─────────────────────────────────────────────── */
+/*
+ * 设计：当提示词库任意 AI 可见输入框聚焦时，
+ * 页面其余内容被半透明深色遮罩覆盖，当前模块卡片浮出，
+ * 文本框高度自动扩展，给编辑过程明确的视觉焦点。
+ *
+ * 实现：
+ *   - .sl-focus-overlay  → 固定全屏遮罩，默认隐藏
+ *   - body:has(.sl-input-ai:focus) → 遮罩可见
+ *   - .sl-module:focus-within / .sl-preview-inline:focus-within
+ *       → 通过 z-index 浮出到遮罩之上，加深阴影
+ *   - .sl-module:focus-within .sl-module-content → 文本框扩展高度
+ */
+
+.sl-focus-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(10, 15, 25, 0.52);
+  backdrop-filter: blur(1.5px);
+  -webkit-backdrop-filter: blur(1.5px);
+  pointer-events: none;
+  animation: sl-overlay-in .18s ease forwards;
+}
+
+@keyframes sl-overlay-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* 遮罩出现：任意 AI 输入框获得焦点 */
+body:has(.sl-input-ai:focus) .sl-focus-overlay {
+  display: block;
+}
+
+/* 聚焦模块：浮出遮罩 */
+.sl-module:focus-within,
+.sl-preview-inline:focus-within,
+.sl-card:focus-within:has(.sl-input-ai:focus) {
+  position: relative;
+  z-index: 101;
+  border-color: rgba(33, 115, 70, 0.55) !important;
+  background: #fff !important;
+  box-shadow:
+    0 0 0 3px rgba(33, 115, 70, 0.13),
+    0 16px 56px rgba(0, 0, 0, 0.22),
+    0 4px 12px rgba(0, 0, 0, 0.1);
+  transform: translateY(-2px);
+  transition: box-shadow .22s ease, transform .22s ease, border-color .18s ease;
+}
+
+/* 聚焦时文本框扩展：让内容更舒适地展开 */
+.sl-module:focus-within .sl-module-content {
+  min-height: 220px !important;
+  transition: min-height .25s ease;
+}
+
+/* 聚焦时字段 textarea 也稍微扩展 */
+.sl-card:focus-within:has(.sl-input-ai:focus) .sl-field > textarea.sl-input-ai {
+  min-height: 120px;
+  transition: min-height .25s ease;
+}
+
+/* 避免聚焦时侧边栏被遮罩挡住（sidebar 始终可操作） */
+.sl-rail {
+  position: relative;
+  z-index: 102;
 }

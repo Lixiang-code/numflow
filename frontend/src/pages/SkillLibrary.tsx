@@ -835,6 +835,8 @@ export default function SkillLibrary() {
 
   return (
     <div className="sl-page">
+      {/* 沉浸聚焦遮罩：当任意 AI 可见输入框获得焦点时由 CSS body:has() 控制显隐 */}
+      <div className="sl-focus-overlay" aria-hidden="true" />
       <header className="sl-top">
         <Link to={`/workbench/${pid}`} className="link-btn">← 返回工作台</Link>
         <div className="sl-title">提示词库</div>
