@@ -2819,7 +2819,7 @@ def _set_gameplay_table_status(conn, table_id: str, status: str) -> Dict[str, An
 
 
 def _request_table_revision(conn, table_id: str, reason: str, requested_by_step: str) -> Dict[str, Any]:
-    """对已注册玩法表发起二次修订请求。将表状态重置为'需修订'，并在队列中记录请求。"""
+    """对已注册玩法表发起二次修订请求。将表状态重置为'待修订'，并在队列中记录请求。"""
     import time as _time
     if not table_id:
         return {"status": "error", "data": None, "warnings": ["table_id 必填"], "blocked_cells": []}
