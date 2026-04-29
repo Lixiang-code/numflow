@@ -73,6 +73,13 @@ type ToolsMeta = {
   tool_choice: string
 }
 
+type PromptSource = {
+  prompt_key: string
+  title: string
+  override: boolean
+  content: string
+}
+
 type Metrics = {
   startedAt: string
   finishedAt: string | null
@@ -218,6 +225,7 @@ function rebuildFromEvents(events: SseEvent[]) {
   const tools: ToolEntry[] = []
   const turns: ConversationTurn[] = []
   const toolsMeta: Record<string, ToolsMeta> = {}
+  const promptSources: Record<string, PromptSource[]> = {}
   let routeInfo: RouteInfo | null = null
   let toolCalls = 0
 
@@ -260,6 +268,11 @@ function rebuildFromEvents(events: SseEvent[]) {
         parallel_tool_calls: Boolean(ev.raw.parallel_tool_calls),
         tool_choice: String(ev.raw.tool_choice ?? 'auto'),
       }
+    } else if (type === 'prompt_sources') {
+      const srcPhase = String(ev.raw.phase ?? phase)
+      promptSources[srcPhase] = Array.isArray(ev.raw.sources)
+        ? ev.raw.sources as PromptSource[]
+        : []
     } else if (type === 'prompt_route') {
       routeInfo = {
         step: String(ev.raw.step_id ?? ev.raw.step ?? ''),
@@ -275,7 +288,7 @@ function rebuildFromEvents(events: SseEvent[]) {
     }
   }
 
-  return { phases, tools, turns, toolsMeta, routeInfo, toolCalls }
+  return { phases, tools, turns, toolsMeta, promptSources, routeInfo, toolCalls }
 }
 
 // ─── 进度条 ────────────────────────────────────────────────────────────────
@@ -454,7 +467,41 @@ function ToolsMetaBadge({ meta }: { meta: ToolsMeta }) {
   )
 }
 
-function ConversationView({ turns, toolsMeta }: { turns: ConversationTurn[]; toolsMeta: Record<string, ToolsMeta> }) {
+function PromptSourcesBlock({ sources }: { sources: PromptSource[] }) {
+  if (!sources.length) return null
+  return (
+    <div style={{ marginBottom: '8px', borderRadius: '6px', border: '1px solid #d6e4f0', background: '#f8fbff', overflow: 'hidden' }}>
+      <div style={{ padding: '6px 10px', fontWeight: 700, fontSize: '0.75rem', color: '#355c7d' }}>
+        🧩 运行时提示词来源
+      </div>
+      <div style={{ padding: '0 10px 8px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        {sources.map((src) => (
+          <details key={src.prompt_key} style={{ border: '1px solid #dfe8f2', borderRadius: '6px', background: '#fff' }}>
+            <summary style={{ cursor: 'pointer', padding: '8px 10px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <code style={{ fontSize: '0.72rem', color: '#355c7d', fontWeight: 700 }}>{src.prompt_key}</code>
+              <span style={{ fontSize: '0.75rem', color: '#445' }}>{src.title}</span>
+              <span style={{
+                marginLeft: 'auto',
+                fontSize: '0.68rem',
+                padding: '0.12rem 0.4rem',
+                borderRadius: 999,
+                background: src.override ? 'rgba(56,142,60,.12)' : 'rgba(230,81,0,.12)',
+                color: src.override ? '#2e7d32' : '#e65100',
+              }}>
+                {src.override ? 'override 生效' : '默认内容'}
+              </span>
+            </summary>
+            <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '0.78rem', background: '#f8fbff', margin: 0, padding: '0 10px 10px' }}>
+              {src.content || '（空）'}
+            </pre>
+          </details>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function ConversationView({ turns, toolsMeta, promptSources }: { turns: ConversationTurn[]; toolsMeta: Record<string, ToolsMeta>; promptSources: Record<string, PromptSource[]> }) {
   if (turns.length === 0) {
     return (
       <div style={{ padding: '2rem', textAlign: 'center', color: '#666' }}>
@@ -488,7 +535,7 @@ function ConversationView({ turns, toolsMeta }: { turns: ConversationTurn[]; too
   if (executeRounds.length > 0) {
     const lastRound = executeRounds[executeRounds.length - 1]
     sections.push({
-      title: `⚙️ Execute 阶段完整对话（共 ${executeRounds.length} 轮，最终第 ${lastRound.round ?? executeRounds.length} 轮消息）`,
+      title: `⚙️ Execute 阶段完整对话（共 ${executeRounds.length} 轮，最终第 ${lastRound.round ?? executeRounds.length} 轮快照，含最后一次 AI 回复）`,
       messages: lastRound.messages,
       key: 'execute',
     })
@@ -497,13 +544,14 @@ function ConversationView({ turns, toolsMeta }: { turns: ConversationTurn[]; too
   return (
     <div style={{ padding: '0.5rem' }}>
       <p style={{ fontSize: '0.75rem', color: '#666', marginBottom: '1rem' }}>
-        💡 系统提示词默认折叠，点击标题展开。所有内容均为实际发送给 AI 的原文。
+        💡 系统提示词默认折叠，点击标题展开。这里展示的是实际对话快照；执行阶段最后一轮会包含 AI 的最终回复。
       </p>
       {sections.map(sec => (
         <div key={sec.key} style={{ marginBottom: '1.5rem' }}>
           <h4 style={{ fontSize: '0.85rem', color: '#aaa', marginBottom: '0.5rem', padding: '6px 8px', background: '#1a1a2e', borderRadius: '4px' }}>
             {sec.title}
           </h4>
+          {promptSources[sec.key] && <PromptSourcesBlock sources={promptSources[sec.key]} />}
           {toolsMeta[sec.key] && <ToolsMetaBadge meta={toolsMeta[sec.key]} />}
           {sec.messages.map((msg, i) => <LlmMessageBubble key={i} msg={msg} index={i} />)}
         </div>
@@ -541,6 +589,7 @@ export default function AgentTest() {
   const [metrics, setMetrics] = useState<Metrics | null>(null)
   const [conversationTurns, setConversationTurns] = useState<ConversationTurn[]>([])
   const [toolsMeta, setToolsMeta] = useState<Record<string, ToolsMeta>>({})
+  const [promptSources, setPromptSources] = useState<Record<string, PromptSource[]>>({})
   const [activeView, setActiveView] = useState<'phases' | 'conversation'>('phases')
 
   // 历史
@@ -711,6 +760,7 @@ export default function AgentTest() {
     setMetrics(null); setErr(null); setCurSession(null); setViewSession(null)
     setConversationTurns([])
     setToolsMeta({})
+    setPromptSources({})
   }, [])
 
   const runAgent = async (e: FormEvent) => {
@@ -814,6 +864,12 @@ export default function AgentTest() {
                 tool_choice: String(raw.tool_choice ?? 'auto'),
               },
             }))
+          } else if (type === 'prompt_sources') {
+            const srcPhase = String(raw.phase ?? phase)
+            setPromptSources(prev => ({
+              ...prev,
+              [srcPhase]: Array.isArray(raw.sources) ? raw.sources as PromptSource[] : [],
+            }))
           } else if (type === 'done') {
             const fin = new Date().toISOString()
             setMetrics({
@@ -890,6 +946,7 @@ export default function AgentTest() {
     setRouteInfo(rebuilt.routeInfo)
     setConversationTurns(rebuilt.turns)
     setToolsMeta(rebuilt.toolsMeta)
+    setPromptSources(rebuilt.promptSources)
 
     // 若是服务端会话，尝试拉取完整对话记录
     if (s.id.startsWith('srv_')) {
@@ -908,6 +965,7 @@ export default function AgentTest() {
             setRouteInfo(next.routeInfo)
             setConversationTurns(next.turns)
             setToolsMeta(next.toolsMeta)
+            setPromptSources(next.promptSources)
           } else {
             const msgs = data?.messages
             if (Array.isArray(msgs) && msgs.length > 0) {
@@ -983,6 +1041,9 @@ export default function AgentTest() {
                   </select>
                 </label>
               </div>
+              <p className="muted small" style={{ margin: '0 0 0.6rem' }}>
+                当前监控项目：<code>{projectId > 0 ? `#${projectId}` : '未选择'}</code>
+              </p>
               <AutoTextarea
                 className="am-form-textarea"
                 maxRows={12}
@@ -1165,6 +1226,17 @@ export default function AgentTest() {
             </div>
           )}
 
+          {activeView === 'phases' && (
+            <PromptSourcesBlock
+              sources={[
+                ...(promptSources.gather ?? []),
+                ...(promptSources.design ?? []),
+                ...(promptSources.review ?? []),
+                ...(promptSources.execute ?? []),
+              ]}
+            />
+          )}
+
           {/* 三阶段面板 */}
           {activeView === 'phases' && phaseOrder.map(({ key, label }) => {
             const ps = displayPhases[key]
@@ -1183,7 +1255,7 @@ export default function AgentTest() {
 
           {/* 完整对话视图 */}
           {activeView === 'conversation' && (
-            <ConversationView turns={conversationTurns} toolsMeta={toolsMeta} />
+            <ConversationView turns={conversationTurns} toolsMeta={toolsMeta} promptSources={promptSources} />
           )}
 
           {/* 等待开始提示 */}

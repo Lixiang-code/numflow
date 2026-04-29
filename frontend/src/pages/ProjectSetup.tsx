@@ -384,7 +384,6 @@ export default function ProjectSetup() {
       if (plData.finished || !plData.next_expected_step) {
         setAllDone(true)
       } else {
-        setCurrentStep(plData.next_expected_step)
         // Check if there's a persisted session for this step
         void checkExistingSession(plData.next_expected_step)
       }
@@ -432,6 +431,7 @@ export default function ProjectSetup() {
   /** Restore a server-persisted session for the current step */
   const checkExistingSession = useCallback(async (stepId: string) => {
     setSessionStatus('loading')
+    setCurrentStep(stepId)
     try {
       const data = await apiFetch(`/pipeline/step/${stepId}/session`, { headers }) as { session: ServerSession | null }
       const sess = data.session
@@ -644,10 +644,12 @@ export default function ProjectSetup() {
 
         setPs({ ...localPhases })
         setTs([...localTools])
-        setMet({
-          startedAt: startTime, finishedAt: null,
-          totalMs: msDiff(startTime, nowIso()), toolCalls: toolCount, status: 'running',
-        })
+        if (type !== 'done') {
+          setMet({
+            startedAt: startTime, finishedAt: null,
+            totalMs: msDiff(startTime, nowIso()), toolCalls: toolCount, status: 'running',
+          })
+        }
       }
     }
     return { localPhases, localTools, toolCount, hasError, recoveryStatus: lastRecoveryStatus }

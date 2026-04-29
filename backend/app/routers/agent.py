@@ -65,6 +65,7 @@ def _session_tracking_wrapper(
     _tracked_event_types = {
         "user_message",
         "prompt_route",
+        "prompt_sources",
         "phase_messages",
         "tools_meta",
         "tool_call",

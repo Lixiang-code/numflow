@@ -444,11 +444,26 @@ def get_agent_system_prompt_catalog(conn: Optional[sqlite3.Connection] = None) -
 
 
 def _resolve_agent_system_prompt(conn: Optional[sqlite3.Connection], prompt_key: str) -> str:
+    return _resolve_agent_system_prompt_detail(conn, prompt_key)["content"]
+
+
+def _resolve_agent_system_prompt_detail(conn: Optional[sqlite3.Connection], prompt_key: str) -> Dict[str, Any]:
     default = _agent_system_prompt_defaults()[prompt_key]
     if conn is None:
-        return render_prompt_text(default)
+        return {
+            "prompt_key": prompt_key,
+            "title": str(default.get("title") or prompt_key),
+            "override": False,
+            "content": render_prompt_text(default),
+        }
     override = get_prompt_override(conn, category="system", prompt_key=prompt_key)
-    return render_prompt_text(merge_prompt_item(default, override))
+    merged = merge_prompt_item(default, override)
+    return {
+        "prompt_key": prompt_key,
+        "title": str(merged.get("title") or prompt_key),
+        "override": bool(override),
+        "content": render_prompt_text(merged),
+    }
 
 
 def _common_system(mode_norm: str, conn: Optional[sqlite3.Connection] = None) -> str:
@@ -762,6 +777,8 @@ def _run_gather_phase(
 
     # 发出初始消息快照（供监控查看 system prompt）
     yield _emit("gather", {"type": "phase_messages", "phase": "gather", "round": 0, "messages": list(gather_messages)})
+    gather_prompt = _resolve_agent_system_prompt_detail(p.conn, "agent_gather")
+    yield _emit("gather", {"type": "prompt_sources", "phase": "gather", "sources": [gather_prompt]})
     # 发出工具元信息（供监控查看可用工具与并行设置）
     yield _emit("gather", {
         "type": "tools_meta", "phase": "gather",
@@ -893,7 +910,9 @@ def run_agent_sse(
         },
     )
 
-    base_system = _common_system(mode_norm, p.conn)
+    common_prompt_key = "agent_common_init" if mode_norm == "init" else "agent_common_maintain"
+    base_system_detail = _resolve_agent_system_prompt_detail(p.conn, common_prompt_key)
+    base_system = str(base_system_detail["content"])
     routed_prompt = (route.get("prompt") or "").strip()
     routed_block = (
         "【5/4 路由提示词】" + routed_prompt if routed_prompt else ""
@@ -926,7 +945,8 @@ def run_agent_sse(
         design_messages.append({"role": "system", "content": routed_block})
     if exposed_block:
         design_messages.append({"role": "system", "content": exposed_block})
-    design_messages.append({"role": "system", "content": _resolve_agent_system_prompt(p.conn, "agent_design_tail")})
+    design_tail_detail = _resolve_agent_system_prompt_detail(p.conn, "agent_design_tail")
+    design_messages.append({"role": "system", "content": str(design_tail_detail["content"])})
     design_messages.append({"role": "user", "content": user_message})
     # Inject gather phase context so design sees real project data
     design_messages.extend(gather_context)
@@ -936,6 +956,7 @@ def run_agent_sse(
     })
 
     yield _emit("design", {"type": "log", "message": "design 阶段开始（无工具，三段式 CoT，流式）"})
+    yield _emit("design", {"type": "prompt_sources", "phase": "design", "sources": [base_system_detail, design_tail_detail]})
     # 发出完整消息快照供监控
     yield _emit("design", {"type": "phase_messages", "phase": "design", "messages": design_messages})
     design_text = ""
@@ -969,7 +990,8 @@ def run_agent_sse(
         review_messages.append({"role": "system", "content": routed_block})
     if exposed_block:
         review_messages.append({"role": "system", "content": exposed_block})
-    review_messages.append({"role": "system", "content": _resolve_agent_system_prompt(p.conn, "agent_review_tail")})
+    review_tail_detail = _resolve_agent_system_prompt_detail(p.conn, "agent_review_tail")
+    review_messages.append({"role": "system", "content": str(review_tail_detail["content"])})
     review_messages.append({"role": "user", "content": user_message})
     review_messages.append(
         {
@@ -979,6 +1001,7 @@ def run_agent_sse(
     )
 
     yield _emit("review", {"type": "log", "message": "review 阶段开始（无工具，自审，流式）"})
+    yield _emit("review", {"type": "prompt_sources", "phase": "review", "sources": [base_system_detail, review_tail_detail]})
     # 发出完整消息快照供监控
     yield _emit("review", {"type": "phase_messages", "phase": "review", "messages": review_messages})
     review_text = ""
@@ -1012,7 +1035,8 @@ def run_agent_sse(
         execute_messages.append({"role": "system", "content": routed_block})
     if exposed_block:
         execute_messages.append({"role": "system", "content": exposed_block})
-    execute_messages.append({"role": "system", "content": _resolve_agent_system_prompt(p.conn, "agent_execute_tail")})
+    execute_tail_detail = _resolve_agent_system_prompt_detail(p.conn, "agent_execute_tail")
+    execute_messages.append({"role": "system", "content": str(execute_tail_detail["content"])})
     execute_messages.append({"role": "user", "content": user_message})
     execute_messages.append(
         {
@@ -1028,6 +1052,7 @@ def run_agent_sse(
     )
 
     yield _emit("execute", {"type": "log", "message": "execute 阶段开始（启用工具循环）"})
+    yield _emit("execute", {"type": "prompt_sources", "phase": "execute", "sources": [base_system_detail, execute_tail_detail]})
     # 发出工具元信息（供监控查看可用工具与并行设置）
     yield _emit("execute", {
         "type": "tools_meta", "phase": "execute",
@@ -1338,12 +1363,23 @@ def run_agent_sse(
         # 注意：_ending_prompt_injected 确保只注入一次，避免循环
         if not _ending_prompt_injected:
             _ending_prompt_injected = True
-            ending_text = _resolve_agent_system_prompt(p.conn, "agent_ending_review")
+            ending_detail = _resolve_agent_system_prompt_detail(p.conn, "agent_ending_review")
+            ending_text = str(ending_detail["content"])
             # 先把 AI 当前"完成"回复追加为 assistant 消息，再注入审核请求
             execute_messages.append(_build_assistant_msg(msg))
             execute_messages.append({"role": "user", "content": ending_text})
+            yield _emit("execute", {"type": "prompt_sources", "phase": "execute", "sources": [ending_detail]})
             yield _emit("execute", {"type": "log", "message": "⏹ 进入结束审核阶段（注入结束审核提示词）"})
             continue
+        yield _emit(
+            "execute",
+            {
+                "type": "phase_messages",
+                "phase": "execute",
+                "round": round_i,
+                "messages": list(execute_messages) + [_build_assistant_msg(msg)],
+            },
+        )
         for chunk in _chunk_text(final_text, 80):
             yield _emit("execute", {"type": "token", "text": chunk})
         yield _emit(

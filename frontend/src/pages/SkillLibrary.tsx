@@ -603,19 +603,21 @@ export default function SkillLibrary() {
           })),
         }),
       })
-      await loadPromptItems(category, promptDraft.prompt_key)
-      // 关键：保存成功后，把本地草稿与缓存基线同步为服务端数据，避免归一化字段差异触发"编辑中"。
+      const saved = (await apiFetch(`/prompts/${category}/${encodeURIComponent(promptDraft.prompt_key)}`, {
+        headers,
+      })) as PromptItem
+      if (!saved.override) {
+        throw new Error(`提示词「${promptDraft.prompt_key}」保存后未检测到覆盖记录，请确认当前项目是否正确`)
+      }
       const savedPKey = promptCacheKey(category, promptDraft.prompt_key)
-      const savedPEntry = promptCache.current.get(savedPKey)
-      // 优先使用 loadPromptItems 在缓存上写入的 serverConflict (即最新服务端值)，回退到 draft。
-      const serverItem = savedPEntry?.serverConflict ?? savedPEntry?.draft ?? promptDraft
-      const serverSnap = cloneValue(serverItem)
-      promptCache.current.set(savedPKey, { draft: serverSnap, baseline: cloneValue(serverItem) })
+      const savedSnap = cloneValue(saved)
+      promptCache.current.set(savedPKey, { draft: savedSnap, baseline: cloneValue(saved) })
       syncPromptCacheView()
-      setPromptDraft(cloneValue(serverItem))
-      setActivePromptBaseline(cloneValue(serverItem))
+      setPromptDraft(cloneValue(saved))
+      setActivePromptBaseline(cloneValue(saved))
       clearPromptDirty(savedPKey)
       clearPromptConflict(savedPKey)
+      await loadPromptItems(category, promptDraft.prompt_key)
       pushToast('success', `提示词「${promptDraft.title || promptDraft.prompt_key}」已保存`)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
