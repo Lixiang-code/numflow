@@ -281,6 +281,24 @@ _ROUTE_SYSTEM = (
 ROUTE_SYSTEM = _ROUTE_SYSTEM
 
 
+_ROUTER_PROMPT_GROUP_META: Dict[str, tuple] = {
+    "sys_router":      ("路由控制",     30, "判断是否命中步骤模板，未命中时临时生成专属提示词。"),
+    "sys_route_steps": ("步骤默认模板", 40, "各步骤在路由命中时直接注入的默认提示词。"),
+}
+
+
+def _router_sys_meta(group_key: str, name_zh: str, summary_zh: str) -> Dict[str, Any]:
+    label, order, hint = _ROUTER_PROMPT_GROUP_META[group_key]
+    return {
+        "tool_group_key": group_key,
+        "tool_group_label": label,
+        "tool_group_order": order,
+        "tool_group_hint": hint,
+        "tool_name_zh": name_zh,
+        "tool_summary_zh": summary_zh,
+    }
+
+
 def _router_prompt_defaults() -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = [
         {
@@ -302,6 +320,7 @@ def _router_prompt_defaults() -> List[Dict[str, Any]]:
                     "sort_order": 1,
                 }
             ],
+            **_router_sys_meta("sys_router", "路由判断提示词", "判断当前任务是否命中某个默认步骤提示词模板。"),
         },
         {
             "category": "system",
@@ -328,6 +347,7 @@ def _router_prompt_defaults() -> List[Dict[str, Any]]:
                     "sort_order": 1,
                 }
             ],
+            **_router_sys_meta("sys_router", "路由兜底生成器", "当路由未命中时，临时为当前步骤生成一段专属提示词。"),
         },
     ]
     for idx, (step_id, prompt) in enumerate(DEFAULT_STEP_PROMPTS.items(), start=10):
@@ -351,6 +371,7 @@ def _router_prompt_defaults() -> List[Dict[str, Any]]:
                         "sort_order": 1,
                     }
                 ],
+                **_router_sys_meta("sys_route_steps", f"步骤模板：{step_id}", f"路由命中 {step_id} 时直接注入的默认提示词。"),
             }
         )
     return items

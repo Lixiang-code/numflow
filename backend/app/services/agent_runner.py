@@ -292,6 +292,24 @@ def _base_common_system(mode_norm: str) -> str:
     )
 
 
+_AGENT_PROMPT_GROUP_META: Dict[str, tuple] = {
+    "sys_agent_core": ("Agent 执行阶段", 10, "控制 gather/design/review/execute 四阶段的核心行为约束与输出规范。"),
+    "sys_reviewer":   ("写操作审批",     20, "旁路 reviewer 模型在执行写工具前进行安全审批。"),
+}
+
+
+def _agent_sys_meta(group_key: str, name_zh: str, summary_zh: str) -> Dict[str, Any]:
+    label, order, hint = _AGENT_PROMPT_GROUP_META[group_key]
+    return {
+        "tool_group_key": group_key,
+        "tool_group_label": label,
+        "tool_group_order": order,
+        "tool_group_hint": hint,
+        "tool_name_zh": name_zh,
+        "tool_summary_zh": summary_zh,
+    }
+
+
 def _agent_system_prompt_defaults() -> Dict[str, Dict[str, Any]]:
     return {
         "agent_common_init": {
@@ -312,6 +330,7 @@ def _agent_system_prompt_defaults() -> Dict[str, Dict[str, Any]]:
                     "sort_order": 1,
                 }
             ],
+            **_agent_sys_meta("sys_agent_core", "通用提示词（初始化）", "新建任务时注入 AI 的基础角色约束、命名纪律与写入规范。"),
         },
         "agent_common_maintain": {
             "category": "system",
@@ -331,6 +350,7 @@ def _agent_system_prompt_defaults() -> Dict[str, Dict[str, Any]]:
                     "sort_order": 1,
                 }
             ],
+            **_agent_sys_meta("sys_agent_core", "通用提示词（维护）", "维护任务时注入 AI 的基础角色约束、读写策略与流程要求。"),
         },
         "agent_gather": {
             "category": "system",
@@ -341,6 +361,7 @@ def _agent_system_prompt_defaults() -> Dict[str, Dict[str, Any]]:
             "reference_note": "在 agent_runner._run_gather_phase 中作为唯一阶段 system prompt 注入，用于约束 gather 只读收集，不允许提前设计或写入。",
             "enabled": True,
             "modules": [{"module_key": "body", "title": "完整提示词", "content": _GATHER_SYSTEM, "required": True, "enabled": True, "sort_order": 1}],
+            **_agent_sys_meta("sys_agent_core", "收集阶段提示词", "限制 gather 阶段只读取信息，禁止提前设计或写入。"),
         },
         "agent_design_tail": {
             "category": "system",
@@ -351,6 +372,7 @@ def _agent_system_prompt_defaults() -> Dict[str, Dict[str, Any]]:
             "reference_note": "在 design 阶段附加到通用 system prompt 后，用于固定输出格式并禁止工具调用。",
             "enabled": True,
             "modules": [{"module_key": "body", "title": "完整提示词", "content": _DESIGN_SYSTEM_TAIL, "required": True, "enabled": True, "sort_order": 1}],
+            **_agent_sys_meta("sys_agent_core", "设计阶段尾部提示词", "要求 design 阶段输出三段式思维链，禁止直接调用工具。"),
         },
         "agent_review_tail": {
             "category": "system",
@@ -361,6 +383,7 @@ def _agent_system_prompt_defaults() -> Dict[str, Dict[str, Any]]:
             "reference_note": "在 review 阶段附加到通用 system prompt 后，用于强制自审并输出可执行操作方案。",
             "enabled": True,
             "modules": [{"module_key": "body", "title": "完整提示词", "content": _REVIEW_SYSTEM_TAIL, "required": True, "enabled": True, "sort_order": 1}],
+            **_agent_sys_meta("sys_agent_core", "审核阶段尾部提示词", "要求 review 阶段先自审问题，再输出可执行操作方案。"),
         },
         "agent_execute_tail": {
             "category": "system",
@@ -371,6 +394,7 @@ def _agent_system_prompt_defaults() -> Dict[str, Dict[str, Any]]:
             "reference_note": "在 execute 阶段附加到通用 system prompt 后，用于规范实际工具调用批次、写入顺序、校验和收尾。",
             "enabled": True,
             "modules": [{"module_key": "body", "title": "完整提示词", "content": _EXECUTE_SYSTEM_TAIL, "required": True, "enabled": True, "sort_order": 1}],
+            **_agent_sys_meta("sys_agent_core", "执行阶段尾部提示词", "规范 execute 阶段工具调用批次、写入顺序、校验与任务收尾。"),
         },
         "agent_reviewer": {
             "category": "system",
@@ -381,6 +405,7 @@ def _agent_system_prompt_defaults() -> Dict[str, Dict[str, Any]]:
             "reference_note": "在 reviewer 审批写操作时使用，用于判断写工具调用是否安全、是否违反默认细则或覆盖用户手工内容。",
             "enabled": True,
             "modules": [{"module_key": "body", "title": "完整提示词", "content": _REVIEWER_SYSTEM, "required": True, "enabled": True, "sort_order": 1}],
+            **_agent_sys_meta("sys_reviewer", "写操作审批提示词", "旁路 reviewer 模型在执行写工具前判断调用是否安全合规。"),
         },
     }
 

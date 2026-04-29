@@ -249,6 +249,12 @@ export default function SkillLibrary() {
     })
   }, [])
 
+  // 分组折叠状态（key = `${tab}::${groupKey}`）
+  const [collapsedPromptGroups, setCollapsedPromptGroups] = useState<Record<string, boolean>>({})
+  const togglePromptGroup = useCallback((tabKey: string, groupKey: string) => {
+    setCollapsedPromptGroups((prev) => ({ ...prev, [`${tabKey}::${groupKey}`]: !prev[`${tabKey}::${groupKey}`] }))
+  }, [])
+
   const markSkillDirty   = useCallback((key: string) => setDirtySkillIds(p   => { const n = new Set(p); n.add(key); return n }),    [])
   const clearSkillDirty  = useCallback((key: string) => setDirtySkillIds(p   => { const n = new Set(p); n.delete(key); return n }), [])
   const markPromptDirty  = useCallback((key: string) => setDirtyPromptKeys(p => { const n = new Set(p); n.add(key); return n }),    [])
@@ -812,14 +818,14 @@ export default function SkillLibrary() {
     if (!editingPromptKey || !promptDraft || !activePromptBaseline || tab === 'skill') return false
     return promptDraft.enabled !== activePromptBaseline.enabled
   }, [activePromptBaseline, editingPromptKey, promptDraft, tab])
-  const toolPromptGroups = useMemo((): ToolPromptGroup[] => {
-    if (tab !== 'tool') return []
+  const promptGroups = useMemo((): ToolPromptGroup[] => {
+    if (tab === 'skill') return []
     const groups = new Map<string, ToolPromptGroup>()
     for (const item of promptItems) {
       const key = item.tool_group_key || 'other'
       const current = groups.get(key) ?? {
         key,
-        label: item.tool_group_label || '其他工具',
+        label: item.tool_group_label || '其他',
         hint: item.tool_group_hint || '',
         order: item.tool_group_order ?? 999,
         items: [],
@@ -831,8 +837,12 @@ export default function SkillLibrary() {
       .map((group) => ({
         ...group,
         items: [...group.items].sort((a, b) => {
-          if (a.enabled !== b.enabled) return a.enabled ? -1 : 1
-          return (a.tool_name_zh || a.title).localeCompare((b.tool_name_zh || b.title), 'zh-CN')
+          if (tab === 'tool') {
+            if (a.enabled !== b.enabled) return a.enabled ? -1 : 1
+            return (a.tool_name_zh || a.title).localeCompare((b.tool_name_zh || b.title), 'zh-CN')
+          }
+          return (a.display_order ?? 0) - (b.display_order ?? 0) ||
+            (a.tool_name_zh || a.title).localeCompare((b.tool_name_zh || b.title), 'zh-CN')
         }),
       }))
       .sort((a, b) => a.order - b.order || a.label.localeCompare(b.label, 'zh-CN'))
@@ -1007,9 +1017,11 @@ export default function SkillLibrary() {
                     const active = item.prompt_key === editingPromptKey
                     const dirty  = isPromptDirty(item.prompt_key)
                     const conflict = conflictPromptKeys.has(promptCacheKey(tab as 'system' | 'tool', item.prompt_key))
-                    const displayTitle = tab === 'tool' ? (item.tool_name_zh || item.title) : item.title
-                    const displaySummary = tab === 'tool'
-                      ? (item.tool_summary_zh || item.summary || item.description || '')
+                    const displayTitle = (tab === 'tool' || tab === 'system')
+                      ? (item.tool_name_zh || item.title)
+                      : item.title
+                    const displaySummary = (tab === 'tool' || tab === 'system')
+                      ? (item.tool_summary_zh || item.summary || '')
                       : (item.summary || '')
                     return (
                       <button
@@ -1048,7 +1060,7 @@ export default function SkillLibrary() {
                         </div>
                         {displaySummary && <div className="sl-desc">{displaySummary}</div>}
                         <div className="sl-key">{item.prompt_key}</div>
-                        {tab === 'tool' && (
+                        {(tab === 'tool' || tab === 'system') && (
                           <div className="sl-chips">
                             {!item.enabled && <span className="sl-chip amber">未启用</span>}
                             {item.override && <span className="sl-chip">已覆盖默认</span>}
@@ -1057,16 +1069,27 @@ export default function SkillLibrary() {
                       </button>
                     )
                   }
-                  if (tab === 'tool') {
+                  if (tab === 'tool' || tab === 'system') {
                     return (
                       <>
-                        {toolPromptGroups.map((group) => (
-                          <div key={group.key} className="sl-group-block">
-                            <div className="sl-group-label">{group.label} ({group.items.length})</div>
-                            {group.hint ? <div className="sl-group-help">{group.hint}</div> : null}
-                            {group.items.map(renderPrompt)}
-                          </div>
-                        ))}
+                        {promptGroups.map((group) => {
+                          const groupCollapsed = collapsedPromptGroups[`${tab}::${group.key}`] ?? false
+                          return (
+                            <div key={group.key} className="sl-group-block">
+                              <button
+                                type="button"
+                                className="sl-group-label sl-group-toggle"
+                                onClick={() => togglePromptGroup(tab, group.key)}
+                              >
+                                <span className="sl-group-caret">{groupCollapsed ? '▸' : '▾'}</span>
+                                {group.label}
+                                <span className="sl-group-count">({group.items.length})</span>
+                              </button>
+                              {!groupCollapsed && group.hint ? <div className="sl-group-help">{group.hint}</div> : null}
+                              {!groupCollapsed && group.items.map(renderPrompt)}
+                            </div>
+                          )
+                        })}
                       </>
                     )
                   }
@@ -1332,9 +1355,9 @@ export default function SkillLibrary() {
                                 <span className="sl-label">标题</span>
                                 <input
                                   className="sl-input-dev"
-                                  value={tab === 'tool' ? (promptDraft.tool_name_zh || promptDraft.title) : promptDraft.title}
-                                  onChange={tab === 'tool' ? undefined : (e) => updatePromptDraft('title', e.target.value)}
-                                  readOnly={tab === 'tool'}
+                                  value={(tab === 'tool' || tab === 'system') ? (promptDraft.tool_name_zh || promptDraft.title) : promptDraft.title}
+                                  onChange={(tab === 'tool' || tab === 'system') ? undefined : (e) => updatePromptDraft('title', e.target.value)}
+                                  readOnly={tab === 'tool' || tab === 'system'}
                                 />
                               </label>
                               <label className="sl-field">
