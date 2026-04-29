@@ -226,7 +226,7 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
     "gameplay_table": (
         _NAMING_HEADER
         + "【步骤 8+/7+N 玩法落地表（动态步骤）】\n"
-        "目标：完成 user_message 中明确指定的那张玩法表，完成后检查是否有待修订任务可顺带处理。\n\n"
+        "目标：完成 user_message 中明确指定的那张玩法表；完成后强制清扫所有无阻塞的待修订任务。\n\n"
         "【主流程（必须完成）】\n"
         "  1. `get_gameplay_table_list` → 定位本步分配的表（user_message 中已注明 table_id），\n"
         "     读取其 readme、dependencies 和当前状态；\n"
@@ -241,90 +241,19 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
         "     · 若需向兄弟表暴露约束参数：`expose_param_to_subsystems`；\n"
         "  5. `set_gameplay_table_status(assigned_table_id, '已完成')` → 标记完成；\n"
         "  6. `update_table_readme` 更新表 README。\n\n"
-        "【可选追加：处理待修订任务】\n"
-        "完成上述主流程后，若 get_gameplay_table_list 返回中有 status='待修订' 的表，且满足：\n"
-        "  · 该表与本步工作相关（如被当前表依赖，或本步改动影响了它）；\n"
-        "  · 无阻塞依赖（所依赖的表均已完成）；\n"
-        "可顺带处理：set 进行中 → 读取 revision_reason → 按原因修改 → set 已完成。\n"
-        "若与本步关联性不强，跳过即可，留待后续步骤自然处理。\n\n"
+        "【必做：待修订清扫（每步结束前强制执行）】\n"
+        "完成上述主流程后，立即执行以下修订清扫循环，确保没有修订任务被遗漏：\n"
+        "  1. `get_gameplay_table_list()` → 收集所有 status='待修订' 的表；\n"
+        "  2. 逐一检查每张待修订表的 dependencies：若所有依赖表均为 '已完成'，则无阻塞；\n"
+        "  3. 对每张无阻塞的待修订表，立即按序处理：\n"
+        "     · `set_gameplay_table_status(revision_table_id, '进行中')`；\n"
+        "     · `get_gameplay_table_list()` 中该表的 `revision_reason` 字段即为修订说明（无需额外工具）；\n"
+        "     · 按 revision_reason 修改对应表数据；\n"
+        "     · `set_gameplay_table_status(revision_table_id, '已完成')`；\n"
+        "  4. 处理完一轮后重复步骤 1-3，直到 get_gameplay_table_list 中无更多无阻塞的待修订表。\n"
+        "  ⚠ 若所有待修订表都有尚未完成的依赖（阻塞），可正常结束本步——后续步骤会自然清扫。\n"
+        "  ⚠ 切勿跳过本清扫步骤：流水线中不存在专门的「修订收尾步骤」，每步都有责任清扫。\n\n"
         "★ list_exposed_params 返回空列表时说明无上游约束，继续执行即可。"
-    ),
-    "gameplay_landing_tables": (
-        _NAMING_HEADER
-        + "【旧版步骤 — gameplay_landing_tables（已废弃，仅旧项目兼容）】\n"
-        "⚠ 本步骤已被动态 gameplay_table.* 步骤取代，新项目请勿使用。\n"
-        "目标：本步骤已被拆为 per-subsystem 子步（如 11.equip / 11.gem / 11.dungeon ...）。\n"
-        "通用要求：\n"
-        "（1）所有数值通过 `call_calculator(name=gameplay_attr_alloc_lookup|gameplay_res_alloc_lookup, ...)` 取，禁止硬编码。\n"
-        "（2）需要累计差值时（如 L→L+1 实际消耗）创建辅助列：`@T[<res>_cumulative_at_level] - @T[<res>_cumulative_at_prev_level]`。\n"
-        "（3）行数 = `system_level_caps[<system>]` 否则 `max_level`；不留空。\n"
-        "（4）暴击/闪避/命中/抗性等百分比列存为 [0, 0.95] 小数，number_format='0.00%'；暴伤存小数（150% → 1.5）。\n"
-        "（5）若本子系统需要向兄弟子系统暴露设计参数，调用 `expose_param_to_subsystems(owner_step=本步, target_step='subsystems:gameplay_landing_tables', key, value, brief)`。"
-    ),
-    "gameplay_landing_tables.equip": (
-        _NAMING_HEADER
-        + "【步骤 11.装备 — 落地表】\n"
-        "产出：\n"
-        "  · `equip_landing`（display_name=「装备·落地」；列：slot / quality / refine_level / "
-        "enhance_level / unlock_level / attr_pool）；\n"
-        "  · `equip_attr`（行=强化等级，列=hp_max/atk/def/...，公式 = "
-        "`@base_attr_table[hp_max] * @equip_alloc[hp_share]`）；\n"
-        "  · `equip_cultivation_quant`（每级消耗 / 累计消耗 / 性价比）。\n"
-        "★ 主属性覆盖比若为常数请先 `const_register('equip_main_attr_ratio', 0.6)` 再以 `${equip_main_attr_ratio}` 引用。\n"
-        "★ 暴击/闪避在 [0, 0.95] 小数 + 0.00%；性价比禁严格单调递增。"
-    ),
-    "gameplay_landing_tables.gem": (
-        _NAMING_HEADER
-        + "【步骤 11.宝石 — 落地表】\n"
-        "产出：\n"
-        "  · `gem_landing`（display_name=「宝石·落地」；列：color / tier / synthesis_rule / unlock_level / attr_pool / share）；\n"
-        "  · `gem_attr`：若同时存在「品阶/等级 × 宝石类型 × 属性列」三个维度，必须用 `create_3d_table`；"
-        "推荐 dim1=tier 或 gem_grade，dim2=gem_type，cols=atk_bonus/def_bonus/...，避免伪二维表。\n"
-        "★ 合成路径以 const_register 抽出（如 `gem_synth_input=3`、`gem_synth_output=1`），"
-        "在 README 文字阐述「3 同阶 → 1 高 1 品」并在 schema 中以列体现。\n"
-        "★ 不要把标准等级 1..N 当成「宝石 N 级」。"
-    ),
-    "gameplay_landing_tables.mount": (
-        _NAMING_HEADER
-        + "【步骤 11.坐骑 — 落地表】\n"
-        "产出：\n"
-        "  · `mount_landing`（display_name=「坐骑·落地」；列：stage / unlock_level / activate_cond / advance_cost）；\n"
-        "  · `mount_attr`（行=阶段，列=hp_max/atk 等）；\n"
-        "  · `mount_cultivation_quant`（每阶消耗 / 累计 / 性价比）。\n"
-        "★ 行数与等级范围：从 `get_project_config().settings.fixed_layer_config.system_level_caps.mount` 读取，"
-        "若未配置则回退 `max_level`。**严禁硬编码 30**。如设计师确实希望坐骑只到某个独立上限，"
-        "请引导用户在初始化中心配置 `system_level_caps.mount`，然后由该值驱动。\n"
-        "★ 进阶曲线非线性（用 ${mount_growth_exp} 等常数控制），列必须有玩法含义。"
-    ),
-    "gameplay_landing_tables.wing": (
-        _NAMING_HEADER
-        + "【步骤 11.翅膀 — 落地表】\n"
-        "产出：`wing_landing`（stage/feather_cost/attr_pool）+ `wing_attr` + `wing_cultivation_quant`。\n"
-        "★ 消耗资源 ID 来自 `_project_settings.resource_keys`；行数从 `system_level_caps.wing` 派生。"
-    ),
-    "gameplay_landing_tables.fashion": (
-        _NAMING_HEADER
-        + "【步骤 11.时装 — 落地表】\n"
-        "产出：`fashion_landing`（suite/quality/attr_bonus/aesthetic_vs_combat 标签）。\n"
-        "★ 纯外观时装可 0 战斗属性；战斗时装需明确属性增量列。"
-    ),
-    "gameplay_landing_tables.dungeon": (
-        _NAMING_HEADER
-        + "【步骤 11.副本 — 落地表】\n"
-        "产出：`dungeon_landing`（列：dungeon_id / open_level / ticket_cost / daily_max_count / "
-        "reward_drop / cumulative_ticket / value_per_ticket）。\n"
-        "★ dungeon_id 用 IFS 公式分段批量生成。分段阈值不允许硬编码：\n"
-        "  先 const_register 各阶段上限 ${dungeon_tier1_cap}, ${dungeon_tier2_cap}, ...；再写：\n"
-        "  IFS(@T[level]<=${dungeon_tier1_cap}, 1, @T[level]<=${dungeon_tier2_cap}, 2, 3)\n"
-        "★ cumulative_ticket = CUMSUM_TO_HERE(@@T[ticket_cost])；value_per_ticket = `@T[reward_value]/@T[cumulative_ticket]`。\n"
-        "★ 注册公式后必须 execute（无空值）；性价比禁严格单调递增。"
-    ),
-    "gameplay_landing_tables.skill": (
-        _NAMING_HEADER
-        + "【步骤 11.技能 — 落地表】\n"
-        "产出：`skill_landing`（skill_id/type/unlock_level/cooldown/dmg_ratio/resource_cost）+ "
-        "`skill_cultivation_quant`（每级提升 / 累计消耗）。\n"
-        "★ dmg_ratio 存小数 + 0.00%；MP/能量消耗与技能强度匹配。"
     ),
 }
 
@@ -340,6 +269,17 @@ _ROUTE_SYSTEM = (
 # Public alias for agent_runner to embed in SSE events
 ROUTE_SYSTEM = _ROUTE_SYSTEM
 
+# 步骤 ID → 提示词库展示标题（中文）
+_STEP_ID_TITLE_ZH: Dict[str, str] = {
+    "environment_global_readme":       "01 环境与全局说明",
+    "gameplay_planning":               "02 玩法规划",
+    "base_attribute_framework":        "03 基础属性框架",
+    "hp_formula_derivation":           "04 HP公式推导",
+    "gameplay_allocation":             "05 玩法属性分配",
+    "cultivation_resource_framework":  "06 养成资源框架",
+    "cultivation_allocation":          "07 养成资源分配",
+    "gameplay_table":                  "08+ 玩法落地表（动态）",
+}
 
 _ROUTER_PROMPT_GROUP_META: Dict[str, tuple] = {
     "sys_router":      ("路由控制",     30, "判断是否命中步骤模板，未命中时临时生成专属提示词。"),
@@ -411,12 +351,13 @@ def _router_prompt_defaults() -> List[Dict[str, Any]]:
         },
     ]
     for idx, (step_id, prompt) in enumerate(DEFAULT_STEP_PROMPTS.items(), start=10):
+        title_zh = _STEP_ID_TITLE_ZH.get(step_id, step_id)
         items.append(
             {
                 "category": "system",
                 "prompt_key": f"route_step::{step_id}",
-                "title": f"步骤默认提示词：{step_id}",
-                "summary": f"{step_id} 的默认路由提示词模板。",
+                "title": f"步骤默认提示词：{title_zh}",
+                "summary": f"步骤【{title_zh}】的默认路由提示词模板。",
                 "description": "当默认 SKILL 未覆盖且路由命中时使用。",
                 "reference_note": f"在 prompt_router.route_prompt 中，当 step_id={step_id} 且默认模板命中时，这段提示词会作为 routed_prompt 注入 agent 的 design/review/execute 三阶段。",
                 "enabled": True,
@@ -431,7 +372,7 @@ def _router_prompt_defaults() -> List[Dict[str, Any]]:
                         "sort_order": 1,
                     }
                 ],
-                **_router_sys_meta("sys_route_steps", f"步骤模板：{step_id}", f"路由命中 {step_id} 时直接注入的默认提示词。"),
+                **_router_sys_meta("sys_route_steps", f"步骤模板：{title_zh}", f"路由命中 {step_id} 时直接注入的默认提示词。"),
             }
         )
     return items
