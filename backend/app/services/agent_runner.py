@@ -305,6 +305,7 @@ def _base_common_system(mode_norm: str) -> str:
 _AGENT_PROMPT_GROUP_META: Dict[str, tuple] = {
     "sys_agent_core": ("Agent 执行阶段", 10, "控制 gather/design/review/execute 四阶段的核心行为约束与输出规范。"),
     "sys_reviewer":   ("写操作审批",     20, "旁路 reviewer 模型在执行写工具前进行安全审批。"),
+    "sys_agent_end":  ("结束审核",       15, "execute 阶段首次完成后注入的自审指令，确保产出完整并输出最终总结。"),
 }
 
 
@@ -416,6 +417,17 @@ def _agent_system_prompt_defaults() -> Dict[str, Dict[str, Any]]:
             "enabled": True,
             "modules": [{"module_key": "body", "title": "完整提示词", "content": _REVIEWER_SYSTEM, "required": True, "enabled": True, "sort_order": 1}],
             **_agent_sys_meta("sys_reviewer", "写操作审批提示词", "旁路 reviewer 模型在执行写工具前判断调用是否安全合规。"),
+        },
+        "agent_ending_review": {
+            "category": "system",
+            "prompt_key": "agent_ending_review",
+            "title": "结束审核提示词",
+            "summary": "execute 阶段首次无工具调用且校验通过后，以 user 消息注入一次，要求 AI 复查产出并给出最终总结。",
+            "description": "独立于初始系统提示词之外的结束审核指令，仅在 execute 阶段「第一次完成」时注入一次，不重复。",
+            "reference_note": "在 agent_runner.run_agent_sse execute 循环中，当 _ending_prompt_injected=False 且校验通过后注入为 user 消息；注入后设 _ending_prompt_injected=True，后续不再注入。",
+            "enabled": True,
+            "modules": [{"module_key": "body", "title": "结束审核指令", "content": _ENDING_REVIEW_PROMPT, "required": True, "enabled": True, "sort_order": 1}],
+            **_agent_sys_meta("sys_agent_end", "结束审核提示词", "execute 阶段完成后注入一次，要求 AI 验证产出完整性并给出最终总结。"),
         },
     }
 
@@ -574,6 +586,20 @@ _REVIEWER_SYSTEM = (
     "给定一个即将执行的写工具调用（name + arguments JSON），"
     "判断是否安全/合理：是否覆盖 user_manual、是否带 source_tag、是否破坏依赖、是否违背 02 默认细则。"
     "返回严格 JSON：{\"verdict\":\"approve\"|\"reject\",\"reason\":\"<<=200字理由>\"}。"
+)
+
+_ENDING_REVIEW_PROMPT = (
+    "【结束审核】主体工作已完成，请对本次会话进行最终自我复查。\n\n"
+    "**1. 产出验证（使用只读工具抽查）**\n"
+    "   · 抽查 1-3 张本步刚创建或修改的主要表：核心列无空值/异常值、行数符合预期；\n"
+    "   · 若是玩法落地步骤，调用 `get_gameplay_table_list()` 确认目标表已标记「已完成」；\n\n"
+    "**2. README 验收**\n"
+    "   · 调用 `get_table_readme` 确认主要产出表的 README 已更新，包含 goal 与 acceptance_criteria；\n\n"
+    "**3. 问题处置**\n"
+    "   · 若发现遗漏或数据错误 → 立即调用写工具修正（禁止重复调用 create_snapshot）；\n"
+    "   · 若一切正常 → 无需额外工具调用，直接输出总结；\n\n"
+    "**4. 最终总结**\n"
+    "输出简洁完成报告：本步产出了哪些表/数据、关键数值范围、遗留事项（若有）。"
 )
 
 
@@ -1025,6 +1051,7 @@ def run_agent_sse(
     _recalc_count = 0          # recalculate_downstream 调用次数
     _recent_tools: List[str] = []  # 最近20次工具名（用于检测重复模式）
     _final_validation_injected = False  # 收尾前主动反馈违反，只注入一次
+    _ending_prompt_injected = False     # 结束审核提示词，只注入一次（第一次无工具调用且校验通过后）
     while True:
         round_i += 1
 
@@ -1307,6 +1334,16 @@ def run_agent_sse(
                     "execute",
                     {"type": "log", "message": f"收尾自检失败（忽略）：{exc!r}"},
                 )
+        # ---- 结束审核：校验通过后注入一次，要求 AI 复查产出 ----
+        # 注意：_ending_prompt_injected 确保只注入一次，避免循环
+        if not _ending_prompt_injected:
+            _ending_prompt_injected = True
+            ending_text = _resolve_agent_system_prompt(p.conn, "agent_ending_review")
+            # 先把 AI 当前"完成"回复追加为 assistant 消息，再注入审核请求
+            execute_messages.append(_build_assistant_msg(msg))
+            execute_messages.append({"role": "user", "content": ending_text})
+            yield _emit("execute", {"type": "log", "message": "⏹ 进入结束审核阶段（注入结束审核提示词）"})
+            continue
         for chunk in _chunk_text(final_text, 80):
             yield _emit("execute", {"type": "token", "text": chunk})
         yield _emit(
