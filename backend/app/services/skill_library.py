@@ -756,10 +756,32 @@ def render_skill_prompt_bundle(skills: Sequence[Dict[str, Any]]) -> str:
 def _resolve_step_candidates(step_id: str) -> List[str]:
     if not step_id:
         return []
-    parts = step_id.split(".")
+    normalized = step_id.strip()
+    alias_map = []
+    if normalized == "gameplay_landing_tables":
+        alias_map.append("gameplay_table")
+    elif normalized.startswith("gameplay_landing_tables."):
+        alias_map.append(normalized.replace("gameplay_landing_tables", "gameplay_table", 1))
+    elif normalized == "gameplay_table":
+        alias_map.append("gameplay_landing_tables")
+    elif normalized.startswith("gameplay_table."):
+        alias_map.append(normalized.replace("gameplay_table", "gameplay_landing_tables", 1))
+
     out: List[str] = []
-    for idx in range(1, len(parts) + 1):
-        out.append(".".join(parts[:idx]))
+    seen: set[str] = set()
+
+    def _append_parts(candidate: str) -> None:
+        parts = candidate.split(".")
+        for idx in range(1, len(parts) + 1):
+            part = ".".join(parts[:idx])
+            if part in seen:
+                continue
+            seen.add(part)
+            out.append(part)
+
+    _append_parts(normalized)
+    for alias in alias_map:
+        _append_parts(alias)
     # parent/common should appear before exact step
     return out
 

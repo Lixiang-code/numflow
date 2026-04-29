@@ -19,6 +19,7 @@ from app.services.formula_exec import (
 )
 from app.services.prompt_overrides import get_prompt_override, merge_prompt_item
 from app.data.default_rules_02 import get_default_rules_payload
+from app.services.gameplay_table_registry import list_registered_gameplay_tables, utc_now_iso
 from app.services.skill_library import (
     get_skill_detail as _get_skill_detail,
     list_skills as _list_skills,
@@ -2716,8 +2717,8 @@ def _register_gameplay_table(
         conn.execute(
             """
             INSERT INTO _gameplay_table_registry
-                (table_id, display_name, readme, status, order_num, dependencies, created_at, updated_at)
-            VALUES (?, ?, ?, '未开始', ?, ?, ?, ?)
+                (table_id, display_name, readme, status, started_at, order_num, dependencies, created_at, updated_at)
+            VALUES (?, ?, ?, '未开始', NULL, ?, ?, ?, ?)
             ON CONFLICT(table_id) DO UPDATE SET
                 display_name=excluded.display_name,
                 readme=excluded.readme,
@@ -2746,32 +2747,7 @@ def _register_gameplay_table(
 def _get_gameplay_table_list(conn) -> Dict[str, Any]:
     """读取所有已注册的玩法落地表。待修订表附带最新修订原因。"""
     try:
-        rows = conn.execute(
-            "SELECT table_id, display_name, readme, status, order_num, dependencies "
-            "FROM _gameplay_table_registry ORDER BY order_num, table_id"
-        ).fetchall()
-        items = []
-        for row in rows:
-            item: Dict[str, Any] = {
-                "table_id": row[0],
-                "display_name": row[1],
-                "readme": (row[2] or "")[:500],
-                "status": row[3] or "未开始",
-                "order_num": row[4] or 0,
-                "dependencies": json.loads(row[5] or "[]"),
-            }
-            # 若处于待修订状态，附带最新修订原因，供 agent 决策
-            if item["status"] == "待修订":
-                rev_row = conn.execute(
-                    "SELECT reason, requested_by_step, created_at FROM _table_revision_requests "
-                    "WHERE table_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1",
-                    (row[0],),
-                ).fetchone()
-                if rev_row:
-                    item["revision_reason"] = rev_row[0]
-                    item["revision_requested_by"] = rev_row[1]
-                    item["revision_created_at"] = rev_row[2]
-            items.append(item)
+        items = list_registered_gameplay_tables(conn, readme_limit=500)
         return {"status": "success", "data": {"tables": items, "total": len(items)}, "warnings": [], "blocked_cells": []}
     except Exception as e:  # noqa: BLE001
         return {"status": "error", "data": None, "warnings": [str(e)], "blocked_cells": []}
@@ -2780,14 +2756,14 @@ def _get_gameplay_table_list(conn) -> Dict[str, Any]:
 def _set_gameplay_table_status(conn, table_id: str, status: str) -> Dict[str, Any]:
     """更新玩法落地表的执行状态。目标状态只允许 '进行中' 或 '已完成'。
     若要将表标记为 '待修订'，请使用 request_table_revision 工具。"""
-    import time as _time
     if status not in ("进行中", "已完成"):
         return {"status": "error", "data": None, "warnings": [f"非法状态: {status!r}，只允许 '进行中' / '已完成'；若要标记为待修订请使用 request_table_revision"], "blocked_cells": []}
-    now = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
+    now = utc_now_iso()
     try:
+        started_at = now if status == "进行中" else None
         cur = conn.execute(
-            "UPDATE _gameplay_table_registry SET status=?, updated_at=? WHERE table_id=?",
-            (status, now, table_id),
+            "UPDATE _gameplay_table_registry SET status=?, started_at=?, updated_at=? WHERE table_id=?",
+            (status, started_at, now, table_id),
         )
         conn.commit()
         if cur.rowcount == 0:
@@ -2801,11 +2777,10 @@ def _set_gameplay_table_status(conn, table_id: str, status: str) -> Dict[str, An
                 "WHERE (target_step = ? OR target_step = ?) AND status = 'acknowledged'",
                 (step_id, broadcast_key),
             )
-            now2 = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
             conn.execute(
                 "UPDATE _table_revision_requests SET status='done', updated_at=? "
                 "WHERE table_id=? AND status='pending'",
-                (now2, table_id),
+                (utc_now_iso(), table_id),
             )
             conn.commit()
         return {

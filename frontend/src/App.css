@@ -2226,6 +2226,17 @@ pre {
   flex-shrink: 0;
   white-space: nowrap;
 }
+.ps-gt-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.ps-gt-reset-btn {
+  padding: 0.1rem 0.4rem;
+  font-size: 0.68rem;
+}
 .ps-gt-badge.done { background: var(--green); color: #fff; }
 .ps-gt-badge.active { background: var(--green-dark, #1b5e20); color: #fff; }
 .ps-gt-badge.revision { background: #f57c00; color: #fff; }

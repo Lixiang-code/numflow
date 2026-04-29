@@ -351,6 +351,8 @@ export default function ProjectSetup() {
   const [allDone, setAllDone] = useState(false)
   const [gameplayTables, setGameplayTables] = useState<GameplayTable[]>([])
   const [revisionRequests, setRevisionRequests] = useState<RevisionRequest[]>([])
+  const [resettingTableId, setResettingTableId] = useState<string | null>(null)
+  const [gameplayTableActionErr, setGameplayTableActionErr] = useState<string | null>(null)
 
   // ── 每步历史（stepId → 阶段面板状态）────────────────────────────
   const [stepHistory, setStepHistory] = useState<Array<{
@@ -410,6 +412,22 @@ export default function ProjectSetup() {
       // 忽略
     }
   }, [headers])
+
+  const resetGameplayTable = useCallback(async (tableId: string) => {
+    setGameplayTableActionErr(null)
+    setResettingTableId(tableId)
+    try {
+      await apiFetch(`/pipeline/gameplay-tables/${encodeURIComponent(tableId)}/reset`, {
+        method: 'PATCH',
+        headers,
+      })
+      await Promise.all([loadGameplayTables(), loadRevisionRequests()])
+    } catch (e) {
+      setGameplayTableActionErr(String(e))
+    } finally {
+      setResettingTableId(null)
+    }
+  }, [headers, loadGameplayTables, loadRevisionRequests])
 
   /** Restore a server-persisted session for the current step */
   const checkExistingSession = useCallback(async (stepId: string) => {
@@ -1056,13 +1074,29 @@ export default function ProjectSetup() {
                         {t.status === '已完成' ? '✓' : t.status === '进行中' ? '⟳' : t.status === '待修订' ? '↺' : String(t.order_num)}
                       </span>
                       <span className="ps-gt-name" title={t.table_id}>{t.display_name}</span>
-                      <span className={`ps-gt-badge ${cls}`}>
-                        {t.status}
+                      <span className="ps-gt-actions">
+                        <span className={`ps-gt-badge ${cls}`}>
+                          {t.status}
+                        </span>
+                        {t.status === '进行中' && (
+                          <button
+                            type="button"
+                            className="btn ghost small ps-gt-reset-btn"
+                            disabled={resettingTableId === t.table_id}
+                            onClick={() => { void resetGameplayTable(t.table_id) }}
+                            title="释放卡住的玩法表任务；若该表带待处理修订，会恢复到待修订状态"
+                          >
+                            {resettingTableId === t.table_id ? '重置中…' : '重置'}
+                          </button>
+                        )}
                       </span>
                     </li>
                   )
                 })}
               </ul>
+              {gameplayTableActionErr && (
+                <div className="err small" style={{ padding: '0 0.9rem 0.5rem' }}>{gameplayTableActionErr}</div>
+              )}
             </div>
           )}
 

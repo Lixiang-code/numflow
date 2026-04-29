@@ -66,6 +66,39 @@ def _extract_gather_hint(prompt: str) -> str:
     return result
 
 
+def _normalize_prompt_step_id(step_id: str) -> str:
+    if step_id == "gameplay_landing_tables":
+        return "gameplay_table"
+    if step_id.startswith("gameplay_landing_tables."):
+        return step_id.replace("gameplay_landing_tables", "gameplay_table", 1)
+    return step_id
+
+
+def _router_prompt_keys(step_id: str) -> List[str]:
+    normalized = _normalize_prompt_step_id(step_id)
+    keys = [f"route_step::{normalized}"]
+    if normalized != step_id:
+        keys.insert(0, f"route_step::{step_id}")
+    return keys
+
+
+def _router_default_prompt_keys(step_id: str) -> List[str]:
+    exact = _router_prompt_keys(step_id)
+    normalized = _normalize_prompt_step_id(step_id)
+    base_id = normalized.split(".", 1)[0] if "." in normalized else ""
+    if not base_id:
+        return exact
+    base = _router_prompt_keys(base_id)
+    out: List[str] = []
+    seen: set[str] = set()
+    for key in exact + base:
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
 # 与 routers/pipeline.py PIPELINE_STEPS 一一对应的默认提示词模板。
 # 每段简短描述：本步必产出（表名/列名/接受标准），便于 design 阶段对齐。
 DEFAULT_STEP_PROMPTS: Dict[str, str] = {
@@ -391,10 +424,26 @@ def get_router_prompt_catalog(conn: Optional[sqlite3.Connection] = None) -> List
 
 def _resolve_router_prompt(conn: Optional[sqlite3.Connection], prompt_key: str) -> str:
     defaults = {str(item["prompt_key"]): item for item in _router_prompt_defaults()}
-    default = defaults[prompt_key]
+    prompt_keys = [prompt_key]
+    default_keys = [prompt_key]
+    if prompt_key.startswith("route_step::"):
+        step_id = prompt_key.split("::", 1)[1]
+        prompt_keys = _router_prompt_keys(step_id)
+        default_keys = _router_default_prompt_keys(step_id)
+    default = None
+    for key in default_keys:
+        default = defaults.get(key)
+        if default is not None:
+            break
+    if default is None:
+        raise KeyError(prompt_key)
     if conn is None:
         return render_prompt_text(default)
-    override = get_prompt_override(conn, category="system", prompt_key=prompt_key)
+    override = None
+    for key in prompt_keys:
+        override = get_prompt_override(conn, category="system", prompt_key=key)
+        if override is not None:
+            break
     return render_prompt_text(merge_prompt_item(default, override))
 
 
@@ -442,10 +491,11 @@ def route_prompt(
             }
 
     # 确定步骤默认提示词：精确匹配 → 父步骤 fallback（如 gameplay_table.equip_enhance → gameplay_table）
-    if step_id in DEFAULT_STEP_PROMPTS:
+    normalized_step_id = _normalize_prompt_step_id(step_id)
+    if normalized_step_id in DEFAULT_STEP_PROMPTS:
         default_prompt = get_default_step_prompt(step_id, conn)
     else:
-        base_id = step_id.split(".")[0] if "." in step_id else ""
+        base_id = normalized_step_id.split(".")[0] if "." in normalized_step_id else ""
         default_prompt = get_default_step_prompt(base_id, conn) if base_id in DEFAULT_STEP_PROMPTS else ""
     client = get_client_for_model(model or QWEN_MODEL)
 

@@ -204,6 +204,7 @@ def init_project_db(conn: sqlite3.Connection, *, seed_readme: bool = True) -> No
             display_name TEXT NOT NULL,
             readme TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT '未开始',
+            started_at TEXT,
             order_num INTEGER NOT NULL DEFAULT 0,
             dependencies TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL,
@@ -223,6 +224,19 @@ def init_project_db(conn: sqlite3.Connection, *, seed_readme: bool = True) -> No
         cols = {row[1] for row in conn.execute("PRAGMA table_info(_table_registry)")}
         if "tags" not in cols:
             conn.execute("ALTER TABLE _table_registry ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(_gameplay_table_registry)")}
+        if "started_at" not in cols:
+            conn.execute("ALTER TABLE _gameplay_table_registry ADD COLUMN started_at TEXT")
+            conn.execute(
+                """
+                UPDATE _gameplay_table_registry
+                SET started_at = updated_at
+                WHERE status='进行中' AND COALESCE(started_at, '') = ''
+                """
+            )
     except Exception:  # noqa: BLE001
         pass
     if seed_readme:

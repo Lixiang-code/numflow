@@ -271,6 +271,7 @@ def ensure_project_migrations(conn: sqlite3.Connection) -> None:
             display_name TEXT NOT NULL,
             readme TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT '未开始',
+            started_at TEXT,
             order_num INTEGER NOT NULL DEFAULT 0,
             dependencies TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL,
@@ -292,6 +293,21 @@ def ensure_project_migrations(conn: sqlite3.Connection) -> None:
     try:
         conn.execute(
             "UPDATE _gameplay_table_registry SET status='待修订' WHERE status='需修订'"
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 为旧库补 started_at，并为存量「进行中」记录回填更新时间，避免永久孤儿状态
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(_gameplay_table_registry)")}
+        if "started_at" not in cols:
+            conn.execute("ALTER TABLE _gameplay_table_registry ADD COLUMN started_at TEXT")
+        conn.execute(
+            """
+            UPDATE _gameplay_table_registry
+            SET started_at = updated_at
+            WHERE status='进行中' AND COALESCE(started_at, '') = ''
+            """
         )
     except Exception:  # noqa: BLE001
         pass

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 from typing import Any, Dict, List
 
@@ -22,6 +21,10 @@ from app.db.project_schema import (
     set_setting,
 )
 from app.deps import ProjectDB, get_project_read, get_project_write
+from app.services.gameplay_table_registry import (
+    list_registered_gameplay_tables,
+    reset_gameplay_table_to_available,
+)
 from app.services.snapshot_ops import create_snapshot
 from app.services.validation_report import build_validation_report
 
@@ -50,21 +53,7 @@ PIPELINE_STEPS: List[str] = PIPELINE_STEPS_BASE
 def _get_registered_gameplay_tables(conn) -> List[Dict[str, Any]]:
     """从 _gameplay_table_registry 读取所有已注册的玩法表，按 order_num 排序。"""
     try:
-        rows = conn.execute(
-            "SELECT table_id, display_name, readme, status, order_num, dependencies "
-            "FROM _gameplay_table_registry ORDER BY order_num, table_id"
-        ).fetchall()
-        result = []
-        for row in rows:
-            result.append({
-                "table_id": row[0],
-                "display_name": row[1],
-                "readme": row[2] or "",
-                "status": row[3] or "未开始",
-                "order_num": row[4] or 0,
-                "dependencies": json.loads(row[5] or "[]"),
-            })
-        return result
+        return list_registered_gameplay_tables(conn, recover_stale=False)
     except Exception:  # noqa: BLE001
         return []
 
@@ -286,8 +275,26 @@ def pipeline_step_session_clear(step_id: str, p: ProjectDB = Depends(get_project
 @router.get("/gameplay-tables")
 def pipeline_gameplay_tables(p: ProjectDB = Depends(get_project_read)):
     """返回已注册的玩法表清单（由 gameplay_planning 步骤的 Agent 注册）。"""
-    tables = _get_registered_gameplay_tables(p.conn)
+    tables = list_registered_gameplay_tables(p.conn, recover_stale=p.can_write)
     return {"tables": tables}
+
+
+@router.patch("/gameplay-tables/{table_id}/reset")
+def pipeline_gameplay_table_reset(
+    table_id: str,
+    p: ProjectDB = Depends(get_project_write),
+):
+    """手动释放卡住的玩法表任务，恢复为可再次领取的状态。"""
+    try:
+        result = reset_gameplay_table_to_available(p.conn, table_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail=f"找不到 table_id={table_id!r}") from None
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"玩法表当前状态为 {exc.args[0]!r}，只有 '进行中' 才允许重置",
+        ) from None
+    return {"ok": True, **result}
 
 
 @router.get("/revision-requests")
