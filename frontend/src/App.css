@@ -2705,3 +2705,23 @@ textarea.sl-input-ai:focus {
 .sl-preview-inline .sl-preview-body.empty {
   color: #64748b; font-style: italic; font-family: inherit;
 }
+
+/* ===== Skill Library: 侧边栏分组标签 + 收起状态勾选框 ===== */
+
+.sl-group-label {
+  padding: 0.35rem 0.9rem 0.2rem;
+  font-size: 0.68rem; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: #475569;
+  border-top: 1px solid var(--border);
+  margin-top: 0.25rem;
+}
+.sl-group-label:first-child { border-top: none; margin-top: 0; }
+.sl-group-label.muted { color: #94a3b8; }
+
+/* Collapsed summary: inline checkboxes */
+.sl-cs-check {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  font-size: 0.8rem; color: #475569; cursor: pointer;
+  margin-left: 0.4rem; white-space: nowrap;
+}
+.sl-cs-check input[type="checkbox"] { cursor: pointer; }

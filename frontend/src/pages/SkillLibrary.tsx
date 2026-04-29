@@ -769,47 +769,86 @@ export default function SkillLibrary() {
               <div className="sl-list-empty">暂无可编辑的提示词</div>
             )}
             {tab === 'skill'
-              ? skills.map((skill) => {
-                  const active = skill.id === editingSkillId
-                  const dirty = skill.id != null && isSkillDirty(skill.id)
+              ? (() => {
+                  const enabled  = skills.filter((s) => s.enabled)
+                  const disabled = skills.filter((s) => !s.enabled)
+                  const renderSkill = (skill: SkillItem) => {
+                    const active = skill.id === editingSkillId
+                    const dirty  = skill.id != null && isSkillDirty(skill.id)
+                    return (
+                      <button
+                        key={skill.id ?? skill.slug}
+                        type="button"
+                        onClick={() => skill.id && selectSkill(skill.id)}
+                        className={`sl-list-item${active ? ' active' : ''}${dirty ? ' sl-dirty-item' : ''}`}
+                      >
+                        <div className="sl-row">
+                          <span className="sl-name">{skill.title || '(未命名)'}</span>
+                          <span className="sl-meta">{dirty ? <span className="sl-dirty-tag">编辑中</span> : `调用 ${skill.usage_count}`}</span>
+                        </div>
+                        <div className="sl-key">{skill.step_id || '未绑定步骤'}</div>
+                        <div className="sl-chips">
+                          <span className="sl-chip">{skill.source === 'system' ? '默认' : '用户'}</span>
+                          {skill.default_exposed && <span className="sl-chip green">默认暴露</span>}
+                        </div>
+                      </button>
+                    )
+                  }
                   return (
-                    <button
-                      key={skill.id ?? skill.slug}
-                      type="button"
-                      onClick={() => skill.id && selectSkill(skill.id)}
-                      className={`sl-list-item${active ? ' active' : ''}${dirty ? ' sl-dirty-item' : ''}`}
-                    >
-                      <div className="sl-row">
-                        <span className="sl-name">{skill.title || '(未命名)'}</span>
-                        <span className="sl-meta">{dirty ? <span className="sl-dirty-tag">编辑中</span> : `调用 ${skill.usage_count}`}</span>
-                      </div>
-                      <div className="sl-key">{skill.step_id || '未绑定步骤'}</div>
-                      <div className="sl-chips">
-                        <span className="sl-chip">{skill.source === 'system' ? '默认' : '用户'}</span>
-                        {skill.default_exposed && <span className="sl-chip green">默认暴露</span>}
-                        {!skill.enabled && <span className="sl-chip amber">已停用</span>}
-                      </div>
-                    </button>
+                    <>
+                      {enabled.length > 0 && (
+                        <>
+                          <div className="sl-group-label">启用中 ({enabled.length})</div>
+                          {enabled.map(renderSkill)}
+                        </>
+                      )}
+                      {disabled.length > 0 && (
+                        <>
+                          <div className="sl-group-label muted">未启用 ({disabled.length})</div>
+                          {disabled.map(renderSkill)}
+                        </>
+                      )}
+                    </>
                   )
-                })
-              : promptItems.map((item) => {
-                  const active = item.prompt_key === editingPromptKey
-                  const dirty = isPromptDirty(item.prompt_key)
+                })()
+              : (() => {
+                  const enabled  = promptItems.filter((i) => i.enabled)
+                  const disabled = promptItems.filter((i) => !i.enabled)
+                  const renderPrompt = (item: PromptItem) => {
+                    const active = item.prompt_key === editingPromptKey
+                    const dirty  = isPromptDirty(item.prompt_key)
+                    return (
+                      <button
+                        key={item.prompt_key}
+                        type="button"
+                        onClick={() => selectPrompt(item.prompt_key)}
+                        className={`sl-list-item${active ? ' active' : ''}${dirty ? ' sl-dirty-item' : ''}`}
+                      >
+                        <div className="sl-row">
+                          <span className="sl-name">{item.title}</span>
+                          <span className="sl-meta">{dirty ? <span className="sl-dirty-tag">编辑中</span> : (item.override ? '已覆盖' : '默认')}</span>
+                        </div>
+                        <div className="sl-key">{item.prompt_key}</div>
+                      </button>
+                    )
+                  }
                   return (
-                    <button
-                      key={item.prompt_key}
-                      type="button"
-                      onClick={() => selectPrompt(item.prompt_key)}
-                      className={`sl-list-item${active ? ' active' : ''}${dirty ? ' sl-dirty-item' : ''}`}
-                    >
-                      <div className="sl-row">
-                        <span className="sl-name">{item.title}</span>
-                        <span className="sl-meta">{dirty ? <span className="sl-dirty-tag">编辑中</span> : (item.override ? '已覆盖' : '默认')}</span>
-                      </div>
-                      <div className="sl-key">{item.prompt_key}</div>
-                    </button>
+                    <>
+                      {enabled.length > 0 && (
+                        <>
+                          <div className="sl-group-label">启用中 ({enabled.length})</div>
+                          {enabled.map(renderPrompt)}
+                        </>
+                      )}
+                      {disabled.length > 0 && (
+                        <>
+                          <div className="sl-group-label muted">未启用 ({disabled.length})</div>
+                          {disabled.map(renderPrompt)}
+                        </>
+                      )}
+                    </>
                   )
-                })}
+                })()}
           </div>
         </aside>
 
@@ -840,6 +879,14 @@ export default function SkillLibrary() {
                             <span className="sl-cs-title">{skillDraft.title || '(未命名)'}</span>
                             <span className="sl-cs-sep">·</span>
                             <span className="sl-cs-meta">{skillDraft.step_id || '未绑定步骤'}</span>
+                            <label className="sl-cs-check">
+                              <input type="checkbox" checked={skillDraft.enabled} onChange={(e) => updateSkillDraft('enabled', e.target.checked)} />
+                              启用
+                            </label>
+                            <label className="sl-cs-check">
+                              <input type="checkbox" checked={skillDraft.default_exposed} onChange={(e) => updateSkillDraft('default_exposed', e.target.checked)} />
+                              默认暴露
+                            </label>
                           </div>
                         ) : (
                           <>
@@ -1009,6 +1056,10 @@ export default function SkillLibrary() {
                             <span className="sl-cs-title">{promptDraft.title}</span>
                             <span className="sl-cs-sep">·</span>
                             <span className="sl-cs-meta">{promptDraft.prompt_key}</span>
+                            <label className="sl-cs-check">
+                              <input type="checkbox" checked={promptDraft.enabled} onChange={(e) => updatePromptDraft('enabled', e.target.checked)} />
+                              启用
+                            </label>
                           </div>
                         ) : (
                           <>
