@@ -119,6 +119,25 @@ function renderToolModules(modules: PromptModule[]): string {
     .join('\n\n' + '─'.repeat(48) + '\n\n')
 }
 
+function buildToolEffectiveSignature(modules: PromptModule[]): string {
+  return JSON.stringify(
+    modules
+      .filter((module) => module.required || module.enabled)
+      .map((module) => ({
+        module_key: module.module_key || '',
+        content: module.content.trim(),
+      }))
+      .filter((module) => module.module_key || module.content)
+      .sort((a, b) => a.module_key.localeCompare(b.module_key)),
+  )
+}
+
+function buildPromptEffectiveSignature(category: Exclude<PromptTab, 'skill'>, modules: PromptModule[]): string {
+  return category === 'tool'
+    ? buildToolEffectiveSignature(modules)
+    : renderModules(modules).trim()
+}
+
 // ── Draft cache types ─────────────────────────────────────────────────────
 type SkillCacheEntry  = { draft: SkillItem;  baseline: SkillItem;  serverConflict?: SkillItem  }
 type PromptCacheEntry = { draft: PromptItem; baseline: PromptItem; serverConflict?: PromptItem }
@@ -685,9 +704,21 @@ export default function SkillLibrary() {
       : renderModules(promptDraft?.default_modules || []),
     [promptDraft, tab],
   )
+  const effectivePromptSignature = useMemo(
+    () => tab === 'skill'
+      ? ''
+      : buildPromptEffectiveSignature(tab, promptDraft?.modules || []),
+    [promptDraft, tab],
+  )
+  const defaultEffectivePromptSignature = useMemo(
+    () => tab === 'skill'
+      ? ''
+      : buildPromptEffectiveSignature(tab, promptDraft?.default_modules || []),
+    [promptDraft, tab],
+  )
   const promptDefaultChanged = useMemo(
-    () => runtimePreview.trim() !== defaultRuntimePreview.trim(),
-    [defaultRuntimePreview, runtimePreview],
+    () => effectivePromptSignature !== defaultEffectivePromptSignature,
+    [defaultEffectivePromptSignature, effectivePromptSignature],
   )
   const promptModuleDiff = useMemo(() => {
     if (!promptDraft) {
@@ -705,7 +736,7 @@ export default function SkillLibrary() {
         added += 1
         continue
       }
-      if (module.content !== base.content || module.title !== base.title) changed += 1
+      if (module.content.trim() !== base.content.trim()) changed += 1
       const enabledNow = Boolean(module.required || module.enabled)
       const enabledBase = Boolean(base.required || base.enabled)
       if (enabledNow !== enabledBase) enabledChanged += 1
