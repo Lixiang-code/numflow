@@ -1,16 +1,120 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { TextareaHTMLAttributes } from 'react'
+import type { KeyboardEvent as ReactKeyboardEvent, TextareaHTMLAttributes } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { apiFetch, projectHeaders } from '../api'
 
 /**
+ * 轻量 Markdown 编辑增强（避免引入完整 MD 编辑器以减小构建体积）：
+ *   - Tab / Shift+Tab：插入/删除 2 空格缩进；多行选区时整体缩进
+ *   - Enter：自动续 `- ` `* ` `+ ` `>` `1.` 等列表前缀；空列表项再次 Enter 则清除
+ *   - Cmd/Ctrl+B / Cmd/Ctrl+I：将选区包裹为 `**bold**` / `*italic*`
+ * 通过 document.execCommand('insertText') 写入，保留浏览器原生 undo/redo 历史。
+ */
+const INDENT = '  '
+function mdInsert(el: HTMLTextAreaElement, text: string): void {
+  // execCommand 仍是保留 undo 栈的最佳手段；失败则回退到 setRangeText。
+  if (!document.execCommand || !document.execCommand('insertText', false, text)) {
+    const { selectionStart: s, selectionEnd: e } = el
+    el.setRangeText(text, s, e, 'end')
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+}
+function handleMarkdownKeyDown(e: ReactKeyboardEvent<HTMLTextAreaElement>): void {
+  const el = e.currentTarget
+  const { selectionStart: s, selectionEnd: ee, value } = el
+
+  // ── Tab / Shift+Tab：缩进 ─────────────────────────────────────
+  if (e.key === 'Tab') {
+    e.preventDefault()
+    if (s === ee) {
+      if (e.shiftKey) {
+        const lineStart = value.lastIndexOf('\n', s - 1) + 1
+        const head = value.slice(lineStart, lineStart + INDENT.length)
+        if (head === INDENT) {
+          el.setSelectionRange(lineStart, lineStart + INDENT.length)
+          mdInsert(el, '')
+          el.setSelectionRange(s - INDENT.length, s - INDENT.length)
+        }
+      } else {
+        mdInsert(el, INDENT)
+      }
+      return
+    }
+    const lineStart = value.lastIndexOf('\n', s - 1) + 1
+    const lineEndRaw = value.indexOf('\n', ee > s ? ee - 1 : ee)
+    const lineEnd = lineEndRaw === -1 ? value.length : lineEndRaw
+    const block = value.slice(lineStart, lineEnd)
+    const lines = block.split('\n')
+    const next = e.shiftKey
+      ? lines.map((l) => (l.startsWith(INDENT) ? l.slice(INDENT.length) : l.replace(/^ /, '')))
+      : lines.map((l) => INDENT + l)
+    const replaced = next.join('\n')
+    el.setSelectionRange(lineStart, lineEnd)
+    mdInsert(el, replaced)
+    el.setSelectionRange(lineStart, lineStart + replaced.length)
+    return
+  }
+
+  // ── Enter：列表续行 ───────────────────────────────────────────
+  if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    if (s !== ee) return
+    const lineStart = value.lastIndexOf('\n', s - 1) + 1
+    const lineEndIdx = value.indexOf('\n', s)
+    const lineEnd = lineEndIdx === -1 ? value.length : lineEndIdx
+    const line = value.slice(lineStart, lineEnd)
+    // 匹配：可选缩进 + 列表前缀（- * + > 或 N.） + 至少一个空格 + 内容
+    const m = line.match(/^(\s*)(?:([-*+>])|(\d+)\.)(\s+)(.*)$/)
+    if (!m) return
+    const indent = m[1] ?? ''
+    const space = m[4]
+    const rest = m[5]
+    const beforeCursor = value.slice(lineStart, s)
+    const prefixLen = (m[1] ?? '').length + (m[2] ? 1 : (m[3]!.length + 1)) + space.length
+    // 光标必须在前缀之后才触发（避免在前缀中间按 Enter 时干扰）
+    if (beforeCursor.length < prefixLen) return
+    if (rest.trim() === '') {
+      // 空列表项：清除当前行前缀
+      e.preventDefault()
+      el.setSelectionRange(lineStart, lineEnd)
+      mdInsert(el, '')
+      return
+    }
+    e.preventDefault()
+    const newBullet = m[2] ? m[2] : `${Number(m[3]) + 1}.`
+    mdInsert(el, '\n' + indent + newBullet + space)
+    return
+  }
+
+  // ── Cmd/Ctrl+B / I：粗体 / 斜体 ───────────────────────────────
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 'b' || e.key === 'B' || e.key === 'i' || e.key === 'I')) {
+    const isBold = e.key === 'b' || e.key === 'B'
+    e.preventDefault()
+    const sel = value.slice(s, ee)
+    const wrap = isBold ? '**' : '*'
+    const placeholder = isBold ? '粗体' : '斜体'
+    const inner = sel || placeholder
+    mdInsert(el, `${wrap}${inner}${wrap}`)
+    if (!sel) {
+      const cursor = s + wrap.length
+      el.setSelectionRange(cursor, cursor + placeholder.length)
+    }
+    return
+  }
+}
+
+/**
  * 自适应高度文本框：默认显示「内容行数 + 1」行，超过 10 行则定高 + 出现滚动条。
  * 同时禁用拖动 resize，以保证页面节奏稳定。
+ * 传入 `markdown` 时，启用 Tab 缩进 / 列表续行 / 粗斜体快捷键。
  */
-type AutoTextareaProps = TextareaHTMLAttributes<HTMLTextAreaElement> & { value: string; maxRows?: number }
+type AutoTextareaProps = TextareaHTMLAttributes<HTMLTextAreaElement> & {
+  value: string
+  maxRows?: number
+  markdown?: boolean
+}
 const DEFAULT_MAX_ROWS = 10
 
-function AutoTextarea({ value, className, onInput, maxRows = DEFAULT_MAX_ROWS, ...rest }: AutoTextareaProps) {
+function AutoTextarea({ value, className, onInput, onKeyDown, maxRows = DEFAULT_MAX_ROWS, markdown, ...rest }: AutoTextareaProps) {
   const ref = useRef<HTMLTextAreaElement | null>(null)
 
   const resize = useCallback(() => {
@@ -49,6 +153,10 @@ function AutoTextarea({ value, className, onInput, maxRows = DEFAULT_MAX_ROWS, .
       onInput={(e) => {
         resize()
         onInput?.(e)
+      }}
+      onKeyDown={(e) => {
+        if (markdown) handleMarkdownKeyDown(e)
+        if (!e.defaultPrevented) onKeyDown?.(e)
       }}
       rows={1}
       {...rest}
@@ -1121,8 +1229,9 @@ export default function SkillLibrary() {
                                   className="sl-module-content sl-input-ai"
                                   value={module.content}
                                   maxRows={singleModule ? 30 : 10}
+                                  markdown
                                   onChange={(e) => updateSkillModule(realIndex, { content: e.target.value })}
-                                  placeholder="模块内容（AI 可见，支持 Markdown）"
+                                  placeholder="模块内容（AI 可见，支持 Markdown；Tab 缩进 / Enter 续列表 / Ctrl+B 粗体 / Ctrl+I 斜体）"
                                 />
                                 <div className="sl-module-foot">
                                   <button type="button" className="btn tiny danger" disabled={module.required} onClick={() => removeSkillModule(realIndex)}>
@@ -1291,8 +1400,9 @@ export default function SkillLibrary() {
                                   className="sl-module-content sl-input-ai"
                                   value={module.content}
                                   maxRows={singleModule ? 30 : 10}
+                                  markdown
                                   onChange={(e) => updatePromptModule(realIndex, { content: e.target.value })}
-                                  placeholder="模块内容（AI 可见，支持 Markdown）"
+                                  placeholder="模块内容（AI 可见，支持 Markdown；Tab 缩进 / Enter 续列表 / Ctrl+B 粗体 / Ctrl+I 斜体）"
                                 />
                               </div>
                             )
