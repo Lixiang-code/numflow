@@ -65,12 +65,20 @@ type ConversationTurn = {
   messages: LlmMessage[]
 }
 
+type SkillMeta = {
+  slug: string
+  title: string
+  summary: string
+  step_id: string
+}
+
 type ToolsMeta = {
   phase: string
   tools: string[]
   tool_schemas: ToolSchema[]
   parallel_tool_calls: boolean
   tool_choice: string
+  skills_meta: SkillMeta[]
 }
 
 type PromptSource = {
@@ -267,6 +275,7 @@ function rebuildFromEvents(events: SseEvent[]) {
         tool_schemas: Array.isArray(ev.raw.tool_schemas) ? ev.raw.tool_schemas as ToolSchema[] : [],
         parallel_tool_calls: Boolean(ev.raw.parallel_tool_calls),
         tool_choice: String(ev.raw.tool_choice ?? 'auto'),
+        skills_meta: Array.isArray(ev.raw.skills_meta) ? ev.raw.skills_meta as SkillMeta[] : [],
       }
     } else if (type === 'prompt_sources') {
       const srcPhase = String(ev.raw.phase ?? phase)
@@ -423,8 +432,32 @@ function LlmMessageBubble({ msg, index }: { msg: LlmMessage; index: number }) {
   )
 }
 
+/** Convert a JSON Schema params object to a compact one-line example string. */
+function schemaToCompactExample(params: Record<string, unknown>): string {
+  const props = (params as any)?.properties as Record<string, any> | undefined
+  if (!props) return '{}'
+  const required = new Set<string>((params as any).required ?? [])
+  const reqEntries: [string, unknown][] = []
+  const optEntries: [string, unknown][] = []
+  for (const [key, schema] of Object.entries(props)) {
+    let val: unknown
+    if (schema.enum !== undefined && schema.enum.length > 0) val = schema.enum[0]
+    else if (schema.default !== undefined) val = schema.default
+    else if (schema.type === 'number' || schema.type === 'integer') val = 0
+    else if (schema.type === 'boolean') val = false
+    else if (schema.type === 'array') val = []
+    else if (schema.type === 'object') val = {}
+    else val = 'string'
+    ;(required.has(key) ? reqEntries : optEntries).push([key, val])
+  }
+  const obj: Record<string, unknown> = {}
+  for (const [k, v] of [...reqEntries, ...optEntries]) obj[k] = v
+  return JSON.stringify(obj)
+}
+
 function ToolsMetaBadge({ meta }: { meta: ToolsMeta }) {
   const [open, setOpen] = useState(false)
+  const skills = meta.skills_meta ?? []
   return (
     <div style={{ marginBottom: '8px', borderRadius: '6px', border: '1px solid #2d3a5a', background: '#0e1525', overflow: 'hidden' }}>
       <div
@@ -436,27 +469,52 @@ function ToolsMetaBadge({ meta }: { meta: ToolsMeta }) {
           parallel_tool_calls: {meta.parallel_tool_calls ? '✅ true' : '❌ false'}
         </span>
         <span style={{ fontSize: '0.68rem', color: '#888' }}>tool_choice: {meta.tool_choice}</span>
-        <span style={{ fontSize: '0.68rem', color: '#aaa' }}>{meta.tools.length} 个工具可用</span>
+        <span style={{ fontSize: '0.68rem', color: '#aaa' }}>{meta.tools.length} 个工具</span>
+        {skills.length > 0 && (
+          <span style={{ fontSize: '0.68rem', color: '#c0a060' }}>✨ {skills.length} 个默认SKILL</span>
+        )}
         <span style={{ marginLeft: 'auto', fontSize: '0.65rem', color: '#666' }}>{open ? '▲ 折叠' : '▼ 展开'}</span>
       </div>
       {open && (
         <div style={{ padding: '6px 10px 8px', borderTop: '1px solid #1a2a4a' }}>
+          {/* ── Skills section ── */}
+          {skills.length > 0 && (
+            <div style={{ marginBottom: '10px' }}>
+              <div style={{ fontSize: '0.68rem', color: '#c0a060', fontWeight: 700, marginBottom: '5px' }}>✨ 默认暴露 SKILL</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                {skills.map(s => (
+                  <div key={s.slug} style={{ display: 'flex', alignItems: 'baseline', gap: '6px', background: '#1a1808', border: '1px solid #3a3010', borderRadius: '4px', padding: '4px 8px' }}>
+                    <code style={{ fontSize: '0.65rem', color: '#e8c840', minWidth: '120px', flexShrink: 0 }}>{s.slug}</code>
+                    <span style={{ fontSize: '0.7rem', color: '#d0b860', fontWeight: 600 }}>{s.title}</span>
+                    {s.summary && <span style={{ fontSize: '0.66rem', color: '#888', marginLeft: '4px' }}>{s.summary}</span>}
+                    {s.step_id && <code style={{ fontSize: '0.6rem', color: '#666', marginLeft: 'auto' }}>{s.step_id}</code>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {/* ── Tool name badges ── */}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginBottom: meta.tool_schemas.length > 0 ? '8px' : 0 }}>
             {meta.tools.map(t => (
               <code key={t} style={{ fontSize: '0.65rem', background: '#1a2030', padding: '2px 6px', borderRadius: '3px', color: '#9ab0d0' }}>{t}</code>
             ))}
           </div>
+          {/* ── Tool schemas (compact) ── */}
           {meta.tool_schemas.length > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
               {meta.tool_schemas.map((schema) => (
-                <div key={schema.name} style={{ border: '1px solid #223455', borderRadius: '6px', background: '#111827', padding: '8px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                    <code style={{ color: '#7ec8e3', fontSize: '0.72rem', fontWeight: 700 }}>{schema.name}</code>
+                <div key={schema.name} style={{ border: '1px solid #223455', borderRadius: '6px', background: '#111827', padding: '6px 8px' }}>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', marginBottom: '3px' }}>
+                    <code style={{ color: '#7ec8e3', fontSize: '0.72rem', fontWeight: 700, flexShrink: 0 }}>{schema.name}</code>
+                    {schema.description && (
+                      <span style={{ color: '#8898aa', fontSize: '0.67rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={schema.description}>
+                        {schema.description.split('\n')[0]}
+                      </span>
+                    )}
                   </div>
-                  {schema.description && (
-                    <div style={{ color: '#c7d2e1', fontSize: '0.74rem', marginBottom: '6px', whiteSpace: 'pre-wrap' }}>{schema.description}</div>
-                  )}
-                  <CollapsibleText text={JSON.stringify(schema.parameters, null, 2)} previewLen={700} />
+                  <code style={{ fontSize: '0.65rem', color: '#a0c0a0', wordBreak: 'break-all', lineHeight: 1.4 }}>
+                    {schemaToCompactExample(schema.parameters as Record<string, unknown>)}
+                  </code>
                 </div>
               ))}
             </div>
@@ -862,6 +920,7 @@ export default function AgentTest() {
                 tool_schemas: Array.isArray(raw.tool_schemas) ? raw.tool_schemas as ToolSchema[] : [],
                 parallel_tool_calls: Boolean(raw.parallel_tool_calls),
                 tool_choice: String(raw.tool_choice ?? 'auto'),
+                skills_meta: Array.isArray(raw.skills_meta) ? raw.skills_meta as SkillMeta[] : [],
               },
             }))
           } else if (type === 'prompt_sources') {
