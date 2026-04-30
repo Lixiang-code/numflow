@@ -407,10 +407,12 @@ _DEEPSEEK_STATIC_MODELS = ["deepseek-v4-flash", "deepseek-v4-pro"]
 
 @router.get("/ai-models")
 def list_ai_models():
-    """返回可用于 Agent 的文本生成模型列表，优先从 DashScope 拉取，失败则返回内置列表；DeepSeek 模型静态附加。"""
-    from app.config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL
+    """返回可用于 Agent 的文本生成模型列表，按提供商分组。"""
+    from app.config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, MIMO_CHAT_MODELS
     from openai import OpenAI
-    qwen_models = []
+
+    # ── 通义千问 (DashScope) ──────────────────────────────────────────────
+    qwen_models: List[str] = []
     source = "fallback"
     error_msg = None
     try:
@@ -422,7 +424,6 @@ def list_ai_models():
                 continue
             if any(mid.startswith(p) for p in _TEXT_MODEL_PREFIXES):
                 qwen_models.append(mid)
-        # 排序：qwen3.6 系列优先
         qwen_models.sort(key=lambda x: (
             0 if x.startswith("qwen3.6") else
             1 if x.startswith("qwen3.5") else
@@ -434,9 +435,21 @@ def list_ai_models():
         qwen_models = [m for m in FALLBACK_MODELS if not m.startswith("deepseek-")]
         error_msg = str(e)
 
-    # 合并 DeepSeek 静态模型（去重）
-    models = qwen_models + [m for m in _DEEPSEEK_STATIC_MODELS if m not in qwen_models]
-    result: dict = {"models": models, "source": source}
+    # ── DeepSeek ──────────────────────────────────────────────────────────
+    deepseek_models = list(_DEEPSEEK_STATIC_MODELS)
+
+    # ── Mimo (小米) ───────────────────────────────────────────────────────
+    mimo_models = list(MIMO_CHAT_MODELS)
+
+    groups = [
+        {"label": "通义千问", "models": qwen_models},
+        {"label": "DeepSeek", "models": deepseek_models},
+        {"label": "Mimo（小米）", "models": mimo_models},
+    ]
+
+    # 保留扁平 models 字段向下兼容
+    flat = qwen_models + deepseek_models + mimo_models
+    result: dict = {"models": flat, "groups": groups, "source": source}
     if error_msg:
         result["error"] = error_msg
     return result

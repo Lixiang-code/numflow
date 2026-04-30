@@ -505,8 +505,8 @@ export default function Workbench() {
   const [activeDisplayName, setActiveDisplayName] = useState<string>('')
   /** 当前项目绑定的 AI 模型 */
   const [aiModel, setAiModel] = useState<string>('')
-  /** 可用 AI 模型列表 */
-  const [aiModels, setAiModels] = useState<string[]>([])
+  /** 可用 AI 模型分组列表 */
+  const [aiModelGroups, setAiModelGroups] = useState<Array<{ label: string; models: string[] }>>([])
   const [modelSwitching, setModelSwitching] = useState(false)
 
   // -------- 第4轮新增状态 --------
@@ -631,8 +631,15 @@ export default function Workbench() {
 
   const loadAiModels = useCallback(async () => {
     try {
-      const r = (await apiFetch('/meta/ai-models', { headers })) as { models: string[] }
-      setAiModels(Array.isArray(r.models) ? r.models : [])
+      const r = (await apiFetch('/meta/ai-models', { headers })) as {
+        models?: string[]
+        groups?: Array<{ label: string; models: string[] }>
+      }
+      if (Array.isArray(r.groups) && r.groups.length > 0) {
+        setAiModelGroups(r.groups)
+      } else if (Array.isArray(r.models)) {
+        setAiModelGroups([{ label: '模型', models: r.models }])
+      }
     } catch { /* ignore */ }
   }, [headers])
 
@@ -1527,15 +1534,19 @@ export default function Workbench() {
           <select
             id="ai-model-sel"
             value={aiModel}
-            disabled={modelSwitching || aiModels.length === 0}
+            disabled={modelSwitching || aiModelGroups.length === 0}
             onChange={(e) => void switchAiModel(e.target.value)}
-            style={{ fontSize: '0.78rem', maxWidth: 160 }}
+            style={{ fontSize: '0.78rem', maxWidth: 180 }}
           >
-            {aiModel && !aiModels.includes(aiModel) && (
+            {aiModel && !aiModelGroups.some((g) => g.models.includes(aiModel)) && (
               <option value={aiModel}>{aiModel}</option>
             )}
-            {aiModels.map((m) => (
-              <option key={m} value={m}>{m}</option>
+            {aiModelGroups.map((g) => (
+              <optgroup key={g.label} label={g.label}>
+                {g.models.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </optgroup>
             ))}
           </select>
           {modelSwitching && <span style={{ marginLeft: 4, fontSize: '0.7rem' }}>切换中…</span>}

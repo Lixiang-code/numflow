@@ -456,12 +456,13 @@ function AttrNodeRow({
    子组件：AI 模型选择器（创建时绑定，可在 Workbench 切换）
    ───────────────────────────────────────────────────────────── */
 function ModelSelector({
-  aiModel, setAiModel, aiModels,
+  aiModel, setAiModel, aiModelGroups,
 }: {
   aiModel: string
   setAiModel: (m: string) => void
-  aiModels: string[]
+  aiModelGroups: Array<{ label: string; models: string[] }>
 }) {
+  const firstModel = aiModelGroups[0]?.models[0] ?? '…'
   return (
     <div className="form-section" style={{ marginTop: '1rem' }}>
       <div className="form-section-title">AI 模型</div>
@@ -471,9 +472,13 @@ function ModelSelector({
           onChange={(e) => setAiModel(e.target.value)}
           style={{ flex: 1 }}
         >
-          <option value="">系统默认（{aiModels[0] ?? '…'}）</option>
-          {aiModels.map((m) => (
-            <option key={m} value={m}>{m}</option>
+          <option value="">系统默认（{firstModel}）</option>
+          {aiModelGroups.map((g) => (
+            <optgroup key={g.label} label={g.label}>
+              {g.models.map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </optgroup>
           ))}
         </select>
         {aiModel && (
@@ -508,13 +513,17 @@ export default function NewProject() {
   const [aiDesignSubsystems, setAiDesignSubsystems] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [aiModel, setAiModel] = useState('')
-  const [aiModels, setAiModels] = useState<string[]>([])
+  const [aiModelGroups, setAiModelGroups] = useState<Array<{ label: string; models: string[] }>>([])
 
   // 拉取可用模型列表（无需 project context，直接用公开端点）
   useEffect(() => {
     apiFetch('/meta/ai-models').then((r) => {
-      const res = r as { models: string[] }
-      setAiModels(Array.isArray(res.models) ? res.models : [])
+      const res = r as { models?: string[]; groups?: Array<{ label: string; models: string[] }> }
+      if (Array.isArray(res.groups) && res.groups.length > 0) {
+        setAiModelGroups(res.groups)
+      } else if (Array.isArray(res.models)) {
+        setAiModelGroups([{ label: '模型', models: res.models }])
+      }
     }).catch(() => {})
   }, [])
 
@@ -1149,7 +1158,7 @@ export default function NewProject() {
                 </div>
 
                 {/* AI 模型选择 */}
-                <ModelSelector aiModel={aiModel} setAiModel={setAiModel} aiModels={aiModels} />
+                <ModelSelector aiModel={aiModel} setAiModel={setAiModel} aiModelGroups={aiModelGroups} />
 
                 <div className="wizard-actions">
                   <button type="button" className="btn ghost" onClick={() => setWizardStep(1)}>← 上一步</button>
@@ -1191,7 +1200,7 @@ export default function NewProject() {
               />
             </div>
             {/* AI 模型选择 */}
-            <ModelSelector aiModel={aiModel} setAiModel={setAiModel} aiModels={aiModels} />
+            <ModelSelector aiModel={aiModel} setAiModel={setAiModel} aiModelGroups={aiModelGroups} />
             <div className="wizard-actions">
               <button type="button" className="btn ghost" onClick={resetDraft}>重置草稿</button>
               <button

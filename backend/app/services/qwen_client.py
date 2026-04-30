@@ -9,12 +9,17 @@ from openai import OpenAI
 from app.config import (
     DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, QWEN_MODEL,
     DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODELS,
+    MIMO_API_KEY, MIMO_BASE_URL,
 )
 
 
 def _is_deepseek_model(model: str) -> bool:
     """Only v4 models route to DeepSeek's own API; older deepseek-* models are served by DashScope."""
     return model in DEEPSEEK_MODELS
+
+
+def _is_mimo_model(model: str) -> bool:
+    return model.startswith("mimo-")
 
 
 def get_client() -> OpenAI:
@@ -29,10 +34,18 @@ def get_deepseek_client() -> OpenAI:
     return OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 
 
+def get_mimo_client() -> OpenAI:
+    if not MIMO_API_KEY:
+        raise RuntimeError("MIMO_API_KEY 未配置（backend/.env 或环境变量）")
+    return OpenAI(api_key=MIMO_API_KEY, base_url=MIMO_BASE_URL)
+
+
 def get_client_for_model(model: str) -> OpenAI:
     """Return the appropriate OpenAI-compatible client based on model name."""
     if _is_deepseek_model(model):
         return get_deepseek_client()
+    if _is_mimo_model(model):
+        return get_mimo_client()
     return get_client()
 
 
