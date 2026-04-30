@@ -442,13 +442,13 @@ def list_ai_models():
     mimo_models = list(MIMO_CHAT_MODELS)
 
     groups = [
-        {"label": "通义千问", "models": qwen_models},
-        {"label": "DeepSeek", "models": deepseek_models},
         {"label": "Mimo（小米）", "models": mimo_models},
+        {"label": "DeepSeek", "models": deepseek_models},
+        {"label": "通义千问", "models": qwen_models},
     ]
 
     # 保留扁平 models 字段向下兼容
-    flat = qwen_models + deepseek_models + mimo_models
+    flat = mimo_models + deepseek_models + qwen_models
     result: dict = {"models": flat, "groups": groups, "source": source}
     if error_msg:
         result["error"] = error_msg
@@ -481,9 +481,10 @@ def get_ai_model(p: ProjectDB = Depends(get_project_read)):
 def set_ai_model(body: AiModelBody, p: ProjectDB = Depends(get_project_write)):
     """为当前项目设置 AI 模型（持久化到 project_settings）。"""
     p.conn.execute(
-        """INSERT INTO project_settings (key, value_json)
-           VALUES ('agent_model', ?)
-           ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json""",
+        """INSERT INTO project_settings (key, value_json, updated_at)
+           VALUES ('agent_model', ?, datetime('now'))
+           ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+                                          updated_at  = excluded.updated_at""",
         (json.dumps(body.model),),
     )
     p.conn.commit()
