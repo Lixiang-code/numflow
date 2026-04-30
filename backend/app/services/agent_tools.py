@@ -1580,12 +1580,12 @@ _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "get_default_system_rules": "读取系统内置的默认校验规则配置。",
     "glossary_register": "向术语表中登记一个新的游戏术语及其解释。",
     "glossary_lookup": "在术语表中查询指定术语的中文定义。",
-    "glossary_list": "列出术语表中所有已登记的术语条目。",
+    "glossary_list": "列出术语表中所有已登记的术语条目（cols+rows 紧凑格式，支持 kind_filter 过滤和 limit/offset 分页）。",
     "const_register": "在常数表中登记一个新的数值常量。",
     "const_tag_register": "为常数创建或登记一个分类标签。",
     "const_tag_list": "列出所有已定义的常数分类标签。",
     "const_set": "修改已登记常数的数值。",
-    "const_list": "列出所有已登记的常数及其当前值。",
+    "const_list": "列出所有已登记的常数（cols+rows 紧凑格式，支持 tags_filter 过滤和 limit/offset 分页）。",
     "const_delete": "删除一个已登记的常数条目。",
     "list_directories": "查看项目业务表的目录树结构。",
     "set_table_directory": "将指定表归入某个目录分类节点。",
@@ -3726,30 +3726,14 @@ def _const_list(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any
         params.append(scope)
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-    total_row = conn.execute(
-        f"SELECT count(*) FROM _constants {where}", params
-    ).fetchone()
-    total = total_row[0] if total_row else 0
+    base_sql = (
+        f"SELECT name_en, name_zh, value_json, brief, scope_table, tags "
+        f"FROM _constants {where} ORDER BY name_en"
+    )
 
-    page_params = list(params)
-    if limit > 0:
-        page_params += [limit, offset]
-        page_sql = (
-            f"SELECT name_en, name_zh, value_json, brief, scope_table, tags "
-            f"FROM _constants {where} ORDER BY name_en LIMIT ? OFFSET ?"
-        )
-    else:
-        page_sql = (
-            f"SELECT name_en, name_zh, value_json, brief, scope_table, tags "
-            f"FROM _constants {where} ORDER BY name_en"
-        )
-
-    cur = conn.execute(page_sql, page_params)
-
-    rows: List[List[Any]] = []
-    for r in cur.fetchall():
+    def _parse_row(r: Any) -> List[Any]:
         try:
-            value = json.loads(r[2])  # value_json
+            value = json.loads(r[2])
         except Exception:  # noqa: BLE001
             value = None
         raw_tags = r[5]
@@ -3757,22 +3741,44 @@ def _const_list(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any
             item_tags: List[str] = json.loads(raw_tags) if isinstance(raw_tags, str) and raw_tags else []
         except Exception:  # noqa: BLE001
             item_tags = []
-
-        # 按标签过滤（tags_filter 非空时：仅返回至少含一个匹配标签的常数）
-        if tags_filter and not any(t in item_tags for t in tags_filter):
-            continue
-
-        rows.append([r[0], r[1], value, r[3], r[4], item_tags])
+        return [r[0], r[1], value, r[3], r[4], item_tags]
 
     result: Dict[str, Any] = {
         "ok": True,
-        "total": total if not tags_filter else len(rows),
         "cols": ["name_en", "name_zh", "value", "brief", "scope_table", "tags"],
-        "rows": rows,
     }
-    if limit > 0 and not tags_filter and total > offset + len(rows):
-        result["has_more"] = True
-        result["next_offset"] = offset + len(rows)
+
+    if tags_filter:
+        # 全量取出后 Python 过滤，再分页——保证 total/has_more 对过滤后集合计算
+        all_rows = [
+            _parse_row(r)
+            for r in conn.execute(base_sql, params).fetchall()
+            if any(t in (json.loads(r[5]) if isinstance(r[5], str) and r[5] else []) for t in tags_filter)
+        ]
+        total_filtered = len(all_rows)
+        if offset:
+            all_rows = all_rows[offset:]
+        if limit > 0 and len(all_rows) > limit:
+            all_rows = all_rows[:limit]
+            result["has_more"] = True
+            result["next_offset"] = offset + limit
+        result["total"] = total_filtered
+        result["rows"] = all_rows
+    else:
+        total_row = conn.execute(f"SELECT count(*) FROM _constants {where}", params).fetchone()
+        total = total_row[0] if total_row else 0
+        if limit > 0:
+            page_params = list(params) + [limit, offset]
+            cur = conn.execute(f"{base_sql} LIMIT ? OFFSET ?", page_params)
+        else:
+            cur = conn.execute(base_sql, params)
+        rows = [_parse_row(r) for r in cur.fetchall()]
+        result["total"] = total
+        result["rows"] = rows
+        if limit > 0 and total > offset + len(rows):
+            result["has_more"] = True
+            result["next_offset"] = offset + len(rows)
+
     return result
 
 

@@ -406,3 +406,76 @@ def test_glossary_list_no_timestamps_in_output():
     assert "created_at" not in raw
     assert "updated_at" not in raw
 
+
+
+# ─── tags_filter + limit/offset 组合回归测试 ────────────────────────────────
+
+
+def _register_interleaved_consts(conn, total: int = 20) -> None:
+    """注册 total 个常数，奇偶交替打 'combat' 和 'economy' 标签。"""
+    now = "2026-01-01T00:00:00Z"
+    for i in range(total):
+        tag = "combat" if i % 2 == 0 else "economy"
+        conn.execute(
+            "INSERT OR REPLACE INTO _constants"
+            " (name_en, name_zh, value_json, brief, scope_table, tags, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (f"const_{i:02d}", f"常数{i}", str(float(i)), f"说明{i}", None, f'["{tag}"]', now, now),
+        )
+    conn.commit()
+
+
+def test_tags_filter_total_reflects_full_filtered_count():
+    """tags_filter 时 total 应为过滤后的全部条数，而非 SQL 分页截断后的条数。"""
+    conn = _new_conn()
+    _register_interleaved_consts(conn, 20)
+    p = _project_db(conn)
+
+    result = json.loads(dispatch_tool("const_list", {"tags_filter": ["combat"], "limit": 5, "offset": 0}, p))
+    d = result["data"]
+    # 20 条中 10 条是 combat（索引 0,2,4...18）
+    assert d["total"] == 10, f"total 应为 10，实际={d['total']}"
+    assert len(d["rows"]) == 5, f"返回行数应为 5，实际={len(d['rows'])}"
+
+
+def test_tags_filter_has_more_appears_when_paged():
+    """tags_filter + limit 不足以覆盖全部过滤结果时，应出现 has_more 和 next_offset。"""
+    conn = _new_conn()
+    _register_interleaved_consts(conn, 20)
+    p = _project_db(conn)
+
+    result = json.loads(dispatch_tool("const_list", {"tags_filter": ["combat"], "limit": 4, "offset": 0}, p))
+    d = result["data"]
+    assert d.get("has_more") is True, "应出现 has_more"
+    assert d.get("next_offset") == 4, f"next_offset 应为 4，实际={d.get('next_offset')}"
+
+
+def test_tags_filter_offset_pages_correctly():
+    """tags_filter + offset 应在过滤后集合上正确跳过前 N 条。"""
+    conn = _new_conn()
+    _register_interleaved_consts(conn, 20)
+    p = _project_db(conn)
+
+    # 无偏移：前 3 个 combat 常数
+    r0 = json.loads(dispatch_tool("const_list", {"tags_filter": ["combat"], "limit": 3, "offset": 0}, p))
+    names_0 = [row[0] for row in r0["data"]["rows"]]
+
+    # 偏移 3：应得到第 4~6 个 combat 常数（与前面不重叠）
+    r1 = json.loads(dispatch_tool("const_list", {"tags_filter": ["combat"], "limit": 3, "offset": 3}, p))
+    names_1 = [row[0] for row in r1["data"]["rows"]]
+
+    assert names_0 != names_1, "两页应返回不同常数"
+    assert not set(names_0) & set(names_1), "两页不应有重叠"
+
+
+def test_tags_filter_without_limit_returns_all_matching():
+    """tags_filter 不带 limit 时，应返回全部过滤后的条目。"""
+    conn = _new_conn()
+    _register_interleaved_consts(conn, 20)
+    p = _project_db(conn)
+
+    result = json.loads(dispatch_tool("const_list", {"tags_filter": ["combat"]}, p))
+    d = result["data"]
+    assert d["total"] == 10
+    assert len(d["rows"]) == 10
+    assert d.get("has_more") is None
