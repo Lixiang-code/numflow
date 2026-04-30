@@ -204,6 +204,9 @@ def call_calculator(
             return {"ok": True, "value": rr[0], "found": True, "fallback": True}
 
     if not rr:
+        default_value = mm.get("default_value")
+        if default_value is not None:
+            return {"ok": True, "value": default_value, "found": False, "source": "default"}
         return {"ok": True, "value": None, "found": False, "sql": sql, "params": params}
     return {"ok": True, "value": rr[0], "found": True}
 

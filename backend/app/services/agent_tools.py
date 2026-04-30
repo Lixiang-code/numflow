@@ -962,7 +962,9 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "     若第三维切片数只有 1，可写常量；若切片数 > 1，则整表内容必须改为 formula。\n"
                 "     call_calculator 会优先按公式计算 level 切片；仅在单切片常量模式下才会回退基准值。\n"
                 "  - 'static'：仅保留给历史非 matrix_resource 场景，matrix_resource 禁用。\n"
-                "建表后会自动注册一个名为 <table>_lookup 的 calculator，供后续 call_calculator 查询。"
+                "建表后会自动注册一个名为 <table>_lookup 的 calculator，供后续 call_calculator 查询。\n"
+                "【缺省值】default_value（推荐 0）：未显式写入的单元格调用 call_calculator 时返回该值。"
+                "agent 只需写入非零（非缺省）的单元格，稀疏矩阵场景下可大幅减少写入量。"
             ),
             "parameters": {
                 "type": "object",
@@ -1012,6 +1014,11 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                         "description": "表的标签列表（至少1个），用于相关常数筛选。",
                         "minItems": 1,
                     },
+                    "default_value": {
+                        "type": "number",
+                        "default": 0,
+                        "description": "未显式写入的单元格的缺省返回值。分配表（matrix_attr/matrix_resource）强烈建议填 0：这样 agent 只需写非零单元格，空单元格查询自动返回 0 而非 null。",
+                    },
                 },
                 "required": ["table_name", "display_name", "kind", "directory", "rows", "cols"],
             },
@@ -1024,7 +1031,9 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
             "description": (
                 "向 matrix 表批量写入交叉点值。每项 {row, col, level (可空), value, note, formula}。一次 ≤200 条。\n"
                 "scale_mode='none' 时 level 字段自动忽略（存 NULL）；\n"
-                "matrix_resource + scale_mode='fallback' 时：第三维轴值可手填；但若出现多个第三维切片，则整表内容必须全用 formula，不能混写常量。"
+                "matrix_resource + scale_mode='fallback' 时：第三维轴值可手填；但若出现多个第三维切片，则整表内容必须全用 formula，不能混写常量。\n"
+                "【稀疏写入】若建表时设置了 default_value（通常为 0），则只需写入非缺省值的单元格；"
+                "未写入的单元格通过 call_calculator 查询时自动返回 default_value，无需显式写 0。"
             ),
             "parameters": {
                 "type": "object",
@@ -3311,6 +3320,7 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                     value_format=str(args.get("value_format", "0.00%")),
                     scale_mode=args.get("scale_mode") or None,
                     tags=args.get("tags") or [],
+                    default_value=args.get("default_value"),
                 )
             except ValueError as e:
                 out = {

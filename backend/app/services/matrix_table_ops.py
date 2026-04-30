@@ -258,6 +258,7 @@ def create_matrix_table(
     register_calc: bool = True,
     scale_mode: Optional[str] = None,        # none | fallback | static(旧)
     tags: Optional[List[str]] = None,
+    default_value: Optional[float] = None,   # 未写入单元格的缺省返回值；分配表通常填 0
     # none    = 无等级维（matrix_attr 默认）；所有 cell 存 level=NULL，调用时忽略 level 参数
     # fallback= matrix_resource 的“第三维=切片/公式”模式：
     #           单切片时可写常量；切片数 > 1 时内容必须改为公式
@@ -327,6 +328,7 @@ def create_matrix_table(
         "third_axis_name": "level" if kind == "matrix_resource" and scale_mode != "none" else "",
         "third_axis_values_manual": bool(kind == "matrix_resource" and scale_mode != "none"),
         "third_axis_content_rule": "single_slice_literal_or_formula" if kind == "matrix_resource" and scale_mode != "none" else "",
+        "default_value": default_value,
     }
 
     schema_payload = {
