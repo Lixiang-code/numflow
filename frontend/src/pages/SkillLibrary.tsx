@@ -243,6 +243,16 @@ export default function SkillLibrary() {
   const [conflictPromptKeys, setConflictPromptKeys] = useState<Set<string>>(new Set())
   const markSkillConflict   = useCallback((key: string) => setConflictSkillKeys(p   => { const n = new Set(p); n.add(key); return n }),    [])
   const clearSkillConflict  = useCallback((key: string) => setConflictSkillKeys(p   => { const n = new Set(p); n.delete(key); return n }), [])
+
+  // ── Cross-project skill import ───────────────────────────────────────────
+  const [importOpen, setImportOpen] = useState(false)
+  const [importProjects, setImportProjects] = useState<Array<{ id: number; name: string; slug: string }>>([])
+  const [importSourceId, setImportSourceId] = useState<number | null>(null)
+  const [importSourceSkills, setImportSourceSkills] = useState<SkillItem[]>([])
+  const [importSelected, setImportSelected] = useState<Set<string>>(new Set())
+  const [importOverwrite, setImportOverwrite] = useState(true)
+  const [importLoading, setImportLoading] = useState(false)
+  const [importLoadingSkills, setImportLoadingSkills] = useState(false)
   const markPromptConflict  = useCallback((key: string) => setConflictPromptKeys(p => { const n = new Set(p); n.add(key); return n }),    [])
   const clearPromptConflict = useCallback((key: string) => setConflictPromptKeys(p => { const n = new Set(p); n.delete(key); return n }), [])
 
@@ -888,6 +898,64 @@ export default function SkillLibrary() {
     setPromptScope(nextScope)
   }, [activePromptBaseline, editingPromptKey, promptDraft, promptScope, syncPromptCacheView, tab])
 
+  // ── Cross-project skill import helpers ───────────────────────────────────
+  const openImportModal = useCallback(async () => {
+    setImportOpen(true)
+    setImportSourceId(null)
+    setImportSourceSkills([])
+    setImportSelected(new Set())
+    try {
+      const data = (await apiFetch('/projects')) as { projects: Array<{ id: number; name: string; slug: string }> }
+      setImportProjects(data.projects.filter((pr) => pr.id !== pid))
+    } catch {
+      setImportProjects([])
+    }
+  }, [pid])
+
+  const loadImportSourceSkills = useCallback(async (sourceId: number) => {
+    setImportSourceId(sourceId)
+    setImportSourceSkills([])
+    setImportSelected(new Set())
+    setImportLoadingSkills(true)
+    try {
+      const data = (await apiFetch(`/skills/from-project/${sourceId}`, { headers })) as { skills: SkillItem[] }
+      setImportSourceSkills(data.skills ?? [])
+    } finally {
+      setImportLoadingSkills(false)
+    }
+  }, [headers])
+
+  const toggleImportSelect = useCallback((slug: string) => {
+    setImportSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(slug)) next.delete(slug); else next.add(slug)
+      return next
+    })
+  }, [])
+
+  const doImport = useCallback(async () => {
+    if (!importSourceId || importSelected.size === 0) return
+    setImportLoading(true)
+    try {
+      const result = (await apiFetch('/skills/import', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          source_project_id: importSourceId,
+          skill_slugs: [...importSelected],
+          overwrite: importOverwrite,
+        }),
+      })) as { imported: string[]; skipped: string[] }
+      setImportOpen(false)
+      void loadSkills()
+      pushToast('success', `已导入 ${result.imported.length} 个 SKILL${result.skipped.length > 0 ? `，跳过 ${result.skipped.length} 个` : ''}`)
+    } catch (e) {
+      pushToast('error', `导入失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setImportLoading(false)
+    }
+  }, [headers, importOverwrite, importSelected, importSourceId, loadSkills, pushToast])
+
   return (
     <div className="sl-page">
       {/* 沉浸聚焦遮罩：当任意 AI 可见输入框获得焦点时由 CSS body:has() 控制显隐 */}
@@ -929,6 +997,7 @@ export default function SkillLibrary() {
         {tab === 'skill' && (
           <>
             <button type="button" className="link-btn" onClick={createSkill}>+ 新增 SKILL</button>
+            <button type="button" className="link-btn" onClick={() => void openImportModal()}>从其他项目导入</button>
             <button
               type="button"
               className="link-btn"
@@ -1698,6 +1767,107 @@ export default function SkillLibrary() {
                 }}
               >使用服务端版本</button>
               <button type="button" className="btn ghost" onClick={() => setConflictPrompt(null)}>稍后再说</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 跨项目 SKILL 导入弹窗 ─────────────────────────────────────── */}
+      {importOpen && (
+        <div className="sl-import-overlay" onClick={(e) => { if (e.target === e.currentTarget) setImportOpen(false) }}>
+          <div className="sl-import-dialog">
+            <div className="sl-import-header">
+              <span className="sl-import-title">从其他项目导入 SKILL</span>
+              <button type="button" className="sl-import-close" onClick={() => setImportOpen(false)}>✕</button>
+            </div>
+
+            <div className="sl-import-body">
+              <div className="sl-import-section">
+                <label className="sl-label">选择源项目</label>
+                {importProjects.length === 0
+                  ? <p className="sl-import-hint">暂无其他可访问的项目</p>
+                  : (
+                    <div className="sl-import-proj-list">
+                      {importProjects.map((pr) => (
+                        <button
+                          key={pr.id}
+                          type="button"
+                          className={`sl-import-proj-item${importSourceId === pr.id ? ' active' : ''}`}
+                          onClick={() => void loadImportSourceSkills(pr.id)}
+                        >
+                          {pr.name} <span className="sl-import-proj-slug">#{pr.id}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+              </div>
+
+              {importSourceId != null && (
+                <div className="sl-import-section">
+                  <div className="sl-import-skill-header">
+                    <label className="sl-label">选择要导入的 SKILL</label>
+                    {importSourceSkills.length > 0 && (
+                      <button
+                        type="button"
+                        className="link-btn"
+                        onClick={() => {
+                          if (importSelected.size === importSourceSkills.length) {
+                            setImportSelected(new Set())
+                          } else {
+                            setImportSelected(new Set(importSourceSkills.map((s) => s.slug!)))
+                          }
+                        }}
+                      >
+                        {importSelected.size === importSourceSkills.length ? '全不选' : '全选'}
+                      </button>
+                    )}
+                  </div>
+                  {importLoadingSkills
+                    ? <p className="sl-import-hint">加载中…</p>
+                    : importSourceSkills.length === 0
+                      ? <p className="sl-import-hint">该项目暂无 SKILL</p>
+                      : (
+                        <div className="sl-import-skill-list">
+                          {importSourceSkills.map((s) => (
+                            <label key={s.slug} className={`sl-import-skill-item${importSelected.has(s.slug!) ? ' selected' : ''}`}>
+                              <input
+                                type="checkbox"
+                                checked={importSelected.has(s.slug!)}
+                                onChange={() => toggleImportSelect(s.slug!)}
+                              />
+                              <div className="sl-import-skill-info">
+                                <span className="sl-import-skill-title">{s.title}</span>
+                                {s.summary && <span className="sl-import-skill-summary">{s.summary}</span>}
+                                <span className="sl-import-skill-slug">{s.slug}</span>
+                              </div>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                </div>
+              )}
+            </div>
+
+            <div className="sl-import-footer">
+              <label className="sl-import-overwrite-label">
+                <input
+                  type="checkbox"
+                  checked={importOverwrite}
+                  onChange={(e) => setImportOverwrite(e.target.checked)}
+                />
+                覆盖同名 SKILL
+              </label>
+              <div className="sl-import-footer-actions">
+                <button type="button" className="btn ghost" onClick={() => setImportOpen(false)}>取消</button>
+                <button
+                  type="button"
+                  className="btn primary"
+                  disabled={importSelected.size === 0 || importLoading}
+                  onClick={() => void doImport()}
+                >
+                  {importLoading ? '导入中…' : `确认导入（${importSelected.size} 个）`}
+                </button>
+              </div>
             </div>
           </div>
         </div>
