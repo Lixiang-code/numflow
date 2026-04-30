@@ -68,8 +68,8 @@ type ConversationTurn = {
 type SkillMeta = {
   slug: string
   title: string
-  summary: string
-  step_id: string
+  summary?: string
+  step_id?: string
 }
 
 type ToolsMeta = {

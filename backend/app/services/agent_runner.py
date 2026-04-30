@@ -10,7 +10,6 @@ from app.config import QWEN_MODEL
 from app.db.project_schema import get_pipeline_state
 from app.deps import ProjectDB
 from app.services.agent_tools import TOOLS_OPENAI, build_tools_openai, dispatch_tool, _get_project_config
-from app.services.skill_library import list_skills as _list_skills_for_monitor
 from app.services.prompt_overrides import (
     get_prompt_override,
     merge_prompt_item_layers,
@@ -18,24 +17,6 @@ from app.services.prompt_overrides import (
 )
 from app.services.prompt_router import route_prompt
 from app.services.qwen_client import get_client_for_model
-
-
-def _build_skills_meta(conn: Any) -> list:
-    """Return list of default-exposed skills for monitor tools_meta event."""
-    try:
-        skills = _list_skills_for_monitor(conn, include_disabled=False, include_modules=False)
-        return [
-            {
-                "slug": s["slug"],
-                "title": s["title"],
-                "summary": s.get("summary") or "",
-                "step_id": s.get("step_id") or "",
-            }
-            for s in skills
-            if s.get("default_exposed")
-        ]
-    except Exception:  # noqa: BLE001
-        return []
 
 
 def _retry_llm_call(
@@ -809,6 +790,7 @@ def _run_gather_phase(
     *,
     model: str,
     routed_block: str = "",
+    injected_skills: Optional[List[Dict[str, Any]]] = None,
 ) -> Generator[bytes, None, List[Dict[str, Any]]]:
     """信息收集阶段：AI 主动调用只读工具获取项目信息。
 
@@ -836,7 +818,7 @@ def _run_gather_phase(
         "tool_schemas": _tool_schema_payload(build_tools_openai(p.conn, global_conn=p.server_conn), READ_TOOLS),
         "parallel_tool_calls": True,
         "tool_choice": "auto",
-        "skills_meta": _build_skills_meta(p.conn),
+        "skills_meta": injected_skills or [],
     })
 
     for round_i in range(1, MAX_GATHER_ROUNDS + 1):
@@ -984,6 +966,7 @@ def run_agent_sse(
     gather_gen = _run_gather_phase(
         client, user_message, p,
         model=_model, routed_block=gather_hint,  # 只传步骤目标 hint，不含写操作指令
+        injected_skills=route.get("skills") or [],
     )
     gather_context: List[Dict[str, Any]] = yield from gather_gen
     yield _emit("gather", {"type": "log", "message": f"gather 阶段结束（收集 {len(gather_context)} 条上下文消息）"})
@@ -1111,7 +1094,7 @@ def run_agent_sse(
         "tool_schemas": _tool_schema_payload(build_tools_openai(p.conn, global_conn=p.server_conn), WRITE_TOOLS | READ_TOOLS),
         "parallel_tool_calls": True,
         "tool_choice": "auto",
-        "skills_meta": _build_skills_meta(p.conn),
+        "skills_meta": route.get("skills") or [],
     })
     # 发出初始消息快照（后续每轮 LLM 调用前也会更新）
     yield _emit("execute", {"type": "phase_messages", "phase": "execute", "messages": list(execute_messages)})
