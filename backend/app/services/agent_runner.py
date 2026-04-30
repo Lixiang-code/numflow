@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 import time
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Generator, Iterable, List, Optional
 
 from app.config import QWEN_MODEL
@@ -48,6 +50,56 @@ def _retry_llm_call(
             time.sleep(delay)
     assert last_exc is not None
     raise last_exc
+
+
+# ---------- text-based tool call fallback (for models like Mimo that don't support native function calling) ----------
+
+@dataclass
+class _FakeFunction:
+    name: str
+    arguments: str
+
+
+@dataclass
+class _FakeToolCall:
+    id: str
+    type: str
+    function: _FakeFunction
+
+
+def _extract_text_tool_calls(content: str) -> List[_FakeToolCall]:
+    """Parse tool calls embedded in text as <tool_call><function=name>...</function></tool_call>.
+
+    Used as fallback when the model doesn't support native OpenAI function calling
+    (e.g. Mimo) and outputs tool calls as plain text XML instead.
+    """
+    results: List[_FakeToolCall] = []
+    # Match <tool_call> ... </tool_call> blocks (greedy to handle multiline)
+    tc_pattern = re.compile(r"<tool_call>\s*<function=(\w+)>(.*?)</function>\s*</tool_call>", re.DOTALL)
+    param_pattern = re.compile(r"<parameter=(\w+)>(.*?)</parameter>", re.DOTALL)
+    for i, m in enumerate(tc_pattern.finditer(content)):
+        name = m.group(1)
+        body = m.group(2)
+        args: Dict[str, Any] = {}
+        for pm in param_pattern.finditer(body):
+            key = pm.group(1)
+            val = pm.group(2).strip()
+            # Try to parse JSON values (lists, numbers, booleans)
+            try:
+                args[key] = json.loads(val)
+            except (json.JSONDecodeError, ValueError):
+                args[key] = val
+        results.append(_FakeToolCall(
+            id=f"text_call_{i}_{name}",
+            type="function",
+            function=_FakeFunction(name=name, arguments=json.dumps(args, ensure_ascii=False)),
+        ))
+    return results
+
+
+def _strip_tool_call_blocks(content: str) -> str:
+    """Remove <tool_call>...</tool_call> blocks from text for cleaner history."""
+    return re.sub(r"<tool_call>.*?</tool_call>", "", content, flags=re.DOTALL).strip()
 
 
 WRITE_TOOLS = {
@@ -839,20 +891,31 @@ def _run_gather_phase(
 
         msg = resp.choices[0].message
         tool_calls = getattr(msg, "tool_calls", None) or []
+        _text_fallback = False
+        if not tool_calls:
+            _text_parsed = _extract_text_tool_calls(msg.content or "")
+            if _text_parsed:
+                tool_calls = _text_parsed
+                _text_fallback = True
+                yield _emit("gather", {"type": "log", "message": f"⚠ 检测到文本嵌入工具调用（模型不支持原生函数调用），解析到 {len(tool_calls)} 个调用"})
 
         if tool_calls:
-            tc_dicts = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {"name": tc.function.name, "arguments": tc.function.arguments or "{}"},
-                }
-                for tc in tool_calls
-            ]
-            assistant_msg = _build_assistant_msg(msg, tool_calls=tc_dicts)
+            if _text_fallback:
+                assistant_msg = _build_assistant_msg(msg)
+            else:
+                tc_dicts = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments or "{}"},
+                    }
+                    for tc in tool_calls
+                ]
+                assistant_msg = _build_assistant_msg(msg, tool_calls=tc_dicts)
             gather_messages.append(assistant_msg)
             exchange_messages.append(assistant_msg)
 
+            text_results: List[str] = []
             for tc in tool_calls:
                 name = tc.function.name
                 args = tc.function.arguments or "{}"
@@ -868,13 +931,20 @@ def _run_gather_phase(
                         {"ok": False, "error": f"工具执行异常: {tool_exc!r}"},
                         ensure_ascii=False,
                     )
-                tool_msg: Dict[str, Any] = {"role": "tool", "tool_call_id": tc.id, "content": result}
-                gather_messages.append(tool_msg)
-                exchange_messages.append(tool_msg)
+                if _text_fallback:
+                    text_results.append(f"[{name}]\n{result}")
+                else:
+                    tool_msg: Dict[str, Any] = {"role": "tool", "tool_call_id": tc.id, "content": result}
+                    gather_messages.append(tool_msg)
+                    exchange_messages.append(tool_msg)
                 yield _emit("gather", {
                     "type": "tool_result", "call_id": tc.id,
                     "name": name, "status": "done", "preview": result[:500],
                 })
+            if _text_fallback and text_results:
+                inj: Dict[str, Any] = {"role": "user", "content": "[工具调用结果]\n" + "\n---\n".join(text_results)}
+                gather_messages.append(inj)
+                exchange_messages.append(inj)
         else:
             # AI produced the gather summary — done
             summary_text = (msg.content or "").strip()
@@ -1197,6 +1267,13 @@ def run_agent_sse(
         finish_reason = getattr(choice, "finish_reason", None) or ""
         msg = choice.message
         tool_calls = getattr(msg, "tool_calls", None) or []
+        _text_fallback = False
+        if not tool_calls:
+            _text_parsed = _extract_text_tool_calls(msg.content or "")
+            if _text_parsed:
+                tool_calls = _text_parsed
+                _text_fallback = True
+                yield _emit("execute", {"type": "log", "message": f"⚠ 检测到文本嵌入工具调用（模型不支持原生函数调用），解析到 {len(tool_calls)} 个调用"})
 
         # ---- 输出被 token 限制截断：注入修复提示让模型重新分批 ----
         if finish_reason == "length":
@@ -1227,20 +1304,24 @@ def run_agent_sse(
                     # 保留截断信息，而非静默丢弃
                     return json.dumps({"_truncated": True, "_raw_prefix": raw[:120]}, ensure_ascii=False)
 
-            execute_messages.append(
-                _build_assistant_msg(msg, tool_calls=[
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": _safe_args(tc.function.arguments),
-                        },
-                    }
-                    for tc in tool_calls
-                ])
-            )
+            if _text_fallback:
+                execute_messages.append(_build_assistant_msg(msg))
+            else:
+                execute_messages.append(
+                    _build_assistant_msg(msg, tool_calls=[
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": _safe_args(tc.function.arguments),
+                            },
+                        }
+                        for tc in tool_calls
+                    ])
+                )
 
+            exec_text_results: List[str] = []
             for tc in tool_calls:
                 name = tc.function.name
                 args = tc.function.arguments or "{}"
@@ -1274,13 +1355,16 @@ def run_agent_sse(
                             },
                             ensure_ascii=False,
                         )
-                        execute_messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tc.id,
-                                "content": reject_payload,
-                            }
-                        )
+                        if _text_fallback:
+                            exec_text_results.append(f"[{name}]\n{reject_payload}")
+                        else:
+                            execute_messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tc.id,
+                                    "content": reject_payload,
+                                }
+                            )
                         yield _emit(
                             "execute",
                             {"type": "tool_result", "call_id": call_id, "name": name, "status": "error",
@@ -1325,13 +1409,18 @@ def run_agent_sse(
                         "hint": "检查 JSON 内 status/warnings/blocked_cells",
                     },
                 )
-                execute_messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": result,
-                    }
-                )
+                if _text_fallback:
+                    exec_text_results.append(f"[{name}]\n{result}")
+                else:
+                    execute_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": result,
+                        }
+                    )
+            if _text_fallback and exec_text_results:
+                execute_messages.append({"role": "user", "content": "[工具调用结果]\n" + "\n---\n".join(exec_text_results)})
             # ---- 错误后立即注入状态锚点（首次错误时触发）----
             if consec_errors == 1:
                 anchor = _make_state_anchor(round_i, user_message, total_success, total_errors, is_after_error=True)
