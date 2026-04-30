@@ -267,9 +267,39 @@ def update_global_readme(body: GlobalReadmeBody, p: ProjectDB = Depends(get_proj
 
 
 @router.get("/default-rules")
-def get_default_rules():
-    """文档 02 子集：可机读默认规则（全局，非项目内）。"""
-    return get_default_rules_payload()
+def get_default_rules(p: ProjectDB = Depends(get_project_read)):
+    """读取默认规则；优先返回本项目的覆盖版本，否则返回全局硬编码默认。"""
+    row = p.conn.execute(
+        "SELECT value_json FROM project_settings WHERE key='default_rules_02'"
+    ).fetchone()
+    if row:
+        try:
+            return {"data": json.loads(row["value_json"]), "is_override": True}
+        except Exception:  # noqa: BLE001
+            pass
+    return {"data": get_default_rules_payload(), "is_override": False}
+
+
+@router.put("/default-rules")
+def put_default_rules(body: Dict[str, Any], p: ProjectDB = Depends(get_project_write)):
+    """保存本项目的默认规则覆盖版本。"""
+    p.conn.execute(
+        """INSERT INTO project_settings (key, value_json, updated_at)
+           VALUES ('default_rules_02', ?, datetime('now'))
+           ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+                                          updated_at  = excluded.updated_at""",
+        (json.dumps(body),),
+    )
+    p.conn.commit()
+    return {"ok": True}
+
+
+@router.delete("/default-rules")
+def delete_default_rules(p: ProjectDB = Depends(get_project_write)):
+    """删除本项目的默认规则覆盖，恢复全局硬编码默认。"""
+    p.conn.execute("DELETE FROM project_settings WHERE key='default_rules_02'")
+    p.conn.commit()
+    return {"ok": True}
 
 
 class SnapshotCreateBody(BaseModel):

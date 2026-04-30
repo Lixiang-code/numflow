@@ -3272,7 +3272,16 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                 purpose=str(args.get("purpose", "")),
             )
     elif name == "get_default_system_rules":
-        out = get_default_rules_payload()
+        row = conn.execute(
+            "SELECT value_json FROM project_settings WHERE key='default_rules_02'"
+        ).fetchone()
+        if row:
+            try:
+                out = json.loads(row["value_json"])
+            except Exception:  # noqa: BLE001
+                out = get_default_rules_payload()
+        else:
+            out = get_default_rules_payload()
     elif name == "glossary_register":
         out = _glossary_register(conn, args, p.can_write)
     elif name == "glossary_lookup":

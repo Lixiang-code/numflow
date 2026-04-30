@@ -63,7 +63,7 @@ type PromptItem = {
   modules: PromptModule[]
 }
 
-type PromptTab = 'skill' | 'system' | 'tool'
+type PromptTab = 'skill' | 'system' | 'tool' | 'rules'
 type PromptScope = 'project' | 'global'
 type ToolPromptGroup = {
   key: string
@@ -253,18 +253,26 @@ export default function SkillLibrary() {
   const [importOverwrite, setImportOverwrite] = useState(true)
   const [importLoading, setImportLoading] = useState(false)
   const [importLoadingSkills, setImportLoadingSkills] = useState(false)
+
+  // ── Rules tab state ───────────────────────────────────────────────────────
+  const [rulesJson, setRulesJson] = useState<string>('')
+  const [rulesBaseline, setRulesBaseline] = useState<string>('')
+  const [rulesLoading, setRulesLoading] = useState(false)
+  const [rulesSaving, setRulesSaving] = useState(false)
+  const [rulesIsOverride, setRulesIsOverride] = useState(false)
+  const [rulesJsonErr, setRulesJsonErr] = useState<string | null>(null)
   const markPromptConflict  = useCallback((key: string) => setConflictPromptKeys(p => { const n = new Set(p); n.add(key); return n }),    [])
   const clearPromptConflict = useCallback((key: string) => setConflictPromptKeys(p => { const n = new Set(p); n.delete(key); return n }), [])
 
   // 侧边栏"未启用"分组折叠状态（按 tab 区分，持久化到 localStorage）
   const DISABLED_COLLAPSE_KEY = 'sl_disabled_collapsed_v1'
   const [disabledCollapsed, setDisabledCollapsed] = useState<Record<PromptTab, boolean>>(() => {
-    if (typeof window === 'undefined') return { skill: false, system: false, tool: false }
+    if (typeof window === 'undefined') return { skill: false, system: false, tool: false, rules: false }
     try {
       const raw = window.localStorage.getItem(DISABLED_COLLAPSE_KEY)
-      if (raw) return { skill: false, system: false, tool: false, ...JSON.parse(raw) }
+      if (raw) return { skill: false, system: false, tool: false, rules: false, ...JSON.parse(raw) }
     } catch { /* ignore */ }
-    return { skill: false, system: false, tool: false }
+    return { skill: false, system: false, tool: false, rules: false }
   })
   const toggleDisabledCollapsed = useCallback((t: PromptTab) => {
     setDisabledCollapsed((prev) => {
@@ -457,16 +465,75 @@ export default function SkillLibrary() {
     }
   }, [applyPromptSelection, headers, pid, promptScope, markPromptConflict, clearPromptConflict, syncPromptCacheView])
 
+  const loadRules = useCallback(async () => {
+    if (!pid) return
+    setRulesLoading(true); setErr(null)
+    try {
+      const data = (await apiFetch('/meta/default-rules', { headers })) as {
+        data: unknown; is_override: boolean
+      }
+      const text = JSON.stringify(data.data, null, 2)
+      setRulesJson(text)
+      setRulesBaseline(text)
+      setRulesIsOverride(Boolean(data.is_override))
+      setRulesJsonErr(null)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setRulesLoading(false)
+    }
+  }, [headers, pid])
+
+  const saveRules = useCallback(async () => {
+    if (rulesSaving) return
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(rulesJson)
+    } catch (e) {
+      setRulesJsonErr('JSON 格式错误：' + String(e))
+      return
+    }
+    setRulesSaving(true)
+    try {
+      await apiFetch('/meta/default-rules', {
+        method: 'PUT',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify(parsed),
+      })
+      setRulesBaseline(rulesJson)
+      setRulesIsOverride(true)
+      setRulesJsonErr(null)
+      pushToast('success', '规则已保存（项目级覆盖）')
+    } catch (e) {
+      pushToast('error', '保存失败：' + String(e))
+    } finally {
+      setRulesSaving(false)
+    }
+  }, [headers, pushToast, rulesJson, rulesSaving])
+
+  const resetRules = useCallback(async () => {
+    if (!window.confirm('确认恢复为全局硬编码默认规则？当前项目的覆盖将被删除。')) return
+    try {
+      await apiFetch('/meta/default-rules', { method: 'DELETE', headers })
+      await loadRules()
+      pushToast('success', '已恢复全局默认规则')
+    } catch (e) {
+      pushToast('error', '重置失败：' + String(e))
+    }
+  }, [headers, loadRules, pushToast])
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       if (tab === 'skill') {
         void loadSkills(undefined, true)
+      } else if (tab === 'rules') {
+        void loadRules()
       } else {
         void loadPromptItems(tab, undefined, true)
       }
     }, 0)
     return () => window.clearTimeout(timer)
-  }, [loadPromptItems, loadSkills, promptScope, tab])
+  }, [loadPromptItems, loadRules, loadSkills, promptScope, tab])
 
   function createSkill() {
     const blank = blankSkill()
@@ -614,7 +681,7 @@ export default function SkillLibrary() {
     setPromptSaving(true)
     setErr(null)
     try {
-      const category = tab
+      const category = tab as 'system' | 'tool'
       await apiFetch(`/prompts/${category}/${encodeURIComponent(promptDraft.prompt_key)}?scope=${promptScope}`, {
         method: 'PUT',
         headers,
@@ -669,7 +736,7 @@ export default function SkillLibrary() {
         method: 'DELETE',
         headers,
       })
-      await loadPromptItems(tab, promptDraft.prompt_key)
+      await loadPromptItems(tab as 'system' | 'tool', promptDraft.prompt_key)
       pushToast('success', `已还原${promptScope === 'global' ? '全局' : '项目'}覆盖`)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -692,6 +759,8 @@ export default function SkillLibrary() {
           if (skillSaving) return
           if (!skillDraft.title.trim()) { pushToast('error', '请先填写标题再保存'); return }
           void saveSkill()
+        } else if (tab === 'rules') {
+          if (!rulesSaving) void saveRules()
         } else {
           if (!promptDraft) { pushToast('error', '请先选择一个提示词'); return }
           if (!promptCanWrite) { pushToast('error', promptScope === 'global' ? '当前账号没有全局保存权限' : '当前项目无写权限'); return }
@@ -703,7 +772,7 @@ export default function SkillLibrary() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [promptCanWrite, promptDraft, promptSaving, promptScope, savePrompt, saveSkill, skillDraft, skillSaving, tab, pushToast])
+  }, [promptCanWrite, promptDraft, promptSaving, promptScope, savePrompt, saveRules, saveSkill, skillDraft, skillSaving, tab, rulesSaving, pushToast])
 
   // 离开页面前警告：存在未保存草稿时阻止刷新/关闭
   useEffect(() => {
@@ -809,17 +878,20 @@ export default function SkillLibrary() {
       promptDraft.enabled !== b.enabled
   }, [activePromptBaseline, editingPromptKey, promptDraft, tab])
 
-  const loading = tab === 'skill' ? skillLoading : promptLoading
+  const loading = tab === 'skill' ? skillLoading : tab === 'rules' ? rulesLoading : promptLoading
   const isMac = typeof navigator !== 'undefined' && navigator.platform.toLowerCase().includes('mac')
   const shortcut = isMac ? '⌘S' : 'Ctrl+S'
 
   // ── Dirty / conflict helpers (reactive off dirtySkillIds / dirtyPromptKeys) ──
   const isSkillDirty   = (id: number | 'new') => dirtySkillIds.has(skillCacheKey(id))
   const isPromptDirty  = (pk: string) => dirtyPromptKeys.has(promptCacheKey(tab as 'system' | 'tool', promptScope, pk))
+  const rulesDirty     = rulesJson !== rulesBaseline
   const tabHasDirty    = (t: PromptTab) =>
     t === 'skill'
       ? dirtySkillIds.size > 0
-      : [...dirtyPromptKeys].some((k) => k.startsWith(t + '::'))
+      : t === 'rules'
+        ? rulesDirty
+        : [...dirtyPromptKeys].some((k) => k.startsWith(t + '::'))
   // currentDirty retained for potential future use (sidebar highlights etc.)
   const _currentDirty =
     tab === 'skill'
@@ -827,14 +899,16 @@ export default function SkillLibrary() {
       : (editingPromptKey != null && isPromptDirty(editingPromptKey))
   void _currentDirty
 
-  const canSave = tab === 'skill' ? !!skillDraft && !skillSaving : !!promptDraft && !promptSaving
-  const effectiveCanSave = tab === 'skill' ? canSave : (canSave && promptCanWrite)
-  const saving = tab === 'skill' ? skillSaving : promptSaving
+  const canSave = tab === 'skill' ? !!skillDraft && !skillSaving : tab === 'rules' ? !rulesSaving : !!promptDraft && !promptSaving
+  const effectiveCanSave = tab === 'skill' ? canSave : tab === 'rules' ? (canSave && rulesDirty) : (canSave && promptCanWrite)
+  const saving = tab === 'skill' ? skillSaving : tab === 'rules' ? rulesSaving : promptSaving
   const handleSave = () => {
     if (tab === 'skill') {
       if (!skillDraft) { pushToast('error', '请先选择或新建一个 SKILL'); return }
       if (!skillDraft.title.trim()) { pushToast('error', '请先填写标题再保存'); return }
       void saveSkill()
+    } else if (tab === 'rules') {
+      void saveRules()
     } else {
       if (!promptDraft) { pushToast('error', '请先选择一个提示词'); return }
       if (!promptCanWrite) { pushToast('error', promptScope === 'global' ? '当前账号没有全局保存权限' : '当前项目无写权限'); return }
@@ -964,7 +1038,7 @@ export default function SkillLibrary() {
         <Link to={`/workbench/${pid}`} className="link-btn">← 返回工作台</Link>
         <div className="sl-title">提示词库</div>
         <span className="muted">项目 #{pid}</span>
-        {tab !== 'skill' && (
+        {tab !== 'skill' && tab !== 'rules' && (
           <>
             <button
               type="button"
@@ -989,6 +1063,7 @@ export default function SkillLibrary() {
           className="link-btn"
           onClick={() => {
             if (tab === 'skill') void loadSkills(editingSkillId)
+            else if (tab === 'rules') void loadRules()
             else void loadPromptItems(tab, editingPromptKey)
           }}
         >
@@ -1008,7 +1083,16 @@ export default function SkillLibrary() {
             </button>
           </>
         )}
-        {tab !== 'skill' && (
+        {tab === 'rules' && rulesIsOverride && (
+          <button
+            type="button"
+            className="link-btn"
+            onClick={() => void resetRules()}
+          >
+            恢复全局默认
+          </button>
+        )}
+        {tab !== 'skill' && tab !== 'rules' && (
           <button
             type="button"
             className="link-btn"
@@ -1025,7 +1109,11 @@ export default function SkillLibrary() {
           onClick={handleSave}
           title={`保存（${shortcut}）`}
         >
-          {saving ? '保存中…' : (tab === 'skill' ? '保存' : (promptScope === 'global' ? '保存为全局默认' : '保存到当前项目'))} <kbd>{shortcut}</kbd>
+          {saving ? '保存中…' : (
+            tab === 'skill' ? '保存' :
+            tab === 'rules' ? '保存规则' :
+            (promptScope === 'global' ? '保存为全局默认' : '保存到当前项目')
+          )} <kbd>{shortcut}</kbd>
         </button>
       </header>
 
@@ -1042,6 +1130,7 @@ export default function SkillLibrary() {
               ['skill', 'SKILL'],
               ['system', '系统'],
               ['tool', '工具'],
+              ['rules', '规则'],
             ] as Array<[PromptTab, string]>).map(([key, label]) => (
               <button
                 key={key}
@@ -1059,8 +1148,23 @@ export default function SkillLibrary() {
             {!loading && tab === 'skill' && skills.length === 0 && (
               <div className="sl-list-empty">暂无 SKILL，点击右上角"新增 SKILL"</div>
             )}
-            {!loading && tab !== 'skill' && promptItems.length === 0 && (
+            {!loading && tab !== 'skill' && tab !== 'rules' && promptItems.length === 0 && (
               <div className="sl-list-empty">暂无可编辑的提示词</div>
+            )}
+            {tab === 'rules' && !rulesLoading && (
+              <button
+                type="button"
+                className="sl-list-item active"
+              >
+                <div className="sl-row">
+                  <span className="sl-name">系统默认规则</span>
+                  <span className="sl-meta">{rulesDirty ? <span className="sl-dirty-tag">编辑中</span> : (rulesIsOverride ? '项目覆盖' : '全局默认')}</span>
+                </div>
+                <div className="sl-key">default_rules_02</div>
+                <div className="sl-chips">
+                  {rulesIsOverride && <span className="sl-chip">项目覆盖</span>}
+                </div>
+              </button>
             )}
             {tab === 'skill'
               ? (() => {
@@ -1636,6 +1740,49 @@ export default function SkillLibrary() {
                       <div className="sl-empty">请选择左侧列表中的一项进行编辑。</div>
                     </section>
                   )}
+                </div>
+              </div>
+            </>
+          )}
+          {tab === 'rules' && (
+            <>
+              <div className="sl-editor-pane">
+                <div className="sl-main-inner">
+                  <section className="sl-card">
+                    <div className="sl-card-head">
+                      <div>
+                        <h3>系统默认规则<span className="sl-vis-tag ai">AI 可见</span></h3>
+                        <div className="sl-sub">
+                          对应 <code>default_rules_02</code>，agent 调用 <code>get_default_system_rules</code> 工具时读取。
+                          修改后将作为本项目的覆盖版本保存，不影响其他项目。
+                          {rulesIsOverride && <strong style={{ color: '#f59e0b', marginLeft: '0.5rem' }}>（当前为项目级覆盖）</strong>}
+                        </div>
+                      </div>
+                    </div>
+                    {rulesLoading ? (
+                      <div className="sl-empty">加载中…</div>
+                    ) : (
+                      <>
+                        {rulesJsonErr && (
+                          <p style={{ color: '#ef4444', fontSize: '0.8rem', margin: '0.25rem 0' }}>
+                            ⚠ {rulesJsonErr}
+                          </p>
+                        )}
+                        <textarea
+                          className="sl-module-content sl-input-ai"
+                          value={rulesJson}
+                          onChange={(e) => { setRulesJson(e.target.value); setRulesJsonErr(null) }}
+                          rows={40}
+                          spellCheck={false}
+                          style={{ fontFamily: 'monospace', fontSize: '0.82rem', width: '100%', resize: 'vertical' }}
+                          placeholder="JSON 格式的系统默认规则…"
+                        />
+                        <div style={{ marginTop: '0.5rem', fontSize: '0.78rem', color: 'var(--muted)' }}>
+                          来源文档：<code>游戏数值系统AI化自动开发-02-系统与子系统默认细则.md</code>
+                        </div>
+                      </>
+                    )}
+                  </section>
                 </div>
               </div>
             </>
