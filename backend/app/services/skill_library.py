@@ -1031,11 +1031,37 @@ def build_default_skill_prompt(
     *,
     record_usage_events: bool = False,
 ) -> Dict[str, Any]:
-    skills = get_default_exposed_skills_for_step(
-        conn,
-        step_id,
-        record_usage_events=record_usage_events,
+    """返回所有 default_exposed=1 的 skill（不按 step_id 过滤）。"""
+    ensure_default_skills(conn)
+    cur = conn.execute(
+        """
+        SELECT id, slug, title, step_id, summary, description, source, template_key,
+               default_exposed, enabled, display_order, usage_count,
+               generated_file_path, generated_content, created_at, updated_at
+        FROM _skills
+        WHERE enabled = 1 AND default_exposed = 1
+        ORDER BY display_order ASC, id ASC
+        """,
     )
+    rows = cur.fetchall()
+    skills: List[Dict[str, Any]] = []
+    for row in rows:
+        skill = _dict_from_row(row)
+        modules = _load_modules(conn, int(row["id"]))
+        skill["modules"] = modules
+        skill["rendered_markdown"] = render_skill_markdown(skill, modules)
+        skill["usage_count"] = int(skill["usage_count"] or 0)
+        skill["default_exposed"] = bool(skill["default_exposed"])
+        skill["enabled"] = bool(skill["enabled"])
+        skills.append(skill)
+        if record_usage_events:
+            record_skill_usage(
+                conn,
+                skill_id=int(row["id"]),
+                event_type="auto_exposed",
+                step_id=step_id,
+                meta={"step_id": step_id, "skill_slug": skill["slug"]},
+            )
     return {
         "skills": [{"id": s["id"], "slug": s["slug"], "title": s["title"]} for s in skills],
         "prompt": render_skill_prompt_bundle(skills),
