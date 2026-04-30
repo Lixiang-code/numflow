@@ -3925,7 +3925,7 @@ def _sparse_sample(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, 
     # 获取总行数
     total = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
     if total == 0:
-        return {"table": table_name, "total_rows": 0, "sampled": 0, "rows": []}
+        return {"table": table_name, "total_rows": 0, "sampled": 0, "cols": columns, "rows": []}
 
     # 均匀采样：计算每隔 step 取一行
     safe_cols = ", ".join(f'"{c}"' for c in columns)

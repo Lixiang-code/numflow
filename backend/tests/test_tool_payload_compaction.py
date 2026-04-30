@@ -589,3 +589,16 @@ def test_sparse_sample_returns_cols_rows_format():
     assert d["cols"] == ["level", "hp", "atk"]
     assert isinstance(d["rows"][0], list), "每行应为列表"
     assert len(d["rows"][0]) == 3, "每行元素数应等于 cols 数"
+
+
+def test_sparse_sample_empty_table_includes_cols():
+    """sparse_sample 空表时应包含 cols，保持与非空时格式一致。"""
+    conn = _new_conn()
+    _register_test_table(conn, n_rows=0)
+    p = _project_db(conn)
+
+    result = json.loads(dispatch_tool("sparse_sample", {"table_name": "test_rt", "columns": ["level", "hp"]}, p))
+    d = result["data"]
+    assert "cols" in d, "空表时也应有 cols 字段"
+    assert d["cols"] == ["level", "hp"]
+    assert d["rows"] == []
