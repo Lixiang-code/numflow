@@ -127,7 +127,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_dependency_graph",
-            "description": "依赖边列表；direction: upstream|downstream|full（与 /meta/dependency-graph 一致）",
+            "description": "依赖边列表（cols+rows 紧凑格式）；direction: upstream|downstream|full（与 /meta/dependency-graph 一致）",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1549,7 +1549,7 @@ _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "read_table": "按行列范围读取业务表的实际数据内容（cols+rows 紧凑格式，支持 columns/filters/level_range 过滤）。",
     "read_cell": "精确读取表中单个单元格的值。",
     "get_protected_cells": "查看表中标记为写保护的单元格列表。",
-    "get_dependency_graph": "获取各表与公式之间的依赖关系图谱。",
+    "get_dependency_graph": "获取各表与公式之间的依赖关系图谱（cols+rows 紧凑格式）。",
     "get_table_readme": "读取指定业务表的 README 说明文档。",
     "read_3d_table": "按指定维度切片读取三维数据表的一部分。",
     "read_3d_table_full": "读取三维数据表的完整结构与数据。",
@@ -2122,7 +2122,10 @@ def _dependency_edges(
         }
         for r in cur.fetchall()
     ]
-    return {"edge_count": len(edges), "edges": edges}
+    if edges:
+        cols = list(edges[0].keys())
+        return {"edge_count": len(edges), "cols": cols, "rows": [[e[c] for c in cols] for e in edges]}
+    return {"edge_count": 0, "cols": [], "rows": []}
 
 
 def _get_table_readme(conn: sqlite3.Connection, table_name: str) -> Dict[str, Any]:

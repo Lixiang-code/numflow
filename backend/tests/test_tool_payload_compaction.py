@@ -83,15 +83,17 @@ def test_get_dependency_graph_hides_internal_ids():
     data = result["data"]
 
     assert data["edge_count"] == 1
-    assert data["edges"] == [
-        {
-            "from_table": "src_table",
-            "from_column": "atk",
-            "to_table": "dst_table",
-            "to_column": "hp",
-            "edge_type": "formula",
-        }
-    ]
+    cols = data["cols"]
+    assert "from_table" in cols
+    assert "edge_type" in cols
+    row = dict(zip(cols, data["rows"][0]))
+    assert row == {
+        "from_table": "src_table",
+        "from_column": "atk",
+        "to_table": "dst_table",
+        "to_column": "hp",
+        "edge_type": "formula",
+    }
 
 
 def test_compare_snapshot_compaction_drops_hash_noise():
@@ -679,3 +681,56 @@ def test_get_table_list_compact_smaller_than_objects():
 
     reduction = (legacy_size - compact_size) / legacy_size
     assert reduction >= 0.25, f"压缩率 {reduction:.1%} 未达 25%（compact={compact_size}, legacy={legacy_size}）"
+
+
+# ─── get_dependency_graph cols+rows 格式测试 ──────────────────────────────────
+
+
+def _register_dependency_edges(conn, n: int = 10) -> None:
+    """插入 n 条依赖边用于测试。"""
+    _register_test_table(conn)
+    conn.execute(
+        "INSERT OR REPLACE INTO _table_registry (table_name, layer, purpose, schema_json, readme, validation_status) VALUES (?,?,?,?,?,?)",
+        ("tbl_dep_src", "dynamic", "dep src", "{}", "", "ok"),
+    )
+    for i in range(1, n + 1):
+        conn.execute(
+            "INSERT INTO _dependency_graph (from_table, from_column, to_table, to_column, edge_type) VALUES (?,?,?,?,?)",
+            ("tbl_dep_src", f"col_{i}", "test_rt", f"col_{i}", "formula"),
+        )
+    conn.commit()
+
+
+def test_get_dependency_graph_returns_cols_rows_format():
+    """get_dependency_graph 应返回 cols+rows 格式而非 edges 对象列表。"""
+    conn = _new_conn()
+    _register_dependency_edges(conn, 5)
+    p = _project_db(conn)
+
+    result = json.loads(dispatch_tool("get_dependency_graph", {}, p))
+    d = result["data"]
+    assert "cols" in d, "缺少 cols"
+    assert "rows" in d, "缺少 rows"
+    assert "edge_count" in d, "缺少 edge_count"
+    assert "from_table" in d["cols"]
+    assert "edge_type" in d["cols"]
+    assert isinstance(d["rows"][0], list), "每行应为列表"
+    assert len(d["rows"]) == d["edge_count"]
+
+
+def test_get_dependency_graph_compact_smaller_than_objects():
+    """get_dependency_graph cols+rows 应比对象列表至少小 25%（5字段多边场景）。"""
+    conn = _new_conn()
+    _register_dependency_edges(conn, 20)
+    p = _project_db(conn)
+
+    compact_size = len(dispatch_tool("get_dependency_graph", {}, p))
+
+    result = json.loads(dispatch_tool("get_dependency_graph", {}, p))
+    d = result["data"]
+    cols = d["cols"]
+    edges_as_dicts = [dict(zip(cols, row)) for row in d["rows"]]
+    legacy_size = len(json.dumps({"edge_count": len(edges_as_dicts), "edges": edges_as_dicts}))
+
+    reduction = (legacy_size - compact_size) / legacy_size
+    assert reduction >= 0.20, f"压缩率 {reduction:.1%} 未达 20%"
