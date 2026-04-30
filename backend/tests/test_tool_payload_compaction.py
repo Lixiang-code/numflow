@@ -602,3 +602,80 @@ def test_sparse_sample_empty_table_includes_cols():
     assert "cols" in d, "空表时也应有 cols 字段"
     assert d["cols"] == ["level", "hp"]
     assert d["rows"] == []
+
+
+# ─── get_table_list / list_snapshots / const_tag_list / list_calculators ─────
+
+
+def test_get_table_list_returns_cols_rows_format():
+    """get_table_list 应返回 cols+rows 格式。"""
+    conn = _new_conn()
+    _register_test_table(conn)
+    p = _project_db(conn)
+
+    result = json.loads(dispatch_tool("get_table_list", {}, p))
+    d = result["data"]
+    assert "cols" in d
+    assert "rows" in d
+    assert "total" in d
+    assert isinstance(d["cols"], list)
+    assert isinstance(d["rows"], list)
+    # test_rt 表已注册
+    table_names = [row[d["cols"].index("table_name")] for row in d["rows"]]
+    assert "test_rt" in table_names
+    # 每行是列表，不是字典
+    assert isinstance(d["rows"][0], list)
+
+
+def test_const_tag_list_returns_cols_rows_format():
+    """const_tag_list 应返回 cols+rows 格式。"""
+    conn = _new_conn()
+    conn.execute("INSERT OR REPLACE INTO _const_tags (name, parent, brief, created_at) VALUES (?,?,?,?)", ("combat", None, "战斗相关", "2026-01-01"))
+    conn.execute("INSERT OR REPLACE INTO _const_tags (name, parent, brief, created_at) VALUES (?,?,?,?)", ("growth", None, "成长相关", "2026-01-01"))
+    conn.commit()
+    p = _project_db(conn)
+
+    result = json.loads(dispatch_tool("const_tag_list", {}, p))
+    d = result["data"]
+    assert "cols" in d
+    assert "rows" in d
+    assert d["ok"] is True
+    assert "name" in d["cols"]
+    assert isinstance(d["rows"][0], list)
+    tag_names = [row[d["cols"].index("name")] for row in d["rows"]]
+    assert "combat" in tag_names
+
+
+def test_list_snapshots_returns_cols_rows_no_timestamps():
+    """list_snapshots 应返回 cols+rows 格式，且 cols 中不含 created_at。"""
+    conn = _new_conn()
+    p = _project_db(conn)
+    # 空快照：应返回空 cols/rows
+    result = json.loads(dispatch_tool("list_snapshots", {}, p))
+    d = result["data"]
+    assert "cols" in d
+    assert "rows" in d
+    assert "created_at" not in d.get("cols", [])
+
+
+def test_get_table_list_compact_smaller_than_objects():
+    """get_table_list cols+rows 格式应比对象列表至少小 30%（多表场景）。"""
+    conn = _new_conn()
+    for i in range(10):
+        conn.execute(
+            "INSERT OR REPLACE INTO _table_registry (table_name, layer, purpose, schema_json, readme, validation_status) VALUES (?,?,?,?,?,?)",
+            (f"tbl_{i:02d}", "dynamic", f"测试表{i}", "{}", "", "ok"),
+        )
+    conn.commit()
+    p = _project_db(conn)
+
+    compact_size = len(dispatch_tool("get_table_list", {}, p))
+
+    result = json.loads(dispatch_tool("get_table_list", {}, p))
+    d = result["data"]
+    cols = d["cols"]
+    rows_as_dicts = [dict(zip(cols, row)) for row in d["rows"]]
+    legacy_size = len(json.dumps({"tables": rows_as_dicts}))
+
+    reduction = (legacy_size - compact_size) / legacy_size
+    assert reduction >= 0.25, f"压缩率 {reduction:.1%} 未达 25%（compact={compact_size}, legacy={legacy_size}）"

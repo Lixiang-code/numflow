@@ -43,7 +43,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_table_list",
-            "description": "列出所有业务表及验证状态",
+            "description": "列出所有业务表及验证状态（cols+rows 紧凑格式）",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     },
@@ -610,7 +610,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "list_snapshots",
-            "description": "列出最近快照元数据",
+            "description": "列出最近快照元数据（cols+rows 紧凑格式）",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     },
@@ -862,7 +862,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "const_tag_list",
-            "description": "列出所有已注册的常数标签",
+            "description": "列出所有已注册的常数标签（cols+rows 紧凑格式）",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     },
@@ -1105,7 +1105,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "list_calculators",
-            "description": "列出所有已注册 calculator（含 brief 说明，便于 AI 自检与下游引用）",
+            "description": "列出所有已注册 calculator（cols+rows 紧凑格式，含 brief 说明，便于 AI 自检与下游引用）",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     },
@@ -1544,7 +1544,7 @@ _TOOL_GROUP_BY_NAME: Dict[str, str] = {
 
 _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "get_project_config": "获取当前项目的名称、类型等基础配置信息。",
-    "get_table_list": "列出当前项目下所有已创建的业务数据表。",
+    "get_table_list": "列出当前项目下所有已创建的业务数据表（cols+rows 紧凑格式）。",
     "get_table_schema": "查看指定表的列定义、数据类型和约束信息。",
     "read_table": "按行列范围读取业务表的实际数据内容（cols+rows 紧凑格式，支持 columns/filters/level_range 过滤）。",
     "read_cell": "精确读取表中单个单元格的值。",
@@ -1571,7 +1571,7 @@ _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "confirm_validation_rule": "确认并保存一条数值校验规则。",
     "delete_table": "删除指定的业务数据表（不可恢复）。",
     "create_snapshot": "为当前项目创建一个数据快照版本以便回溯。",
-    "list_snapshots": "列出当前项目的所有历史数据快照。",
+    "list_snapshots": "列出当前项目的所有历史数据快照（cols+rows 紧凑格式）。",
     "compare_snapshot": "对比两个快照版本之间的数据差异。",
     "run_balance_check": "执行游戏数值平衡检查并生成分析报告。",
     "get_validation_history": "查看历史校验任务的执行记录与结果。",
@@ -1583,7 +1583,7 @@ _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "glossary_list": "列出术语表中所有已登记的术语条目（cols+rows 紧凑格式，支持 kind_filter 过滤和 limit/offset 分页）。",
     "const_register": "在常数表中登记一个新的数值常量。",
     "const_tag_register": "为常数创建或登记一个分类标签。",
-    "const_tag_list": "列出所有已定义的常数分类标签。",
+    "const_tag_list": "列出所有已定义的常数分类标签（cols+rows 紧凑格式）。",
     "const_set": "修改已登记常数的数值。",
     "const_list": "列出所有已登记的常数（cols+rows 紧凑格式，支持 tags_filter 过滤和 limit/offset 分页）。",
     "const_delete": "删除一个已登记的常数条目。",
@@ -1593,7 +1593,7 @@ _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "write_matrix_cells": "向矩阵表中指定行列位置写入数据。",
     "read_matrix": "读取矩阵表中的数据内容。",
     "register_calculator": "注册一个数值计算器配置供后续调用。",
-    "list_calculators": "列出所有已注册的计算器及其配置。",
+    "list_calculators": "列出所有已注册的计算器及其配置（cols+rows 紧凑格式）。",
     "call_calculator": "调用指定计算器执行数值计算并返回结果。",
     "expose_param_to_subsystems": "将指定项目参数暴露给关联子系统使用。",
     "list_exposed_params": "列出当前已暴露给子系统的参数清单。",
@@ -1807,7 +1807,11 @@ def _get_table_list(conn: sqlite3.Connection) -> Dict[str, Any]:
         "SELECT table_name, layer, purpose, validation_status, "
         "COALESCE(directory,'') AS directory FROM _table_registry ORDER BY directory, table_name"
     )
-    return {"tables": [dict(r) for r in cur.fetchall()]}
+    rows_dicts = [dict(r) for r in cur.fetchall()]
+    if rows_dicts:
+        cols = list(rows_dicts[0].keys())
+        return {"cols": cols, "rows": [[r[c] for c in cols] for r in rows_dicts], "total": len(rows_dicts)}
+    return {"cols": [], "rows": [], "total": 0}
 
 
 def _get_table_schema(
@@ -3208,7 +3212,13 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
             except Exception as e:  # noqa: BLE001
                 out = {"error": str(e)}
     elif name == "list_snapshots":
-        out = {"snapshots": list_snapshots(conn)}
+        _SKIP = frozenset({"created_at", "updated_at"})
+        snaps = list_snapshots(conn)
+        if snaps:
+            cols = [k for k in snaps[0].keys() if k not in _SKIP]
+            out = {"cols": cols, "rows": [[r[c] for c in cols] for r in snaps], "total": len(snaps)}
+        else:
+            out = {"cols": [], "rows": [], "total": 0}
     elif name == "compare_snapshot":
         try:
             out = _compact_compare_snapshot_result(compare_snapshot(conn, int(args.get("snapshot_id", 0))))
@@ -3352,7 +3362,13 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                 out = {"error": str(e)}
     elif name == "list_calculators":
         from app.services.calculator_ops import list_calculators as _lc
-        out = {"items": _lc(conn)}
+        _SKIP = frozenset({"created_at", "updated_at"})
+        calcs = _lc(conn)
+        if calcs:
+            cols = [k for k in calcs[0].keys() if k not in _SKIP]
+            out = {"cols": cols, "rows": [[r[c] for c in cols] for r in calcs], "total": len(calcs)}
+        else:
+            out = {"cols": [], "rows": [], "total": 0}
     elif name == "call_calculator":
         from app.services.calculator_ops import call_calculator as _cc
         out = _compact_call_calculator_result(
@@ -3811,10 +3827,13 @@ def _const_tag_register(conn: sqlite3.Connection, args: Dict[str, Any], can_writ
 def _const_tag_list(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any]:
     try:
         cur = conn.execute("SELECT name, parent, brief FROM _const_tags ORDER BY name")
-        items = [dict(r) for r in cur.fetchall()]
+        rows_dicts = [dict(r) for r in cur.fetchall()]
     except Exception:  # noqa: BLE001
-        items = []
-    return {"ok": True, "items": items}
+        rows_dicts = []
+    if rows_dicts:
+        cols = list(rows_dicts[0].keys())
+        return {"ok": True, "cols": cols, "rows": [[r[c] for c in cols] for r in rows_dicts], "total": len(rows_dicts)}
+    return {"ok": True, "cols": [], "rows": [], "total": 0}
 
 
 # ─── 系列填充：实现 ───────────────────────────────────────────────
