@@ -135,7 +135,8 @@ def import_skills_from_project(
         source_conn.close()
 
 
-
+@router.get("")
+def skills_list(p: ProjectDB = Depends(get_project_read)) -> Dict[str, Any]:
     return {
         "skills": list_skills(
             p.conn,
