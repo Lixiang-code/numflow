@@ -123,6 +123,9 @@ def import_skills_from_project(
                     for m in (skill.get("modules") or [])
                 ],
             }
+            if existing_id:
+                # Clear old modules first to avoid UNIQUE constraint on (skill_id, module_key)
+                p.conn.execute("DELETE FROM _skill_modules WHERE skill_id = ?", (existing_id,))
             upsert_skill(
                 p.conn,
                 project_slug=str(p.row["slug"]),
