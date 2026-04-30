@@ -29,7 +29,7 @@ DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").s
 DEEPSEEK_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro"}
 
 MIMO_API_KEY = os.getenv("MIMO_API_KEY", "").strip()
-MIMO_BASE_URL = os.getenv("MIMO_BASE_URL", "https://api.xiaomimimo.com/v1").strip()
+MIMO_BASE_URL = os.getenv("MIMO_BASE_URL", "https://token-plan-sgp.xiaomimimo.com/v1").strip()
 MIMO_CHAT_MODELS = ["mimo-v2-flash", "mimo-v2-pro", "mimo-v2.5", "mimo-v2.5-pro"]
 
 # CORS: comma-separated origins; required when frontend uses credentials
