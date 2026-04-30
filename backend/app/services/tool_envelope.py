@@ -14,6 +14,7 @@ _DECIMAL_SIG = 4
 _PRUNE = object()
 _RETAIN_EMPTY_LIST_KEYS = frozenset({
     "rows",
+    "cols",
     "tables",
     "items",
     "cells",

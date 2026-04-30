@@ -228,8 +228,10 @@ def test_read_table_level_range_defaults_to_level_column():
 
     assert result["status"] == "success"
     assert len(result["data"]["rows"]) == 1
-    assert result["data"]["rows"][0]["row_id"] == "2"
-    assert result["data"]["rows"][0]["level"] == 2
+    cols = result["data"]["cols"]
+    row = dict(zip(cols, result["data"]["rows"][0]))
+    assert row["row_id"] == "2"
+    assert row["level"] == 2
 
 
 def test_read_table_level_range_falls_back_to_row_id_when_level_missing():
@@ -255,8 +257,10 @@ def test_read_table_level_range_falls_back_to_row_id_when_level_missing():
 
     assert result["status"] == "success"
     assert len(result["data"]["rows"]) == 1
-    assert result["data"]["rows"][0]["row_id"] == "2"
-    assert result["data"]["rows"][0]["value"] == 20.0
+    cols = result["data"]["cols"]
+    row = dict(zip(cols, result["data"]["rows"][0]))
+    assert row["row_id"] == "2"
+    assert row["value"] == 20.0
 
 
 def test_execute_formula_level_range_defaults_to_level_column():

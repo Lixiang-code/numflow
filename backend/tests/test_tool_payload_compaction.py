@@ -190,7 +190,7 @@ def test_read_table_empty_rows_are_retained_as_meaningful_result():
         )
     )
 
-    assert result == {"status": "success", "data": {"rows": []}}
+    assert result == {"status": "success", "data": {"cols": [], "rows": [], "total": 0}}
 
 
 # ─── const_list / glossary_list 紧凑格式测试 ────────────────────────────────
@@ -479,3 +479,113 @@ def test_tags_filter_without_limit_returns_all_matching():
     assert d["total"] == 10
     assert len(d["rows"]) == 10
     assert d.get("has_more") is None
+
+
+# ─── read_table / sparse_sample cols+rows 格式测试 ──────────────────────────
+
+
+def _register_test_table(conn, n_rows: int = 30) -> None:
+    """创建一个带多列的测试表，用于 read_table / sparse_sample 测试。"""
+    now = "2026-01-01T00:00:00Z"
+    conn.execute(
+        """INSERT OR REPLACE INTO _table_registry
+           (table_name, layer, purpose, schema_json, readme, validation_status)
+           VALUES (?,?,?,?,?,?)""",
+        (
+            "test_rt",
+            "dynamic",
+            "测试用表",
+            '{"columns": [{"name": "level"}, {"name": "hp"}, {"name": "atk"}, {"name": "def"}, {"name": "spd"}]}',
+            "",
+            "ok",
+        ),
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS "test_rt" (
+           row_id TEXT PRIMARY KEY, level INTEGER, hp REAL, atk REAL, def REAL, spd REAL)"""
+    )
+    for i in range(1, n_rows + 1):
+        conn.execute(
+            'INSERT OR REPLACE INTO "test_rt" (row_id, level, hp, atk, def, spd) VALUES (?,?,?,?,?,?)',
+            (str(i), i, float(i * 100), float(i * 10), float(i * 8), float(i * 5)),
+        )
+    conn.commit()
+
+
+def test_read_table_returns_cols_rows_format():
+    """read_table 应返回 cols + rows 格式，而非对象列表。"""
+    conn = _new_conn()
+    _register_test_table(conn)
+    p = _project_db(conn)
+
+    result = json.loads(dispatch_tool("read_table", {"table_name": "test_rt"}, p))
+    d = result["data"]
+    assert "cols" in d, "缺少 cols 字段"
+    assert "rows" in d, "缺少 rows 字段"
+    assert "total" in d, "缺少 total 字段"
+    assert isinstance(d["cols"], list)
+    assert isinstance(d["rows"], list)
+    assert "level" in d["cols"]
+    assert "hp" in d["cols"]
+    # 每行应是列表，不是字典
+    assert isinstance(d["rows"][0], list), "rows 中每行应为列表，不是对象"
+
+
+def test_read_table_compact_format_smaller_than_objects():
+    """read_table cols+rows 格式应比对象列表格式至少小 50%（多列多行场景）。"""
+    conn = _new_conn()
+    _register_test_table(conn, n_rows=30)
+    p = _project_db(conn)
+
+    compact_size = len(dispatch_tool("read_table", {"table_name": "test_rt"}, p))
+
+    # 构造等价的对象列表格式大小（模拟旧格式）
+    result = json.loads(dispatch_tool("read_table", {"table_name": "test_rt"}, p))
+    d = result["data"]
+    cols = d["cols"]
+    rows_as_dicts = [dict(zip(cols, row)) for row in d["rows"]]
+    legacy_size = len(json.dumps({"rows": rows_as_dicts}))
+
+    reduction = (legacy_size - compact_size) / legacy_size
+    assert reduction >= 0.40, f"压缩率 {reduction:.1%} 未达 40%（compact={compact_size}, legacy={legacy_size}）"
+
+
+def test_read_table_column_subset():
+    """read_table 指定 columns 时，cols 只包含请求的列。"""
+    conn = _new_conn()
+    _register_test_table(conn)
+    p = _project_db(conn)
+
+    result = json.loads(dispatch_tool("read_table", {"table_name": "test_rt", "columns": ["level", "hp"]}, p))
+    d = result["data"]
+    # row_id 默认加在首位，level 和 hp 也在
+    assert "level" in d["cols"]
+    assert "hp" in d["cols"]
+    assert "atk" not in d["cols"]
+
+
+def test_read_table_rows_count_equals_total():
+    """read_table 返回的 rows 数量应与 total 一致。"""
+    conn = _new_conn()
+    _register_test_table(conn, n_rows=20)
+    p = _project_db(conn)
+
+    result = json.loads(dispatch_tool("read_table", {"table_name": "test_rt", "limit": 10}, p))
+    d = result["data"]
+    assert len(d["rows"]) == d["total"]
+    assert d["total"] == 10
+
+
+def test_sparse_sample_returns_cols_rows_format():
+    """sparse_sample 应返回 cols + rows 格式。"""
+    conn = _new_conn()
+    _register_test_table(conn, n_rows=50)
+    p = _project_db(conn)
+
+    result = json.loads(dispatch_tool("sparse_sample", {"table_name": "test_rt", "columns": ["level", "hp", "atk"]}, p))
+    d = result["data"]
+    assert "cols" in d, "缺少 cols"
+    assert "rows" in d, "缺少 rows"
+    assert d["cols"] == ["level", "hp", "atk"]
+    assert isinstance(d["rows"][0], list), "每行应为列表"
+    assert len(d["rows"][0]) == 3, "每行元素数应等于 cols 数"

@@ -68,7 +68,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "read_table",
-            "description": "读取表数据；可选 columns、filters（每项 column+value 相等）、level_column+level_min/max、include_source_stats",
+            "description": "读取表数据（返回紧凑行列格式：cols + rows）；可选 columns、filters（每项 column+value 相等）、level_column+level_min/max、include_source_stats",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1219,7 +1219,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
             "name": "sparse_sample",
             "description": (
                 "从表中均匀采样 N 行，用于在不读取全表的情况下直观检查曲线形态（如减伤曲线、属性膨胀曲线）。"
-                "按 level 列（或 row_id）升序排列后，等间距抽取 N 行，返回指定列的值。"
+                "按 level 列（或 row_id）升序排列后，等间距抽取 N 行，返回指定列的值（cols+rows 紧凑格式）。"
                 "典型用途：设计防御 K 值后采样减伤曲线验证，或检查 HP/ATK 膨胀趋势。"
             ),
             "parameters": {
@@ -1546,7 +1546,7 @@ _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "get_project_config": "获取当前项目的名称、类型等基础配置信息。",
     "get_table_list": "列出当前项目下所有已创建的业务数据表。",
     "get_table_schema": "查看指定表的列定义、数据类型和约束信息。",
-    "read_table": "按行列范围读取业务表的实际数据内容。",
+    "read_table": "按行列范围读取业务表的实际数据内容（cols+rows 紧凑格式，支持 columns/filters/level_range 过滤）。",
     "read_cell": "精确读取表中单个单元格的值。",
     "get_protected_cells": "查看表中标记为写保护的单元格列表。",
     "get_dependency_graph": "获取各表与公式之间的依赖关系图谱。",
@@ -1597,7 +1597,7 @@ _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "call_calculator": "调用指定计算器执行数值计算并返回结果。",
     "expose_param_to_subsystems": "将指定项目参数暴露给关联子系统使用。",
     "list_exposed_params": "列出当前已暴露给子系统的参数清单。",
-    "sparse_sample": "对大型表进行均匀采样，获取代表性数据子集。",
+    "sparse_sample": "对大型表进行均匀采样，获取代表性数据子集（cols+rows 紧凑格式）。",
     "create_3d_table": "新建一个支持多维度切片的三维数据表。",
     "register_gameplay_table": "在玩法规划步骤中将一个玩法落地表注册到规划清单。",
     "get_gameplay_table_list": "列出所有已注册的玩法落地表及其执行状态。",
@@ -2021,11 +2021,16 @@ def _read_table(
     sql = f'SELECT {sel} FROM "{t}"{where_sql} LIMIT ?'
     params.append(lim)
     cur = conn.execute(sql, tuple(params))
-    rows = [dict(r) for r in cur.fetchall()]
-    out: Dict[str, Any] = {"rows": rows}
-    if include_source_stats and rows:
-        rids = [str(r["row_id"]) for r in rows if r.get("row_id") is not None]
-        out["provenance_stats"] = _provenance_stats(conn, t, rids, len(rows))
+    rows_dicts = [dict(r) for r in cur.fetchall()]
+    if rows_dicts:
+        col_names = list(rows_dicts[0].keys())
+        rows_list = [[row.get(c) for c in col_names] for row in rows_dicts]
+        out: Dict[str, Any] = {"cols": col_names, "rows": rows_list, "total": len(rows_list)}
+    else:
+        out = {"cols": [], "rows": [], "total": 0}
+    if include_source_stats and rows_dicts:
+        rids = [str(r["row_id"]) for r in rows_dicts if r.get("row_id") is not None]
+        out["provenance_stats"] = _provenance_stats(conn, t, rids, len(rows_dicts))
     return out
 
 
@@ -3945,16 +3950,17 @@ def _sparse_sample(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, 
 
     rows = []
     for r in cur.fetchall():
-        row: Dict[str, Any] = {}
+        row_vals = []
         for col in columns:
             v = r[col] if col in r.keys() else None
-            row[col] = round(v, 6) if isinstance(v, float) else v
-        rows.append(row)
+            row_vals.append(round(v, 6) if isinstance(v, float) else v)
+        rows.append(row_vals)
 
     return {
         "table": table_name,
         "total_rows": total,
         "sampled": len(rows),
         "order_by": order_by,
+        "cols": columns,
         "rows": rows,
     }
