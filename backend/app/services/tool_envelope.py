@@ -206,12 +206,14 @@ def _infer_fix_hint(error_msg: str) -> str:
         return "source_tag 合法值: ai_generated | algorithm_derived | formula_computed"
     if "无写权限" in error_msg:
         return "当前会话无写权限，检查项目权限设置"
+    if "数据规模过大" in error_msg:
+        return "先调用 get_table_schema 看结构，再用 columns/filters/level_min/level_max 缩小范围；若只需代表性样本，改用 sparse_sample"
     if "行不存在" in error_msg or "row" in m and "exist" in m:
-        return "用 read_table 确认 row_id 实际存在"
+        return "用 read_table 搭配 filters 或 level_range 做小范围切片确认 row_id；大表先看 get_table_schema"
     if "列" in error_msg and ("非法" in error_msg or "不存在" in error_msg):
-        return "用 read_table 的返回结果确认列名（注意中英文、下划线）"
+        return "先用 get_table_schema 确认列名与数据类型，必要时再用 read_table 小范围切片验证"
     if "公式" in error_msg or "formula" in m:
-        return "检查公式中 @引用 的列名是否与表中列名完全一致，可用 read_table 确认"
+        return "检查公式中 @引用 的列名是否与表结构完全一致；先用 get_table_schema 确认列名，必要时再用 read_table 小范围验证"
     if "json" in m or "解析" in error_msg:
         return "参数格式有误，检查 JSON 结构；如是 write_cells，请减少单次 updates 数量（≤30行）"
     if "已存在" in error_msg or "exists" in m:

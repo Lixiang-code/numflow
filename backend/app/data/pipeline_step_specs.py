@@ -41,7 +41,7 @@ _AGENT_THREE_PHASE_HINT = (
     "必须按 design→review→execute 三阶段输出："
     "①design：列出本步将要新建/修改的表、列、READMЕ 段落与关键假设；"
     "②review：对照本 spec 的 acceptance 与 common_pitfalls 自检，"
-    "并显式调用 get_table_readme / read_table 验证已有上游产物；"
+    "并显式调用 get_table_schema / get_table_readme 验证已有上游产物；若需查数据，只能用 read_table 读取 <=200 行切片，超大表改用 sparse_sample；"
     "③execute：仅在用户确认或 maintain 模式带写权限时调用写工具，"
     "每次写入必须带合法 source_tag，并在结束时 update_table_readme 回填。"
     "READMЕ 必须包含字段：设计目标、关键决策、列含义、与上游表关系、"

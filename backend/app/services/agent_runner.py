@@ -281,6 +281,31 @@ def _base_role_block(mode_norm: str) -> str:
 
 def _base_common_system(mode_norm: str) -> str:
     role_block = _base_role_block(mode_norm)
+    if mode_norm == "init":
+        context_block = (
+            "【2/4 项目上下文】信息收集（gather）阶段已主动读取了项目配置与现有表结构；"
+            "design/review 阶段直接引用已收集信息，**无需**再重复调用读取工具。"
+            "新建或修改既有表格，考虑是否需要扩展更多表格。"
+        )
+        design_cot = "  · design 阶段：基于 gather 已收集的信息，输出四段式 CoT：\n"
+    else:
+        context_block = (
+            "【2/4 项目上下文】信息收集（gather）阶段已主动读取了项目配置与现有表结构；"
+            "design/review 阶段直接引用已收集信息，你仍然可以继续获取需要的其他信息。"
+        )
+        design_cot = "  · design 阶段：基于 gather 已收集的信息，输出四段式 CoT，禁止任何工具调用：\n"
+    flow_block = (
+        "【4/4 输出与流程】本次会话严格按四阶段执行：gather → design → review → execute。\n"
+        "  · gather 阶段：主动调用只读工具收集项目信息，完成后输出收集总结。\n"
+        + design_cot
+        + "      ## 1. 我对用户需求的理解\n"
+        "      ## 2. 我对游戏性的设计理解\n"
+        "      ## 3. 我对表格设计的理解（参考环境中的SKILL，若本次不生产表则忽略）\n"
+        "      ## 4. 我的最终设计\n"
+        "  · review 阶段：把 design 输出再喂回，自审找问题并给出最终操作方案，仍禁止工具调用；你需要意识到第二轮会被强制要求自审。\n"
+        "  · execute 阶段：才允许调用工具；先简述计划再调用，最终回答简洁并引用工具结果 data 的关键字段。\n"
+        "【README 必含字段】任何写 README 的工具调用必须覆盖：目的（goal）/上游输入/产出/必备表与列/验收标准/常见踩坑。"
+    )
     return "\n".join(
         [
             role_block,
@@ -305,7 +330,7 @@ def _base_common_system(mode_norm: str) -> str:
             "属性列（cols[]）可附 formula 字段，公式可用 @dim1列名/@dim2列名 同行引用：\n"
             "  例：atk_bonus 公式 = @level * ${gem_base_atk}（需先注册常量 gem_base_atk）\n"
             "若公式含 ${常量}，先 const_register；常量就绪后再重算整表，确保不要手填展开值。\n"
-            "读完整三轴结构用 read_3d_table_full；按任意维度切片用 read_3d_table。"
+            "读完整三轴结构用 read_3d_table_full（仅限 view_slice_only=false 的小表）；按任意维度切片用 read_3d_table。"
             "典型切法：保留 等级×属性列 看某类全部属性；保留 分类×属性列 看某一级全部属性；只保留 属性列 看单个三维点。\n"
             "【伪三维表（matrix_resource）规则】第三维轴值（如等级）可手填；限制的是内容："
             "单切片允许常量，多切片必须全表 formula，不能混写。\n"
@@ -321,12 +346,7 @@ def _base_common_system(mode_norm: str) -> str:
             "可用 list_directories / set_table_directory 查询和移动。",
             "【SKILL 库使用】当前步骤可能已自动暴露默认 SKILL；当你需要核对更细的玩法制作说明时，"
             "优先使用 list_skills / get_skill_detail / render_skill_file 查询，不要凭空补写玩法规则。",
-            "【2/4 项目上下文】信息收集（gather）阶段已主动读取了项目配置与现有表结构；"
-            "design/review 阶段直接引用已收集信息，**无需**再重复调用读取工具。"
-            "新建或修改「*系统_落地」、各子系统**行轴**、消耗与属性投放时，**须先** "
-            "get_default_system_rules 对照 02 机读默认；禁止各系统无差别复用同一张仅「标准等级+两列消耗」的落地模板。 "
-            "宝石的默认数据轴是**品阶/合成**（3 同阶→1 高 1 品）与**解锁门槛/属性池/分配**列，**不是**把标准等级 1..N 逐行 1:1 当成「宝石 N 级表」。"
-            "坐骑/副本须体现开放等级与 02 约定（如坐骑 30 级、副本默认门槛等），列里要有玩法含义而非只有金币+掉率。\n"
+            context_block,
             "【游戏类型适配】game_type 字段在 fixed_layer_config.core 中，已在 gather 阶段读取；设计时必须适配：\n"
             "  · rpg_turn（回合制）：战斗以回合为单位，速度影响行动顺序，无攻击间隔概念；\n"
             "  · rpg_realtime（即时制 Action RPG）：战斗实时进行，核心差异属性为 atk_spd/move_spd/base_atk_interval；\n"
@@ -337,19 +357,14 @@ def _base_common_system(mode_norm: str) -> str:
             "  · 在 README 中说明各系统子系统维度的设计理由与玩法意图；\n"
             "  · ai_design_subsystems=false 时，以用户在 subsystemsByPath 中的勾选为准。",
             "【3/4 工具规范】读工具可自由组合；写表/写 README/公式/算法调用仅在 execute 阶段且需写权限；"
-            "每次写入必须带合法 source_tag；大批量用 read_table 的 limit/columns 切片。\n"
+            "每次写入必须带合法 source_tag；读表先看 get_table_list 的 view_slice_only，再用 get_table_schema 看结构；"
+            "read_table 仅允许读取 <=200 行切片，大表优先 sparse_sample；"
+            "read_3d_table_full 在 view_slice_only=true 的表上禁止使用，改用 read_3d_table 指定 dim1_keys/dim2_keys；"
+            "read_matrix 在 view_slice_only=true 的表上必须传 rows/cols 过滤。\n"
             "公式引用语法：@表名[列名]=逐行取同行值（数学计算用）；@@表名[列名]=整列数组（VLOOKUP/INDEX/MATCH/SUM/AVERAGE 等查找聚合用）。\n"
             "工具 JSON 固定含字段：status（success|error|partial）、data、warnings、blocked_cells；"
             "遇 partial/error 须阅读 warnings/blocked_cells 再决定是否继续。",
-            "【4/4 输出与流程】本次会话严格按四阶段执行：gather → design → review → execute。\n"
-            "  · gather 阶段：主动调用只读工具收集项目信息，完成后输出收集总结。\n"
-            "  · design 阶段：基于 gather 已收集的信息，输出三段式 CoT，禁止任何工具调用：\n"
-            "      ## 1. 我对用户需求的理解\n"
-            "      ## 2. 我对游戏性的设计理解（结合 02-系统与子系统默认细则与项目核心定义）\n"
-            "      ## 3. 我的最终设计\n"
-            "  · review 阶段：把 design 输出再喂回，自审找问题并给出最终操作方案，仍禁止工具调用；你需要意识到第二轮会被强制要求自审。\n"
-            "  · execute 阶段：才允许调用工具；先简述计划再调用，最终回答简洁并引用工具结果 data 的关键字段。\n"
-            "【README 必含字段】任何写 README 的工具调用必须覆盖：目的（goal）/上游输入/产出/必备表与列/验收标准/常见踩坑。",
+            flow_block,
         ]
     )
 
@@ -430,12 +445,12 @@ def _agent_system_prompt_defaults() -> Dict[str, Dict[str, Any]]:
             "category": "system",
             "prompt_key": "agent_design_tail",
             "title": "Agent design 阶段尾提示词",
-            "summary": "要求 design 阶段只输出三段式 CoT。",
+            "summary": "要求 design 阶段只输出四段式 CoT。",
             "description": "用于 design 阶段的附加 system prompt。",
             "reference_note": "在 design 阶段附加到通用 system prompt 后，用于固定输出格式并禁止工具调用。",
             "enabled": True,
             "modules": [{"module_key": "body", "title": "完整提示词", "content": _DESIGN_SYSTEM_TAIL, "required": True, "enabled": True, "sort_order": 1}],
-            **_agent_sys_meta("sys_agent_core", "设计阶段尾部提示词", "要求 design 阶段输出三段式思维链，禁止直接调用工具。"),
+            **_agent_sys_meta("sys_agent_core", "设计阶段尾部提示词", "要求 design 阶段输出四段式思维链，禁止直接调用工具。"),
         },
         "agent_review_tail": {
             "category": "system",
@@ -559,9 +574,11 @@ _GATHER_SYSTEM = (
     "首轮必须并行调用（一次请求同时发出）：\n"
     "  · get_project_config — 核心定义（game_type/level_cap/游戏系统等）\n"
     "  · get_default_system_rules — 02 机读设计约束\n"
-    "  · get_table_list — 已有表清单\n\n"
+    "  · get_table_list — 已有表清单（仅 table_name / display_name / view_slice_only）\n\n"
     "根据上述结果，按需追加调用（**应**并行，独立读取一次发出）：\n"
-    "  · get_table_readme / read_table — 查看关键表的结构与数据\n"
+    "  · get_table_schema — 查看关键表结构；若 view_slice_only=true，必须先看它\n"
+    "  · get_table_readme / read_table — 查看关键表 README 与 <=200 行数据切片\n"
+    "  · sparse_sample — 对大表看代表性样本，避免直接读大结果集\n"
     "  · get_dependency_graph — 了解表间依赖\n"
     "  · glossary_list / const_list — 已注册术语和常数\n\n"
     "收集完毕后，输出纯文字的「收集总结」，**禁止输出任何设计内容**：\n"
@@ -575,12 +592,13 @@ _GATHER_SYSTEM = (
 
 _DESIGN_SYSTEM_TAIL = (
     "【当前阶段=design】你已在 gather 阶段读取了项目信息，现在基于这些信息进行设计分析。"
-    "只输出三段式 CoT，**严禁**任何工具调用。"
-    "格式必须严格使用三个二级标题：\n"
+    "只输出四段式 CoT，**严禁**任何工具调用。"
+    "格式必须严格使用四个二级标题：\n"
     "## 1. 我对用户需求的理解\n"
     "## 2. 我对游戏性的设计理解\n"
-    "## 3. 我的最终设计\n"
-    "在第 2 段中显式引用 gather 阶段读取到的 02 默认细则与项目核心定义；第 3 段必须给出可执行的表/列/公式清单。"
+    "## 3. 我对表格设计的理解（参考环境中的SKILL，若本次不生产表则忽略）\n"
+    "## 4. 我的最终设计\n"
+    "在第 2 段中显式引用 gather 阶段读取到的 02 默认细则与项目核心定义；第 4 段必须给出可执行的表/列/公式清单。"
 )
 
 _REVIEW_SYSTEM_TAIL = (
@@ -651,7 +669,7 @@ _EXECUTE_SYSTEM_TAIL = (
 
     "═══ ★ 效率硬规则 ★ ═══\n"
     "① **同一回合内所有独立工具 → 一次性并行调用（批量发出），不要一个一个排队**。"
-    "  例：需要读 A、B、C 三张表 → 三个 read_table 在同一回合同时发出；需要建多张表 → 多个 create_table 并行发出。\n"
+    "  例：需要读 A、B、C 三张表结构 → 三个 get_table_schema 在同一回合同时发出；需要看多张大表样本 → 多个 sparse_sample 并行发出；需要建多张表 → 多个 create_table 并行发出。\n"
     "② 等级/数值序列（规律递增/递减/公式可算）→ 必须用 setup_level_table 或 bulk_register_and_compute，**禁止** write_cells 逐行写。\n"
     "③ write_cells 只用于：分类标签、名称、描述、少量手工配置等**非规律内容**。\n"
     "④ setup_level_table：所有列公式同时放入 columns 数组，一次调用完成。\n"
@@ -1531,7 +1549,7 @@ _RECOVERY_SYSTEM = """\
 【工作流程】
 1. 诊断：阅读失败上下文，判断是否真的有状态污染（孤儿表/不完整数据）。
    - 若无污染（纯瞬态错误 / 无写入成功） → 立即输出 RECOVERY_RETRY，结束。
-2. 检查：调用 get_table_list / read_table 确认实际残留状态。
+2. 检查：先调用 get_table_list / get_table_schema 确认实际残留状态；若需要看大表内容，优先用 sparse_sample，避免 read_table 超过 200 行限制。
 3. 清理：仅调用 delete_table 删除孤儿表（不做任何新建/写入）。
 4. 汇报：输出结构化修复报告，末尾必须有且仅有一个状态标记（单独一行）：
    - RECOVERY_RETRY  ：无需清理，可直接重试

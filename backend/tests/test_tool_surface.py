@@ -102,6 +102,17 @@ def test_setup_level_table_schema_uses_level_as_default_column():
     assert setup_level["function"]["parameters"]["properties"]["level_column"]["default"] == "level"
 
 
+def test_table_tools_schema_guides_large_table_slicing():
+    tools = build_tools_openai()
+    get_table_list = next(tool for tool in tools if tool["function"]["name"] == "get_table_list")
+    read_table = next(tool for tool in tools if tool["function"]["name"] == "read_table")
+
+    assert "view_slice_only" in get_table_list["function"]["description"]
+    assert "<=200" in read_table["function"]["description"]
+    assert "sparse_sample" in read_table["function"]["description"]
+    assert "get_table_schema" in read_table["function"]["description"]
+
+
 def test_get_table_schema_returns_compact_matrix_metadata():
     conn = _new_conn()
     _prepare_3d_table(conn)

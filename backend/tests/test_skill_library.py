@@ -58,7 +58,13 @@ def test_render_skill_file_persists_markdown():
 
 
 def test_route_prompt_prefers_skill_library_for_gameplay_steps():
+    # All landing skills now have default_exposed=False by design.
+    # Manually expose gem-landing to verify the skill_library_default_exposure path still works.
     conn = _new_conn()
+    conn.execute(
+        "UPDATE _skills SET default_exposed=1, enabled=1 WHERE slug='gem-landing'"
+    )
+    conn.commit()
     routed = route_prompt(
         "gameplay_landing_tables.gem",
         "请制作宝石玩法落地表",

@@ -610,23 +610,34 @@ def test_sparse_sample_empty_table_includes_cols():
 
 
 def test_get_table_list_returns_cols_rows_format():
-    """get_table_list 应返回 cols+rows 格式。"""
+    """get_table_list 应返回最小表清单。"""
     conn = _new_conn()
     _register_test_table(conn)
     p = _project_db(conn)
 
     result = json.loads(dispatch_tool("get_table_list", {}, p))
     d = result["data"]
-    assert "cols" in d
+    assert d["cols"] == ["table_name", "display_name", "view_slice_only"]
     assert "rows" in d
     assert "total" in d
-    assert isinstance(d["cols"], list)
     assert isinstance(d["rows"], list)
     # test_rt 表已注册
     table_names = [row[d["cols"].index("table_name")] for row in d["rows"]]
     assert "test_rt" in table_names
     # 每行是列表，不是字典
     assert isinstance(d["rows"][0], list)
+
+
+def test_get_table_list_marks_large_tables_as_slice_only():
+    conn = _new_conn()
+    _register_test_table(conn, n_rows=301)
+    p = _project_db(conn)
+
+    result = json.loads(dispatch_tool("get_table_list", {}, p))
+    d = result["data"]
+    row = next(row for row in d["rows"] if row[d["cols"].index("table_name")] == "test_rt")
+
+    assert row[d["cols"].index("view_slice_only")] is True
 
 
 def test_const_tag_list_returns_cols_rows_format():
@@ -681,6 +692,37 @@ def test_get_table_list_compact_smaller_than_objects():
 
     reduction = (legacy_size - compact_size) / legacy_size
     assert reduction >= 0.25, f"压缩率 {reduction:.1%} 未达 25%（compact={compact_size}, legacy={legacy_size}）"
+
+
+def test_read_table_rejects_queries_larger_than_200_rows():
+    conn = _new_conn()
+    _register_test_table(conn, n_rows=250)
+    p = _project_db(conn)
+
+    result = json.loads(dispatch_tool("read_table", {"table_name": "test_rt"}, p))
+
+    assert result["status"] == "error"
+    assert result["warnings"][0] == "数据规模过大，请修改查询范围"
+    assert "sparse_sample" in result["fix"]
+    assert "get_table_schema" in result["fix"]
+
+
+def test_read_table_allows_sliced_query_on_large_table():
+    conn = _new_conn()
+    _register_test_table(conn, n_rows=250)
+    p = _project_db(conn)
+
+    result = json.loads(
+        dispatch_tool(
+            "read_table",
+            {"table_name": "test_rt", "level_min": 1, "level_max": 10, "columns": ["level", "hp"]},
+            p,
+        )
+    )
+
+    assert result["status"] == "success"
+    assert len(result["data"]["rows"]) == 10
+    assert result["data"]["cols"] == ["row_id", "level", "hp"]
 
 
 # ─── get_dependency_graph cols+rows 格式测试 ──────────────────────────────────

@@ -49,7 +49,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_table_list",
-            "description": "列出所有业务表及验证状态（cols+rows 紧凑格式）",
+            "description": "列出业务表最小清单（仅返回 table_name、display_name、view_slice_only）。当表总行数 > 300 时，view_slice_only=true，表示该表只能查看切片，禁止默认全表读取。",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     },
@@ -57,11 +57,11 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_table_schema",
-            "description": "读取指定表的结构信息：列定义、目录、标签、矩阵/三维元信息、公式摘要；适合空表或改表前先看结构",
+            "description": "读取指定表的结构信息：列定义、目录、标签、矩阵/三维元信息、公式摘要；适合空表、改表前看结构，或大型表正式读数据前先确认查询范围。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "table_name": {"type": "string", "description": "目标表名，建议先通过 get_table_list 获取"},
+                    "table_name": {"type": "string", "description": "目标表名，建议先通过 get_table_list 获取；若是大表，正式读取前先看 schema"},
                     "include_readme_excerpt": {"type": "boolean", "default": True, "description": "是否附带 README 摘要而非全文"},
                     "include_formulas": {"type": "boolean", "default": True, "description": "是否附带该表已注册公式摘要"},
                 },
@@ -74,15 +74,16 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "read_table",
-            "description": "读取表数据（返回紧凑行列格式：cols + rows）；可选 columns、filters（每项 column+value 相等）、level_column+level_min/max、include_source_stats",
+            "description": "按切片读取表数据（返回紧凑行列格式：cols + rows）。仅允许返回 <=200 行；若筛选后命中 >200 行，会拒绝并提示“数据规模过大，请修改查询范围”，此时应先用 get_table_schema 看结构，再用 columns/filters/level_range 缩小范围，或改用 sparse_sample 查看代表性样本。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "table_name": {"type": "string"},
-                    "limit": {"type": "integer", "default": 50},
-                    "columns": {"type": "array", "items": {"type": "string"}},
+                    "table_name": {"type": "string", "description": "目标表名"},
+                    "limit": {"type": "integer", "default": 50, "description": "本次最多返回多少行，默认 50，最大 200；若查询命中总量 >200 行，仍会直接拒绝"},
+                    "columns": {"type": "array", "items": {"type": "string"}, "description": "仅读取这些列；建议优先显式传列名，减少上下文占用"},
                     "filters": {
                         "type": "array",
+                        "description": "等值过滤列表；每项为 {column, value}，可与 columns / level_range 组合缩小范围",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -92,10 +93,10 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                             "required": ["column"],
                         },
                     },
-                    "level_column": {"type": "string"},
-                    "level_min": {"type": "number"},
-                    "level_max": {"type": "number"},
-                    "include_source_stats": {"type": "boolean", "default": False},
+                    "level_column": {"type": "string", "description": "等级列名；未传时优先使用 level，否则回退 row_id"},
+                    "level_min": {"type": "number", "description": "等级/行号下界；需与 level_max 成对出现"},
+                    "level_max": {"type": "number", "description": "等级/行号上界；需与 level_min 成对出现"},
+                    "include_source_stats": {"type": "boolean", "default": False, "description": "是否额外附带返回行的来源统计；仍受 <=200 行限制"},
                 },
                 "required": ["table_name"],
             },
@@ -224,6 +225,9 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "完整读取三维数据表的 canonical 三轴结构。"
                 "会返回 dim1 / dim2 / metric 三个轴的全部 key、完整嵌套 data，以及属性列公式；"
                 "适合需要整体建模、推导或自行决定切片方式的场景。"
+                "⚠️ 注意：若 get_table_list 返回该表 view_slice_only=true，"
+                "说明表数据量大，应改用 read_3d_table 搭配 dim1_keys/dim2_keys/metric_keys 做精确切片，"
+                "避免一次性读取全量数据撑爆上下文。"
             ),
             "parameters": {
                 "type": "object",
@@ -1085,7 +1089,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "read_matrix",
-            "description": "以宽表形式读取 matrix。可按 level / 行子集 / 列子集 切片。",
+            "description": "以宽表形式读取 matrix。可按 level / 行子集 / 列子集 切片。若 get_table_list 返回该表 view_slice_only=true，必须传 rows 和/或 cols 缩小范围，禁止全量读取。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1250,6 +1254,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
             "name": "sparse_sample",
             "description": (
                 "从表中均匀采样 N 行，用于在不读取全表的情况下直观检查曲线形态（如减伤曲线、属性膨胀曲线）。"
+                "当 read_table 因结果 >200 行被拒绝时，优先考虑使用本工具。"
                 "按 level 列（或 row_id）升序排列后，等间距抽取 N 行，返回指定列的值（cols+rows 紧凑格式）。"
                 "典型用途：设计防御 K 值后采样减伤曲线验证，或检查 HP/ATK 膨胀趋势。"
             ),
@@ -1575,15 +1580,15 @@ _TOOL_GROUP_BY_NAME: Dict[str, str] = {
 
 _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "get_project_config": "获取当前项目的名称、类型等基础配置信息。",
-    "get_table_list": "列出当前项目下所有已创建的业务数据表（cols+rows 紧凑格式）。",
-    "get_table_schema": "查看指定表的列定义、数据类型和约束信息。",
-    "read_table": "按行列范围读取业务表的实际数据内容（cols+rows 紧凑格式，支持 columns/filters/level_range 过滤）。",
+    "get_table_list": "列出业务表最小清单，仅返回 table_name、display_name 与 view_slice_only。",
+    "get_table_schema": "查看指定表的结构与元数据；大型表正式读取前建议先看它。",
+    "read_table": "按切片读取业务表数据；命中结果超过 200 行时会拒绝并要求缩小范围或改用 sparse_sample。",
     "read_cell": "精确读取表中单个单元格的值。",
     "get_protected_cells": "查看表中标记为写保护的单元格列表。",
     "get_dependency_graph": "获取各表与公式之间的依赖关系图谱（cols+rows 紧凑格式）。",
     "get_table_readme": "读取指定业务表的 README 说明文档。",
     "read_3d_table": "按指定维度切片读取三维数据表的一部分。",
-    "read_3d_table_full": "读取三维数据表的完整结构与数据。",
+    "read_3d_table_full": "读取三维数据表的完整结构与数据；view_slice_only=true 的大表应改用 read_3d_table 做精确切片。",
     "list_skills": "列出当前项目所有可用的 SKILL 技能模板。",
     "get_skill_detail": "查看指定 SKILL 的详细配置和触发条件。",
     "render_skill_file": "预览 SKILL 文件编译后的实际可用内容。",
@@ -1622,13 +1627,13 @@ _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "set_table_directory": "将指定表归入某个目录分类节点。",
     "create_matrix_table": "新建一个矩阵式二维数据表。",
     "write_matrix_cells": "向矩阵表中指定行列位置写入数据。",
-    "read_matrix": "读取矩阵表中的数据内容。",
+    "read_matrix": "读取矩阵表内容；view_slice_only=true 的大表必须传 rows/cols 过滤，禁止全量读取。",
     "register_calculator": "注册一个数值计算器配置供后续调用。",
     "list_calculators": "列出所有已注册的计算器及其配置（cols+rows 紧凑格式）。",
     "call_calculator": "调用指定计算器执行数值计算并返回结果。",
     "expose_param_to_subsystems": "将指定项目参数暴露给关联子系统使用。",
     "list_exposed_params": "列出当前已暴露给子系统的参数清单。",
-    "sparse_sample": "对大型表进行均匀采样，获取代表性数据子集（cols+rows 紧凑格式）。",
+    "sparse_sample": "对大型表进行均匀采样，获取代表性数据子集；适合 read_table 超限后的替代方案。",
     "create_3d_table": "新建一个支持多维度切片的三维数据表。",
     "register_gameplay_table": "在玩法规划步骤中将一个玩法落地表注册到规划清单。",
     "get_gameplay_table_list": "列出所有已注册的玩法落地表及其执行状态。",
@@ -1769,6 +1774,46 @@ def _list_known_tables(conn: sqlite3.Connection) -> List[str]:
     return [r[0] for r in cur.fetchall()]
 
 
+def _schema_display_name(schema_json: Any) -> str:
+    schema: Dict[str, Any] = {}
+    if isinstance(schema_json, dict):
+        schema = schema_json
+    elif isinstance(schema_json, str) and schema_json.strip():
+        try:
+            parsed = json.loads(schema_json)
+        except json.JSONDecodeError:
+            parsed = {}
+        if isinstance(parsed, dict):
+            schema = parsed
+    return str(schema.get("display_name") or "").strip()
+
+
+def _safe_table_row_count(conn: sqlite3.Connection, table_name: str) -> int:
+    try:
+        t = assert_col_or_table(table_name)
+        row = conn.execute(f'SELECT COUNT(*) AS n FROM "{t}"').fetchone()
+        return int(row["n"] if row and "n" in row.keys() else row[0]) if row else 0
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _build_compact_table_list_rows(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    cur = conn.execute(
+        "SELECT table_name, schema_json FROM _table_registry ORDER BY table_name"
+    )
+    rows: List[Dict[str, Any]] = []
+    for rec in cur.fetchall():
+        table_name = str(rec["table_name"] or "")
+        rows.append(
+            {
+                "table_name": table_name,
+                "display_name": _schema_display_name(rec["schema_json"]),
+                "view_slice_only": _safe_table_row_count(conn, table_name) > 300,
+            }
+        )
+    return rows
+
+
 def _list_table_columns(conn: sqlite3.Connection, table_name: str) -> List[str]:
     """返回指定表的列名列表（排除 row_id），用于列相关错误提示。"""
     try:
@@ -1834,11 +1879,7 @@ def _get_project_config(conn: sqlite3.Connection) -> Dict[str, Any]:
 
 
 def _get_table_list(conn: sqlite3.Connection) -> Dict[str, Any]:
-    cur = conn.execute(
-        "SELECT table_name, layer, purpose, validation_status, "
-        "COALESCE(directory,'') AS directory FROM _table_registry ORDER BY directory, table_name"
-    )
-    rows_dicts = [dict(r) for r in cur.fetchall()]
+    rows_dicts = _build_compact_table_list_rows(conn)
     if rows_dicts:
         cols = list(rows_dicts[0].keys())
         return {"cols": cols, "rows": [[r[c] for c in cols] for r in rows_dicts], "total": len(rows_dicts)}
@@ -2014,6 +2055,9 @@ def _read_table(
             except ValueError:
                 known_cols = _list_table_columns(conn, table_name)
                 return {"error": f"filter 列名 '{coln}' 非法（含非法字符或格式错误）", "fix": f"表 '{table_name}' 的可用列: {known_cols}"}
+            if cq != "row_id" and cq not in table_columns:
+                known_cols = sorted(table_columns)
+                return {"error": f"filter 列名 '{coln}' 不存在", "fix": f"表 '{table_name}' 的可用列: {known_cols}"}
             where_parts.append(f'"{cq}" = ?')
             params.append(f.get("value"))
     if level_min is not None or level_max is not None:
@@ -2046,13 +2090,26 @@ def _read_table(
             if not c or c in seen:
                 continue
             try:
-                parts.append(f'"{assert_col_or_table(c)}"')
+                cq = assert_col_or_table(c)
             except ValueError as e:
                 return {"error": str(e)}
+            if cq not in table_columns:
+                known_cols = sorted(table_columns)
+                return {"error": f"列 '{c}' 不存在", "fix": f"表 '{table_name}' 的可用列: {known_cols}"}
+            parts.append(f'"{cq}"')
             seen.add(c)
         sel = ", ".join(parts)
     else:
         sel = "*"
+    matched_total = int(conn.execute(f'SELECT COUNT(*) AS n FROM "{t}"{where_sql}', tuple(params)).fetchone()["n"])
+    if matched_total > 200:
+        return {
+            "error": "数据规模过大，请修改查询范围",
+            "fix": (
+                f"当前查询命中 {matched_total} 行。请先用 get_table_schema 查看表结构，"
+                "再通过 columns、filters、level_min/level_max 缩小范围；若只需代表性样本，改用 sparse_sample。"
+            ),
+        }
     sql = f'SELECT {sel} FROM "{t}"{where_sql} LIMIT ?'
     params.append(lim)
     cur = conn.execute(sql, tuple(params))
