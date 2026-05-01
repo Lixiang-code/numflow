@@ -833,7 +833,12 @@ export default function Workbench() {
     return () => {
       host.removeEventListener('mouseup', onUniverMouseUp)
       disposable.dispose()
-      univer.dispose()
+      // Delay dispose by one rAF to let Univer's internal async loops (e.g.
+      // calculateAutoHeightInRange) finish their current tick before teardown.
+      const univerToDispose = univer
+      requestAnimationFrame(() => {
+        try { univerToDispose.dispose() } catch { /* suppress Univer internal disposal errors */ }
+      })
       univerRef.current = null
       univerAPIRef.current = null
       workbookRef.current = null
