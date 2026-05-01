@@ -94,6 +94,8 @@ def ensure_project_migrations(conn: sqlite3.Connection) -> None:
 
     # 第二轮优化：常量标签系统（每个常量必须 ≥1 标签；标签可挂父系统名）
     _add_column_if_missing(conn, "_constants", "tags", "TEXT NOT NULL DEFAULT '[]'")
+    # 公式常量支持：存储公式字符串，value_json 存计算结果
+    _add_column_if_missing(conn, "_constants", "formula", "TEXT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS _const_tags (

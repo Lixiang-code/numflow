@@ -99,6 +99,7 @@ def init_project_db(conn: sqlite3.Connection, *, seed_readme: bool = True) -> No
             name_en TEXT PRIMARY KEY,
             name_zh TEXT NOT NULL DEFAULT '',
             value_json TEXT NOT NULL,
+            formula TEXT,
             brief TEXT,
             scope_table TEXT,
             created_at TEXT NOT NULL,

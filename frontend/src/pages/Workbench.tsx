@@ -136,6 +136,7 @@ type ConstantItem = {
   name_en: string
   name_zh: string
   value: unknown
+  formula?: string | null
   brief?: string
   scope_table?: string | null
   tags: string[]
@@ -197,7 +198,8 @@ function ConstantsPanel({
   const startEdit = (c: ConstantItem) => {
     if (!canWrite) return
     setEditingKey(c.name_en)
-    setEditDraft(formatValue(c.value))
+    // 公式常量用 = 前缀填入；纯值常量直接填值
+    setEditDraft(c.formula ? `=${c.formula}` : formatValue(c.value))
     setSaveErr(null)
   }
 
@@ -212,13 +214,20 @@ function ConstantsPanel({
     setSaving(true)
     setSaveErr(null)
     try {
-      // 尝试解析为数字，否则按字符串处理
-      const numVal = Number(editDraft)
-      const value = editDraft.trim() !== '' && !isNaN(numVal) ? numVal : editDraft
+      let body: Record<string, unknown>
+      const trimmed = editDraft.trim()
+      if (trimmed.startsWith('=')) {
+        // 公式模式
+        body = { formula: trimmed.slice(1).trim() }
+      } else {
+        // 数值模式：尝试解析为数字，否则按字符串处理
+        const numVal = Number(trimmed)
+        body = { value: trimmed !== '' && !isNaN(numVal) ? numVal : trimmed }
+      }
       await apiFetch(`/meta/constants/${encodeURIComponent(name_en)}`, {
         method: 'PATCH',
         headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ value }),
+        body: JSON.stringify(body),
       })
       setEditingKey(null)
       onRefresh()
@@ -261,7 +270,7 @@ function ConstantsPanel({
                 <tr style={{ textAlign: 'left', borderBottom: '1px solid #333' }}>
                   <th style={{ padding: '0.25rem 0.5rem' }}>名称 (en)</th>
                   <th style={{ padding: '0.25rem 0.5rem' }}>中文</th>
-                  <th style={{ padding: '0.25rem 0.5rem' }}>值 {canWrite && <span className="muted small">（点击编辑）</span>}</th>
+                  <th style={{ padding: '0.25rem 0.5rem' }}>值 / 公式 {canWrite && <span className="muted small">（点击编辑；=公式）</span>}</th>
                   <th style={{ padding: '0.25rem 0.5rem' }}>简介</th>
                   <th style={{ padding: '0.25rem 0.5rem' }}>范围表</th>
                 </tr>
@@ -276,8 +285,9 @@ function ConstantsPanel({
                         <span style={{ display: 'flex', gap: '0.3rem', alignItems: 'center' }}>
                           <input
                             autoFocus
-                            style={{ width: 90, padding: '0.15rem 0.3rem', fontFamily: 'monospace', fontSize: '0.8rem' }}
+                            style={{ width: 140, padding: '0.15rem 0.3rem', fontFamily: 'monospace', fontSize: '0.8rem' }}
                             value={editDraft}
+                            placeholder={c.formula ? '=公式 或 数值' : '数值 或 =公式'}
                             onChange={(e) => setEditDraft(e.target.value)}
                             onKeyDown={(e) => {
                               if (e.key === 'Enter') void saveEdit(c.name_en)
@@ -292,10 +302,16 @@ function ConstantsPanel({
                       ) : (
                         <span
                           style={{ cursor: canWrite ? 'pointer' : undefined, textDecoration: canWrite ? 'underline dotted' : undefined }}
-                          title={canWrite ? '点击编辑值' : undefined}
+                          title={canWrite ? (c.formula ? `公式：${c.formula}（点击编辑）` : '点击编辑值') : undefined}
                           onClick={() => startEdit(c)}
                         >
                           {formatValue(c.value)}
+                          {c.formula && (
+                            <small style={{ marginLeft: '0.35rem', color: '#81c784', fontStyle: 'italic', fontFamily: 'monospace' }}
+                              title={`公式：${c.formula}`}>
+                              ={c.formula}
+                            </small>
+                          )}
                         </span>
                       )}
                     </td>
@@ -588,6 +604,7 @@ export default function Workbench() {
           name_en: string
           name_zh: string
           value: unknown
+          formula?: string | null
           brief?: string
           scope_table?: string | null
           tags?: string[]
@@ -600,6 +617,7 @@ export default function Workbench() {
           name_en: String(c.name_en),
           name_zh: String(c.name_zh ?? ''),
           value: c.value,
+          formula: c.formula ?? null,
           brief: c.brief,
           scope_table: c.scope_table,
           tags: Array.isArray(c.tags) ? c.tags.map(String) : [],

@@ -37,7 +37,7 @@ def get_constants(p: ProjectDB = Depends(get_project_read)):
 
     输出结构：
         {
-            "constants": [ {name_en,name_zh,value,brief,scope_table,tags[]} ... ],
+            "constants": [ {name_en,name_zh,value,formula,brief,scope_table,tags[]} ... ],
             "tags": [ {name,parent,brief} ... ]
         }
     """
@@ -45,7 +45,7 @@ def get_constants(p: ProjectDB = Depends(get_project_read)):
     constants: List[Dict[str, Any]] = []
     try:
         cur = conn.execute(
-            "SELECT name_en, name_zh, value_json, brief, scope_table, "
+            "SELECT name_en, name_zh, value_json, formula, brief, scope_table, "
             "COALESCE(tags, '[]') AS tags FROM _constants ORDER BY name_en"
         )
         for r in cur.fetchall():
@@ -64,6 +64,7 @@ def get_constants(p: ProjectDB = Depends(get_project_read)):
                     "name_en": r["name_en"],
                     "name_zh": r["name_zh"],
                     "value": v,
+                    "formula": r["formula"],
                     "brief": r["brief"],
                     "scope_table": r["scope_table"],
                     "tags": tags,
@@ -88,7 +89,8 @@ def get_constants(p: ProjectDB = Depends(get_project_read)):
 
 
 class PatchConstantBody(BaseModel):
-    value: Any = Field(..., description="新值（数字 / 字符串 / bool / null 均可）")
+    value: Any = Field(default=None, description="新值（与 formula 二选一；提供 value 会清除公式）")
+    formula: Optional[str] = Field(default=None, description="新公式字符串（与 value 二选一）")
 
 
 @router.patch("/constants/{name_en}")
@@ -97,19 +99,53 @@ def patch_constant(
     body: PatchConstantBody,
     p: ProjectDB = Depends(get_project_write),
 ):
-    """更新常量值。写权限保护。"""
+    """更新常量值或公式。写权限保护。value 与 formula 二选一。"""
+    from app.services.agent_tools import _eval_const_formula, _build_const_dep_graph, _has_const_cycle, _cascade_update_formula_consts
+    from app.services.formula_engine import parse_constant_refs
+
     conn = p.conn
     cur = conn.execute("SELECT 1 FROM _constants WHERE name_en = ?", (name_en,))
     if not cur.fetchone():
         raise HTTPException(status_code=404, detail=f"常量 {name_en} 不存在")
-    value_json = json.dumps(body.value, ensure_ascii=False)
+
+    formula_given = body.formula is not None
+    value_given = "value" in body.model_fields_set
+
+    if formula_given and value_given:
+        raise HTTPException(status_code=400, detail="value 与 formula 不能同时提供")
+    if not formula_given and not value_given:
+        raise HTTPException(status_code=400, detail="value 或 formula 必填其一")
+
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    conn.execute(
-        "UPDATE _constants SET value_json = ?, updated_at = ? WHERE name_en = ?",
-        (value_json, now, name_en),
-    )
+
+    if formula_given:
+        formula_str = body.formula.strip()  # type: ignore[union-attr]
+        if not formula_str:
+            raise HTTPException(status_code=400, detail="formula 不能为空")
+        new_deps = parse_constant_refs(formula_str)
+        dep_graph = _build_const_dep_graph(conn, exclude_name=name_en)
+        if _has_const_cycle(dep_graph, name_en, new_deps):
+            raise HTTPException(status_code=400, detail=f"公式常量 {name_en} 存在循环依赖")
+        value, err_msg = _eval_const_formula(conn, formula_str)
+        if err_msg:
+            raise HTTPException(status_code=400, detail=err_msg)
+        value_json = json.dumps(float(value) if isinstance(value, (int, float)) else value)
+        conn.execute(
+            "UPDATE _constants SET value_json = ?, formula = ?, updated_at = ? WHERE name_en = ?",
+            (value_json, formula_str, now, name_en),
+        )
+    else:
+        value_json = json.dumps(body.value, ensure_ascii=False)
+        conn.execute(
+            "UPDATE _constants SET value_json = ?, formula = NULL, updated_at = ? WHERE name_en = ?",
+            (value_json, now, name_en),
+        )
+
     conn.commit()
-    return {"ok": True, "name_en": name_en, "value": body.value}
+    _cascade_update_formula_consts(conn)
+
+    result_value = json.loads(value_json)
+    return {"ok": True, "name_en": name_en, "value": result_value, "formula": body.formula if formula_given else None}
 
 
 @router.get("/tables")

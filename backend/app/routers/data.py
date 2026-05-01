@@ -127,15 +127,15 @@ def describe_table(table_name: str, p: ProjectDB = Depends(get_project_read)):
             table_tags = []
 
         cur_c = conn.execute(
-            "SELECT name_en, name_zh, value_json, brief, scope_table, COALESCE(tags, '[]') AS tags FROM _constants ORDER BY name_en",
+            "SELECT name_en, name_zh, value_json, formula, brief, scope_table, COALESCE(tags, '[]') AS tags FROM _constants ORDER BY name_en",
         )
         for r in cur_c.fetchall():
             scope = r["scope_table"]
-            # 始终包含 scope=本表 的常数
+            # 始终包含 scope=本表 的常量
             if scope and scope != '' and scope == t:
                 pass  # 包含
             else:
-                # 全局常数（scope 为空）按 tags 交集过滤
+                # 全局常量（scope 为空）按 tags 交集过滤
                 if scope and scope != '':
                     continue  # 属于其他表，跳过
                 # scope 为空：只有 table_tags 为空（旧数据）或有交集才显示
@@ -157,6 +157,7 @@ def describe_table(table_name: str, p: ProjectDB = Depends(get_project_read)):
                     "name_en": r["name_en"],
                     "name_zh": r["name_zh"],
                     "value": v,
+                    "formula": r["formula"],
                     "brief": r["brief"],
                     "scope_table": r["scope_table"],
                 }

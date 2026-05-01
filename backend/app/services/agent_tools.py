@@ -6,12 +6,18 @@ import copy
 import json
 import sqlite3
 from itertools import product
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from app.deps import ProjectDB
 from app.services import algorithms
 from app.services.cell_writes import apply_write_cells, assert_col_or_table
-from app.services.formula_engine import normalize_self_table_refs
+from app.services.formula_engine import (
+    normalize_self_table_refs,
+    parse_constant_refs,
+    preprocess_formula,
+    safe_eval_scalar,
+    substitute_constants,
+)
 from app.services.formula_exec import (
     execute_formula_on_column,
     recalculate_downstream,
@@ -809,18 +815,26 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "function": {
             "name": "const_register",
             "description": (
-                "注册项目常数（用于公式中的 ${name} 替换；同名 upsert）。"
-                "value 必须为 number 或可转 number 的字符串。"
+                "注册项目常量（用于公式中的 ${name} 替换；同名 upsert）。"
+                "value 与 formula 二选一：数值常量填 value，公式常量填 formula（如 '${base_hp} * 1.5'，"
+                "支持 ${name} 引用其他已注册常量及数学运算）。"
                 "★ tags 必填且至少 1 个：用于在前端常量页按『主系统/分类』聚合展示，"
                 "可使用 const_tag_register 预先创建标签；通常至少包含所属主系统名。"
-                "★ brief 是对常数的描述性介绍（含义/单位/用途），应以自然语言说明，不应出现具体数值（数值由 value 承载）。"
+                "★ brief 是对常量的描述性介绍（含义/单位/用途），应以自然语言说明，不应出现具体数值（数值由 value/formula 承载）。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name_en": {"type": "string"},
                     "name_zh": {"type": "string"},
-                    "value": {"type": ["number", "string"]},
+                    "value": {
+                        "type": ["number", "string"],
+                        "description": "数值常量（与 formula 二选一）",
+                    },
+                    "formula": {
+                        "type": "string",
+                        "description": "公式字符串（与 value 二选一），如 '${base_hp} * 1.5 + 10'，支持 ${name} 引用其他已注册常量",
+                    },
                     "brief": {
                         "type": "string",
                         "description": "语义描述，禁止出现具体数值（如 '10'、'0.5'）",
@@ -833,7 +847,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                         "description": "至少 1 个分类标签（如主系统名 'combat'/'economy'）",
                     },
                 },
-                "required": ["name_en", "value", "tags"],
+                "required": ["name_en", "tags"],
                 "additionalProperties": False,
             },
         },
@@ -843,7 +857,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "function": {
             "name": "const_tag_register",
             "description": (
-                "注册常数分类标签（如主系统名 combat / economy / level_curve），"
+                "注册常量分类标签（如主系统名 combat / economy / level_curve），"
                 "用于 const_register.tags 取值与前端常量页聚合。同名 upsert。"
             ),
             "parameters": {
@@ -862,7 +876,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "const_tag_list",
-            "description": "列出所有已注册的常数标签（cols+rows 紧凑格式）",
+            "description": "列出所有已注册的常量标签（cols+rows 紧凑格式）",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     },
@@ -870,14 +884,21 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "const_set",
-            "description": "更新已存在常数的 value（不存在则报 error）",
+            "description": "更新已存在常量的 value 或 formula（不存在则报 error）。value 与 formula 二选一。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name_en": {"type": "string"},
-                    "value": {"type": ["number", "string"]},
+                    "value": {
+                        "type": ["number", "string"],
+                        "description": "新数值（与 formula 二选一，提供 value 会清除公式）",
+                    },
+                    "formula": {
+                        "type": "string",
+                        "description": "新公式字符串（与 value 二选一），如 '${base_hp} * 2'",
+                    },
                 },
-                "required": ["name_en", "value"],
+                "required": ["name_en"],
                 "additionalProperties": False,
             },
         },
@@ -887,13 +908,14 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "function": {
             "name": "const_list",
             "description": (
-                "列出所有常数（返回紧凑行列格式：cols + rows）。"
+                "列出所有常量（返回紧凑行列格式：cols + rows）。"
                 "可按 scope_table 或 tags_filter 过滤；支持 limit/offset 分页（默认最多 500 条）。"
+                "cols 包含 formula 字段：非 null 表示该常量为公式型，value 为公式计算结果。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "scope_table": {"type": "string", "description": "只返回该表（及全局）的常数"},
+                    "scope_table": {"type": "string", "description": "只返回该表（及全局）的常量"},
                     "tags_filter": {
                         "oneOf": [
                             {"type": "array", "items": {"type": "string"}},
@@ -912,7 +934,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "const_delete",
-            "description": "删除常数（按 name_en）",
+            "description": "删除常量（按 name_en）。若有其他公式常量引用本常量，会报错并列出依赖项。",
             "parameters": {
                 "type": "object",
                 "properties": {"name_en": {"type": "string"}},
@@ -1422,7 +1444,7 @@ _TOOL_GROUP_META: Dict[str, Dict[str, Any]] = {
     "write_core": {"label": "写入：文档与业务表", "order": 30, "hint": "直接改 README、项目配置或业务表内容。"},
     "compute_formula": {"label": "计算：公式与批量生成", "order": 40, "hint": "批量填表、注册公式并触发重算。"},
     "validation_snapshot": {"label": "校验：验证与快照", "order": 50, "hint": "检查规则、做快照、比对改动和平衡结果。"},
-    "meta_dictionary": {"label": "元数据：术语、常数与目录", "order": 60, "hint": "维护术语表、常数、标签和目录结构。"},
+    "meta_dictionary": {"label": "元数据：术语、常量与目录", "order": 60, "hint": "维护术语表、常量、标签和目录结构。"},
     "advanced_modeling": {"label": "高级建模：矩阵、三维与计算器", "order": 70, "hint": "处理矩阵表、三维表、计算器和跨系统参数暴露。"},
 }
 
@@ -1465,12 +1487,12 @@ _TOOL_TITLE_ZH: Dict[str, str] = {
     "glossary_register": "登记术语",
     "glossary_lookup": "查询术语",
     "glossary_list": "列出术语",
-    "const_register": "登记常数",
-    "const_tag_register": "登记常数标签",
-    "const_tag_list": "列出常数标签",
-    "const_set": "修改常数值",
-    "const_list": "列出常数",
-    "const_delete": "删除常数",
+    "const_register": "登记常量",
+    "const_tag_register": "登记常量标签",
+    "const_tag_list": "列出常量标签",
+    "const_set": "修改常量值/公式",
+    "const_list": "列出常量",
+    "const_delete": "删除常量",
     "list_directories": "查看目录树",
     "set_table_directory": "设置表目录",
     "create_matrix_table": "创建矩阵表",
@@ -1590,12 +1612,12 @@ _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "glossary_register": "向术语表中登记一个新的游戏术语及其解释。",
     "glossary_lookup": "在术语表中查询指定术语的中文定义。",
     "glossary_list": "列出术语表中所有已登记的术语条目（cols+rows 紧凑格式，支持 kind_filter 过滤和 limit/offset 分页）。",
-    "const_register": "在常数表中登记一个新的数值常量。",
-    "const_tag_register": "为常数创建或登记一个分类标签。",
-    "const_tag_list": "列出所有已定义的常数分类标签（cols+rows 紧凑格式）。",
-    "const_set": "修改已登记常数的数值。",
-    "const_list": "列出所有已登记的常数（cols+rows 紧凑格式，支持 tags_filter 过滤和 limit/offset 分页）。",
-    "const_delete": "删除一个已登记的常数条目。",
+    "const_register": "在常量表中登记一个新的数值/公式常量。",
+    "const_tag_register": "为常量创建或登记一个分类标签。",
+    "const_tag_list": "列出所有已定义的常量分类标签（cols+rows 紧凑格式）。",
+    "const_set": "修改已登记常量的数值或公式（提供 formula 可设为公式型；提供 value 可切回纯数值）。",
+    "const_list": "列出所有已登记的常量（cols+rows 紧凑格式，含 formula 字段；支持 tags_filter 过滤和 limit/offset 分页）。",
+    "const_delete": "删除一个已登记的常量条目（若有公式常量依赖则报错）。",
     "list_directories": "查看项目业务表的目录树结构。",
     "set_table_directory": "将指定表归入某个目录分类节点。",
     "create_matrix_table": "新建一个矩阵式二维数据表。",
@@ -3650,7 +3672,7 @@ def _glossary_list(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, 
 
 
 def _coerce_value_json(v: Any) -> str:
-    """常数值统一存为 JSON 串；优先解析为数值。"""
+    """常量值统一存为 JSON 串；优先解析为数值。"""
     if isinstance(v, (int, float)):
         return json.dumps(v)
     if isinstance(v, str):
@@ -3660,6 +3682,141 @@ def _coerce_value_json(v: Any) -> str:
         except (TypeError, ValueError):
             return json.dumps(s)
     return json.dumps(v)
+
+
+# ─── 公式常量辅助 ─────────────────────────────────────────────────────────────
+
+
+def _load_all_constants_for_formula(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """加载所有常量的当前值 {name_en: value}，用于公式求值。值为 null 的跳过。"""
+    rows = conn.execute("SELECT name_en, value_json FROM _constants").fetchall()
+    result: Dict[str, Any] = {}
+    for r in rows:
+        try:
+            name = r[0]
+            val = json.loads(r[1])
+            if val is not None:
+                result[name] = val
+        except Exception:  # noqa: BLE001
+            pass
+    return result
+
+
+def _build_const_dep_graph(conn: sqlite3.Connection, exclude_name: Optional[str] = None) -> Dict[str, Set[str]]:
+    """构建公式常量依赖图 {name_en: {dep_names}}（只含公式常量）。"""
+    rows = conn.execute(
+        "SELECT name_en, formula FROM _constants WHERE formula IS NOT NULL AND formula != ''"
+    ).fetchall()
+    graph: Dict[str, Set[str]] = {}
+    for r in rows:
+        name = r[0]
+        if name == exclude_name:
+            continue
+        graph[name] = parse_constant_refs(r[1])
+    return graph
+
+
+def _has_const_cycle(graph: Dict[str, Set[str]], start: str, new_deps: Set[str]) -> bool:
+    """检查在 graph 中为 start 添加 new_deps 是否产生循环依赖（BFS）。"""
+    visited: Set[str] = set()
+    stack: List[str] = list(new_deps)
+    while stack:
+        node = stack.pop()
+        if node == start:
+            return True
+        if node in visited:
+            continue
+        visited.add(node)
+        for dep in graph.get(node, set()):
+            stack.append(dep)
+    return False
+
+
+def _eval_const_formula(conn: sqlite3.Connection, formula: str) -> Tuple[Optional[Any], Optional[str]]:
+    """对公式常量求值，返回 (value, error_msg)。error_msg 为 None 表示成功。"""
+    const_refs = parse_constant_refs(formula)
+    all_consts = _load_all_constants_for_formula(conn)
+    if const_refs:
+        missing = [r for r in const_refs if r not in all_consts]
+        if missing:
+            return None, f"公式引用未注册常量：{', '.join(missing)}"
+    expr, miss = substitute_constants(formula, all_consts)
+    if miss:
+        return None, f"常量值无法转为数值：{', '.join(miss)}"
+    try:
+        expr = preprocess_formula(expr)
+        value = safe_eval_scalar(expr, {})
+        return value, None
+    except Exception as e:  # noqa: BLE001
+        return None, f"公式求值失败：{e}"
+
+
+def _cascade_update_formula_consts(conn: sqlite3.Connection) -> None:
+    """按拓扑顺序重算所有公式常量，更新 value_json。"""
+    rows = conn.execute(
+        "SELECT name_en, formula FROM _constants WHERE formula IS NOT NULL AND formula != ''"
+    ).fetchall()
+    if not rows:
+        return
+
+    formula_consts: Dict[str, str] = {r[0]: r[1] for r in rows}
+    dep_graph: Dict[str, Set[str]] = {
+        name: parse_constant_refs(formula) for name, formula in formula_consts.items()
+    }
+
+    # Kahn 拓扑排序（仅考虑公式常量间的依赖）
+    in_degree: Dict[str, int] = {name: 0 for name in formula_consts}
+    rev_graph: Dict[str, List[str]] = {name: [] for name in formula_consts}
+    for name, deps in dep_graph.items():
+        for dep in deps:
+            if dep in formula_consts:
+                in_degree[name] += 1
+                rev_graph[dep].append(name)
+
+    queue = [n for n, d in in_degree.items() if d == 0]
+    topo_order: List[str] = []
+    while queue:
+        node = queue.pop(0)
+        topo_order.append(node)
+        for dep_name in rev_graph.get(node, []):
+            in_degree[dep_name] -= 1
+            if in_degree[dep_name] == 0:
+                queue.append(dep_name)
+    # 处理剩余（有环，理论上不应发生，但容错追加）
+    remaining = [n for n in formula_consts if n not in set(topo_order)]
+    topo_order.extend(remaining)
+
+    # 以纯值常量为初始状态，逐步加入已算好的公式常量值
+    all_consts = _load_all_constants_for_formula(conn)
+    now = _now_iso()
+    updates: List[Tuple[str, str, str]] = []
+
+    for name in topo_order:
+        formula = formula_consts[name]
+        const_refs = parse_constant_refs(formula)
+        missing = [r for r in const_refs if r not in all_consts]
+        if missing:
+            continue  # 依赖缺失，跳过（保留旧值）
+        expr, miss = substitute_constants(formula, all_consts)
+        if miss:
+            continue
+        try:
+            expr = preprocess_formula(expr)
+            value = safe_eval_scalar(expr, {})
+            # 统一存为 float JSON（公式结果必为数值）
+            value_json = json.dumps(float(value))
+            all_consts[name] = float(value)
+            updates.append((value_json, now, name))
+        except Exception:  # noqa: BLE001
+            pass  # 求值失败，保留旧值
+
+    for value_json, ts, name in updates:
+        conn.execute(
+            "UPDATE _constants SET value_json = ?, updated_at = ? WHERE name_en = ?",
+            (value_json, ts, name),
+        )
+    if updates:
+        conn.commit()
 
 
 _BRIEF_NUMBER_RE = None  # 已移除：brief 允许包含阿拉伯数字
@@ -3677,8 +3834,6 @@ def _const_register(conn: sqlite3.Connection, args: Dict[str, Any], can_write: b
     name_en = str(args.get("name_en", "")).strip()
     if not __import__("re").match(r"^[A-Za-z_][A-Za-z0-9_]*$", name_en):
         return {"error": f"name_en 不合法：{name_en}"}
-    if "value" not in args:
-        return {"error": "value 必填"}
     name_zh = str(args.get("name_zh", ""))
     brief = str(args.get("brief", ""))
     brief_err = _validate_brief_no_value(brief)
@@ -3694,31 +3849,62 @@ def _const_register(conn: sqlite3.Connection, args: Dict[str, Any], can_write: b
     tags = [str(t).strip() for t in raw_tags if str(t).strip()]
     if not tags:
         return {"error": "tags 不能为空字符串"}
-    # 自动建标签（缺则插入），但不强制要求 parent
+
+    formula_raw = args.get("formula") or None
+    has_value = "value" in args
+
+    if formula_raw and has_value:
+        return {"error": "value 与 formula 不能同时提供，请二选一"}
+    if not formula_raw and not has_value:
+        return {"error": "value 或 formula 必填其一"}
+
     now = _now_iso()
+
+    if formula_raw:
+        formula_str = str(formula_raw).strip()
+        if not formula_str:
+            return {"error": "formula 不能为空"}
+        new_deps = parse_constant_refs(formula_str)
+        # 循环依赖检测
+        dep_graph = _build_const_dep_graph(conn, exclude_name=name_en)
+        if _has_const_cycle(dep_graph, name_en, new_deps):
+            return {"error": f"公式常量 {name_en} 存在循环依赖，请修改公式"}
+        # 立即求值（要求所有引用常量已注册）
+        value, err_msg = _eval_const_formula(conn, formula_str)
+        if err_msg:
+            return {"error": err_msg}
+        value_json = json.dumps(float(value) if isinstance(value, (int, float)) else value)
+        formula_to_store: Optional[str] = formula_str
+    else:
+        value_json = _coerce_value_json(args["value"])
+        formula_to_store = None
+
+    # 自动建标签
     for t in tags:
         conn.execute(
             "INSERT OR IGNORE INTO _const_tags (name, parent, brief, created_at) VALUES (?,?,?,?)",
             (t, None, "", now),
         )
-    value_json = _coerce_value_json(args["value"])
     tags_json = json.dumps(tags, ensure_ascii=False)
     conn.execute(
         """
-        INSERT INTO _constants (name_en, name_zh, value_json, brief, scope_table, tags, created_at, updated_at)
-        VALUES (?,?,?,?,?,?,?,?)
+        INSERT INTO _constants (name_en, name_zh, value_json, formula, brief, scope_table, tags, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?)
         ON CONFLICT(name_en) DO UPDATE SET
             name_zh = excluded.name_zh,
             value_json = excluded.value_json,
+            formula = excluded.formula,
             brief = excluded.brief,
             scope_table = excluded.scope_table,
             tags = excluded.tags,
             updated_at = excluded.updated_at
         """,
-        (name_en, name_zh, value_json, brief, scope_table, tags_json, now, now),
+        (name_en, name_zh, value_json, formula_to_store, brief, scope_table, tags_json, now, now),
     )
     conn.commit()
-    return {"ok": True, "name_en": name_en, "value": json.loads(value_json), "tags": tags}
+    # 级联更新依赖此常量的公式常量
+    _cascade_update_formula_consts(conn)
+    return {"ok": True, "name_en": name_en, "value": json.loads(value_json), "formula": formula_to_store, "tags": tags}
 
 
 def _const_set(conn: sqlite3.Connection, args: Dict[str, Any], can_write: bool) -> Dict[str, Any]:
@@ -3728,26 +3914,59 @@ def _const_set(conn: sqlite3.Connection, args: Dict[str, Any], can_write: bool) 
     name_en = str(args.get("name_en", "")).strip()
     cur = conn.execute("SELECT 1 FROM _constants WHERE name_en = ?", (name_en,))
     if not cur.fetchone():
-        return {"error": f"常数 {name_en} 不存在；请先 const_register"}
-    value_json = _coerce_value_json(args["value"])
-    conn.execute(
-        "UPDATE _constants SET value_json = ?, updated_at = ? WHERE name_en = ?",
-        (value_json, _now_iso(), name_en),
-    )
+        return {"error": f"常量 {name_en} 不存在；请先 const_register"}
+
+    formula_raw = args.get("formula") or None
+    has_value = "value" in args
+
+    if formula_raw and has_value:
+        return {"error": "value 与 formula 不能同时提供，请二选一"}
+    if not formula_raw and not has_value:
+        return {"error": "value 或 formula 必填其一"}
+
+    now = _now_iso()
+
+    if formula_raw:
+        formula_str = str(formula_raw).strip()
+        if not formula_str:
+            return {"error": "formula 不能为空"}
+        new_deps = parse_constant_refs(formula_str)
+        dep_graph = _build_const_dep_graph(conn, exclude_name=name_en)
+        if _has_const_cycle(dep_graph, name_en, new_deps):
+            return {"error": f"公式常量 {name_en} 存在循环依赖，请修改公式"}
+        value, err_msg = _eval_const_formula(conn, formula_str)
+        if err_msg:
+            return {"error": err_msg}
+        value_json = json.dumps(float(value) if isinstance(value, (int, float)) else value)
+        conn.execute(
+            "UPDATE _constants SET value_json = ?, formula = ?, updated_at = ? WHERE name_en = ?",
+            (value_json, formula_str, now, name_en),
+        )
+        formula_to_return: Optional[str] = formula_str
+    else:
+        value_json = _coerce_value_json(args["value"])
+        conn.execute(
+            "UPDATE _constants SET value_json = ?, formula = NULL, updated_at = ? WHERE name_en = ?",
+            (value_json, now, name_en),
+        )
+        formula_to_return = None
+
     conn.commit()
-    return {"ok": True, "name_en": name_en, "value": json.loads(value_json)}
+    _cascade_update_formula_consts(conn)
+    return {"ok": True, "name_en": name_en, "value": json.loads(value_json), "formula": formula_to_return}
 
 
 def _const_list(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any]:
-    """列出常数，返回紧凑行列格式以节省 token。
+    """列出常量，返回紧凑行列格式以节省 token。
 
     支持参数：
-    - scope_table: 按表过滤（同时包含全局常数）
+    - scope_table: 按表过滤（同时包含全局常量）
     - tags_filter: 按标签过滤，列表或逗号分隔字符串（任意匹配一个即返回）
     - limit: 每页条数（默认 500，0=不限）
     - offset: 跳过前 N 条（默认 0）
 
     返回 cols + rows 行列格式，避免每行重复字段名，比对象列表节省约 35% token。
+    formula 字段：非 null 表示公式型常量，value 为公式计算结果。
     """
     scope = args.get("scope_table")
     raw_tags_filter = args.get("tags_filter")
@@ -3770,7 +3989,7 @@ def _const_list(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     base_sql = (
-        f"SELECT name_en, name_zh, value_json, brief, scope_table, tags "
+        f"SELECT name_en, name_zh, value_json, formula, brief, scope_table, tags "
         f"FROM _constants {where} ORDER BY name_en"
     )
 
@@ -3779,16 +3998,17 @@ def _const_list(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any
             value = json.loads(r[2])
         except Exception:  # noqa: BLE001
             value = None
-        raw_tags = r[5]
+        formula = r[3]  # nullable string
+        raw_tags = r[6]
         try:
             item_tags: List[str] = json.loads(raw_tags) if isinstance(raw_tags, str) and raw_tags else []
         except Exception:  # noqa: BLE001
             item_tags = []
-        return [r[0], r[1], value, r[3], r[4], item_tags]
+        return [r[0], r[1], value, formula, r[4], r[5], item_tags]
 
     result: Dict[str, Any] = {
         "ok": True,
-        "cols": ["name_en", "name_zh", "value", "brief", "scope_table", "tags"],
+        "cols": ["name_en", "name_zh", "value", "formula", "brief", "scope_table", "tags"],
     }
 
     if tags_filter:
@@ -3796,7 +4016,7 @@ def _const_list(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any
         all_rows = [
             _parse_row(r)
             for r in conn.execute(base_sql, params).fetchall()
-            if any(t in (json.loads(r[5]) if isinstance(r[5], str) and r[5] else []) for t in tags_filter)
+            if any(t in (json.loads(r[6]) if isinstance(r[6], str) and r[6] else []) for t in tags_filter)
         ]
         total_filtered = len(all_rows)
         if offset:
@@ -3934,6 +4154,17 @@ def _const_delete(conn: sqlite3.Connection, args: Dict[str, Any], can_write: boo
     if err:
         return err
     name_en = str(args.get("name_en", "")).strip()
+    # 检查是否有公式常量引用本常量
+    formula_rows = conn.execute(
+        "SELECT name_en, formula FROM _constants WHERE formula IS NOT NULL AND formula != '' AND name_en != ?",
+        (name_en,),
+    ).fetchall()
+    dependents = [r[0] for r in formula_rows if name_en in parse_constant_refs(r[1])]
+    if dependents:
+        return {
+            "error": f"常量 {name_en} 被以下公式常量引用，请先更新或删除它们：{', '.join(dependents)}",
+            "dependents": dependents,
+        }
     conn.execute("DELETE FROM _constants WHERE name_en = ?", (name_en,))
     conn.commit()
     return {"ok": True, "name_en": name_en}
