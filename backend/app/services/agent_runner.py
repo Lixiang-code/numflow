@@ -434,8 +434,8 @@ def _agent_system_prompt_defaults() -> Dict[str, Dict[str, Any]]:
             "category": "system",
             "prompt_key": "agent_gather",
             "title": "Agent gather 阶段提示词",
-            "summary": "限定 gather 阶段只能读取项目信息并输出收集总结。",
-            "description": "用于 gather 阶段的系统提示词。",
+            "summary": "限定 gather 阶段只能读取项目信息并输出收集总结（含 list_skills + render_skill_file）。",
+            "description": "用于 gather 阶段的系统提示词。首轮并行调用 get_project_config / get_default_system_rules / get_table_list / list_skills，再按需追加 render_skill_file 等。",
             "reference_note": "在 agent_runner._run_gather_phase 中作为唯一阶段 system prompt 注入，用于约束 gather 只读收集，不允许提前设计或写入。",
             "enabled": True,
             "modules": [{"module_key": "body", "title": "完整提示词", "content": _GATHER_SYSTEM, "required": True, "enabled": True, "sort_order": 1}],
@@ -574,8 +574,10 @@ _GATHER_SYSTEM = (
     "首轮必须并行调用（一次请求同时发出）：\n"
     "  · get_project_config — 核心定义（game_type/level_cap/游戏系统等）\n"
     "  · get_default_system_rules — 02 机读设计约束\n"
-    "  · get_table_list — 已有表清单（仅 table_name / display_name / view_slice_only）\n\n"
+    "  · get_table_list — 已有表清单（仅 table_name / display_name / view_slice_only）\n"
+    "  · list_skills — 列出当前项目可用的 SKILL 制作说明（按 step_id 过滤更精准）\n\n"
     "根据上述结果，按需追加调用（**应**并行，独立读取一次发出）：\n"
+    "  · render_skill_file — 对 list_skills 返回的每个 enabled SKILL 逐一调用，读取其完整内容\n"
     "  · get_table_schema — 查看关键表结构；若 view_slice_only=true，必须先看它\n"
     "  · get_table_readme / read_table — 查看关键表 README 与 <=200 行数据切片\n"
     "  · sparse_sample — 对大表看代表性样本，避免直接读大结果集\n"
@@ -585,7 +587,8 @@ _GATHER_SYSTEM = (
     "## 收集完毕\n"
     "- 项目类型与核心配置：...\n"
     "- 现有表及关键结构：...\n"
-    "- 与本次任务相关的 02 设计约束：...\n\n"
+    "- 与本次任务相关的 02 设计约束：...\n"
+    "- 可用 SKILL 及核心要点：...\n\n"
     "**严禁调用任何写入工具。**"
 )
 

@@ -247,6 +247,7 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
         "5. 技能设计逐个落地\n"
         "**你应当通读所有SKILL了解各项数值工作的原则，做出优质的初步设计**\n"
         "操作：\n"
+        "  0. `list_skills(step_id=\"gameplay_planning\")` + `render_skill_file` → 通读可用 SKILL 制作说明；\n"
         "  1. `get_project_config` → 读取 fixed_layer_config.game_systems 了解启用的玩法系统；\n"
         "  2. `get_default_system_rules` → 了解每个系统的默认子维度约束；\n"
         "  3. 分析每个启用的父系统，根据 get_default_system_rules 的约束自行拆分子维度\n"
