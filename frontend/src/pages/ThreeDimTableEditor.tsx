@@ -37,6 +37,17 @@ type ConstantItem = {
   brief?: string
 }
 
+const REF_COLORS = [
+  { base: '#1976d2', bg: '#e3f2fd' },
+  { base: '#c62828', bg: '#ffebee' },
+  { base: '#2e7d32', bg: '#e8f5e9' },
+  { base: '#e65100', bg: '#fff3e0' },
+  { base: '#6a1b9a', bg: '#f3e5f5' },
+  { base: '#00695c', bg: '#e0f2f1' },
+  { base: '#ad1457', bg: '#fce4ec' },
+  { base: '#4e342e', bg: '#efebe9' },
+]
+
 function formatValue(value: unknown, fmt?: string): string {
   if (value == null || value === '') return '—'
   if (typeof value !== 'number') return String(value)
@@ -49,25 +60,58 @@ function formatValue(value: unknown, fmt?: string): string {
   return value.toFixed(decimals)
 }
 
-function parseFormulaRefs(text: string): { colRefs: Set<string>; constRefs: string[] } {
-  const colRefs = new Set<string>()
+function parseFormulaRefs(text: string): { colRefs: string[]; constRefs: string[]; refColorMap: Map<string, string> } {
+  const colRefs: string[] = []
   const constRefs: string[] = []
+  const refColorMap = new Map<string, string>()
+  const colSeen = new Set<string>()
   const constSeen = new Set<string>()
-  if (!text) return { colRefs, constRefs }
-  const colRe = /@(?!@)\w+/g
+  let colorIdx = 0
+  if (!text) return { colRefs, constRefs, refColorMap }
+
+  const allRefs: Array<{ kind: 'col' | 'const'; name: string }> = []
+  const colRe = /@(?!@)(\w+)/g
   let m: RegExpExecArray | null
   while ((m = colRe.exec(text)) !== null) {
-    colRefs.add(m[0].slice(1))
+    allRefs.push({ kind: 'col', name: m[1] })
   }
   const constRe = /\$\{(\w+)\}/g
   while ((m = constRe.exec(text)) !== null) {
-    const name = m[1]
-    if (!constSeen.has(name)) {
-      constSeen.add(name)
-      constRefs.push(name)
+    allRefs.push({ kind: 'const', name: m[1] })
+  }
+
+  for (const ref of allRefs) {
+    if (ref.kind === 'col') {
+      if (!colSeen.has(ref.name)) {
+        colSeen.add(ref.name)
+        colRefs.push(ref.name)
+        if (!refColorMap.has(ref.name)) {
+          refColorMap.set(ref.name, REF_COLORS[colorIdx % REF_COLORS.length].base)
+          colorIdx++
+        }
+      }
+    } else {
+      if (!constSeen.has(ref.name)) {
+        constSeen.add(ref.name)
+        constRefs.push(ref.name)
+      }
     }
   }
-  return { colRefs, constRefs }
+  return { colRefs, constRefs, refColorMap }
+}
+
+function renderColoredFormula(formula: string, colorMap: Map<string, string>): React.ReactNode[] {
+  const parts = formula.split(/(@\w+|\$\{\w+\})/g)
+  return parts.map((part, i) => {
+    const colMatch = part.match(/^@(\w+)$/)
+    if (colMatch) {
+      const color = colorMap.get(colMatch[1])
+      if (color) return <span key={i} style={{ color, fontWeight: 700 }}>{part}</span>
+    }
+    const constMatch = part.match(/^\$\{(\w+)\}$/)
+    if (constMatch) return <span key={i} style={{ color: '#7b1fa2', fontWeight: 600 }}>{part}</span>
+    return <span key={i}>{part}</span>
+  })
 }
 
 export default function ThreeDimTableEditor({
@@ -218,7 +262,7 @@ export default function ThreeDimTableEditor({
   }, [colAxis, effectiveFixedValue, fixedAxis, formulaEntries, rowAxis])
 
   const activeFormulaText = editingFormulaCol ? editingFormulaText : showAddFormula ? newFormulaText : ''
-  const { colRefs: highlightedCols, constRefs: activeConstRefs } = useMemo(
+  const { colRefs, constRefs: activeConstRefs, refColorMap } = useMemo(
     () => parseFormulaRefs(activeFormulaText),
     [activeFormulaText],
   )
@@ -373,17 +417,30 @@ export default function ThreeDimTableEditor({
 
   const rowKeys = axisOptions[rowAxis].keys
   const colKeys = axisOptions[colAxis].keys
-  const isHighlightingActive = Boolean(activeFormulaText && highlightedCols.size > 0)
+  const isHighlightingActive = Boolean(activeFormulaText && colRefs.length > 0)
 
-  const colKeyHighlighted = (colKey: string) => {
-    if (!isHighlightingActive) return false
-    if (colAxis === 'metric') return highlightedCols.has(colKey)
-    return false
+  const getColColor = (colKey: string): string | undefined => {
+    if (!isHighlightingActive) return undefined
+    if (colAxis === 'metric') return refColorMap.get(colKey)
+    return undefined
   }
-  const rowKeyHighlighted = (rowKey: string) => {
-    if (!isHighlightingActive) return false
-    if (rowAxis === 'metric') return highlightedCols.has(rowKey)
-    return false
+  const getRowColor = (rowKey: string): string | undefined => {
+    if (!isHighlightingActive) return undefined
+    if (rowAxis === 'metric') return refColorMap.get(rowKey)
+    return undefined
+  }
+  const getCellBg = (colKey: string, rowKey: string): string | undefined => {
+    const cc = getColColor(colKey)
+    const rc = getRowColor(rowKey)
+    if (cc) {
+      const entry = REF_COLORS.find((c) => c.base === cc)
+      if (entry) return entry.bg
+    }
+    if (rc) {
+      const entry = REF_COLORS.find((c) => c.base === rc)
+      if (entry) return entry.bg
+    }
+    return undefined
   }
 
   const getValue = (rowKey: string, colKey: string): unknown => {
@@ -410,7 +467,7 @@ export default function ThreeDimTableEditor({
           const c = constMap.get(name)
           const isEditing = editingConstName === name
           return (
-            <span key={name} className={`matrix-const-chip${isEditing ? ' matrix-const-chip-edit' : ''}`}>
+            <span key={name} style={{ display: 'inline-flex' }}>
               {isEditing ? (
                 <span className="matrix-const-chip-edit-row">
                   <code className="matrix-const-chip-name">{name}</code>
@@ -436,6 +493,24 @@ export default function ThreeDimTableEditor({
                   <span className="matrix-const-chip-val">{c?.value != null ? String(c.value) : c?.formula || '?'}</span>
                 </button>
               )}
+            </span>
+          )
+        })}
+      </div>
+    )
+  }
+
+  const renderRefLegend = (refs: string[], map: Map<string, string>) => {
+    if (refs.length === 0) return null
+    return (
+      <div className="matrix-ref-legend">
+        {refs.map((name) => {
+          const color = map.get(name)
+          if (!color) return null
+          return (
+            <span key={name} className="matrix-ref-legend-chip" style={{ borderColor: color }}>
+              <span className="matrix-ref-legend-dot" style={{ background: color }} />
+              <code style={{ color }}>@{name}</code>
             </span>
           )
         })}
@@ -537,13 +612,13 @@ export default function ThreeDimTableEditor({
               </th>
               {colKeys.map((colKey) => {
                 const formula = colAxis === 'metric' ? getMetricFormula(colKey) : undefined
-                const hl = colKeyHighlighted(colKey)
+                const hlColor = getColColor(colKey)
                 return (
                   <th
                     key={colKey}
-                    className={`matrix-col-head${hl ? ' matrix-col-highlighted' : ''}`}
+                    className={`matrix-col-head${hlColor ? ' matrix-col-hl' : ''}`}
                     title={formula?.formula || axisOptions[colAxis].subTitle(colKey)}
-                    style={hl ? { boxShadow: 'inset 0 -3px 0 #1976d2' } : undefined}
+                    style={hlColor ? { borderBottom: `3px solid ${hlColor}`, background: REF_COLORS.find((c) => c.base === hlColor)?.bg } : undefined}
                   >
                     <span className="matrix-head-zh">
                       {axisOptions[colAxis].title(colKey)}
@@ -558,13 +633,13 @@ export default function ThreeDimTableEditor({
           <tbody>
             {rowKeys.map((rowKey) => {
               const rowFormula = rowAxis === 'metric' ? getMetricFormula(rowKey) : undefined
-              const rowHl = rowKeyHighlighted(rowKey)
+              const rowHlColor = getRowColor(rowKey)
               return (
                 <tr key={rowKey}>
                   <td
-                    className={`matrix-row-head${rowHl ? ' matrix-row-highlighted' : ''}`}
+                    className={`matrix-row-head${rowHlColor ? ' matrix-row-hl' : ''}`}
                     title={rowFormula?.formula || axisOptions[rowAxis].subTitle(rowKey)}
-                    style={rowHl ? { boxShadow: 'inset -3px 0 0 #1976d2' } : undefined}
+                    style={rowHlColor ? { borderLeft: `3px solid ${rowHlColor}`, background: REF_COLORS.find((c) => c.base === rowHlColor)?.bg } : undefined}
                   >
                     <span className="matrix-head-zh">
                       {axisOptions[rowAxis].title(rowKey)}
@@ -580,9 +655,9 @@ export default function ThreeDimTableEditor({
                         : effectiveFixedValue
                     const metricMeta = metricKey ? metricMetaMap.get(metricKey) : undefined
                     const value = getValue(rowKey, colKey)
-                    const cellHl = colKeyHighlighted(colKey) || rowKeyHighlighted(rowKey)
+                    const cellBg = getCellBg(colKey, rowKey)
                     return (
-                      <td key={colKey} className={`matrix-cell${value == null ? ' matrix-cell-empty' : ''}${cellHl ? ' matrix-cell-highlighted' : ''}`}>
+                      <td key={colKey} className={`matrix-cell${value == null ? ' matrix-cell-empty' : ''}`} style={cellBg ? { background: cellBg } : undefined}>
                         {formatValue(value, metricMeta?.number_format)}
                       </td>
                     )
@@ -645,12 +720,8 @@ export default function ThreeDimTableEditor({
                   style={{ flex: 1, resize: 'vertical' }}
                 />
               </div>
+              {renderRefLegend(colRefs, refColorMap)}
               {renderConstChips(activeConstRefs)}
-              {isHighlightingActive && (
-                <div className="muted small" style={{ marginTop: 4 }}>
-                  引用列已高亮：{[...highlightedCols].join(', ')}
-                </div>
-              )}
               <div style={{ display: 'flex', gap: 4, marginTop: 8 }}>
                 <button type="button" className="btn tiny primary" onClick={() => void addFormula()} disabled={formulaSaving || !newFormulaCol || !newFormulaText.trim()}>
                   {formulaSaving ? '保存中…' : '保存'}
@@ -673,7 +744,9 @@ export default function ThreeDimTableEditor({
             {formulaEntries.map(({ col, formula }) => {
               const isEditing = editingFormulaCol === col.key
               const isRelevant = relevantFormulaEntries.some((e) => e.col.key === col.key)
-              const editRefs = isEditing ? parseFormulaRefs(editingFormulaText) : { colRefs: new Set<string>(), constRefs: [] as string[] }
+              const editRefs = isEditing ? parseFormulaRefs(editingFormulaText) : { colRefs: [] as string[], constRefs: [] as string[], refColorMap: new Map<string, string>() }
+              const displayRefs = isEditing ? { colRefs: editRefs.colRefs, refColorMap: editRefs.refColorMap, constRefs: editRefs.constRefs }
+                : parseFormulaRefs(formula.formula)
               return (
                 <div
                   key={col.key}
@@ -707,12 +780,8 @@ export default function ThreeDimTableEditor({
                         style={{ width: '100%', resize: 'vertical' }}
                         autoFocus
                       />
+                      {renderRefLegend(editRefs.colRefs, editRefs.refColorMap)}
                       {renderConstChips(editRefs.constRefs)}
-                      {editRefs.colRefs.size > 0 && (
-                        <div className="muted small" style={{ marginTop: 4 }}>
-                          引用列已高亮：{[...editRefs.colRefs].join(', ')}
-                        </div>
-                      )}
                       <div style={{ display: 'flex', gap: 4, marginTop: 6 }}>
                         <button
                           type="button"
@@ -726,7 +795,9 @@ export default function ThreeDimTableEditor({
                       </div>
                     </div>
                   ) : (
-                    <code className="matrix-formula-text">{formula.formula}</code>
+                    <code className="matrix-formula-text matrix-formula-text-colored">
+                      {renderColoredFormula(formula.formula, displayRefs.refColorMap)}
+                    </code>
                   )}
                 </div>
               )
