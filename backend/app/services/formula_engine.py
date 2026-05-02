@@ -573,8 +573,9 @@ def eval_series(formula: str, frames: Dict[str, pd.DataFrame]) -> pd.Series:
 
 
 # 同行列引用：@col_name（无表前缀，无括号），不匹配 @T[col] 与 @@T[col]
+# 使用 (?![\[\w]) 防止回溯匹配：@other_table[hp] 不会误匹配 @other_tabl
 _SAME_ROW_REF = re.compile(
-    r"(?<!@)@(?!@)([\u4e00-\u9fffA-Za-z_][\u4e00-\u9fffA-Za-z0-9_]*)(?!\[)"
+    r"(?<!@)@(?!@)([\u4e00-\u9fffA-Za-z_][\u4e00-\u9fffA-Za-z0-9_]*)(?![\[\w])"
 )
 
 
@@ -582,16 +583,24 @@ _POW_CARET = re.compile(r"\^")
 
 
 def normalize_self_table_refs(formula: str, table_name: str) -> str:
-    """把 @T[col] / @this[col] / @@T[col] / @@this[col] 中的 T、this 替换为当前表名。
+    """把 @T[col] / @this[col] / @@T[col] / @@this[col] / 裸 @col 统一重写为完整表名引用。
 
-    AI 经常使用 ``@T[col]`` 或 ``@this[col]`` 这种"自引用"写法；此处统一在公式入口
-    把它们重写成真实表名，避免引擎把 T/this 当成不存在的表去查找。
+    AI 经常使用 ``@T[col]``、``@this[col]`` 或裸 ``@col`` 这三种写法；
+    此处统一把它们重写成 ``@table_name[col]``，避免引擎找不到表或语法不匹配。
+    
+    **顺序重要**：先处理裸 @col（无括号），再处理 @T[col]/@this[col]（有括号），
+    避免已转换的 @table_name[col] 被 _SAME_ROW_REF 回溯匹配。
     """
     if not table_name:
         return formula
-    # 先处理 @@（整列）再处理 @（逐行），保持与正则相同的优先级语义
+    # 第1步：裸 @col → @table_name[col]（先处理，因为不含括号不会干扰后续转换）
+    formula = _SAME_ROW_REF.sub(
+        lambda m: f"@{table_name}[{m.group(1)}]", formula
+    )
+    # 第2步：@@T[col] / @@this[col] → @@table_name[col]（双@ 整列引用）
     formula = re.sub(r"@@T\[", f"@@{table_name}[", formula)
     formula = re.sub(r"@@this\[", f"@@{table_name}[", formula)
+    # 第3步：@T[col] / @this[col] → @table_name[col]（单@ 逐行引用）
     formula = re.sub(r"(?<!@)@T\[", f"@{table_name}[", formula)
     formula = re.sub(r"(?<!@)@this\[", f"@{table_name}[", formula)
     return formula
