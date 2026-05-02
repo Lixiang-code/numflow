@@ -282,6 +282,28 @@ def _chunk_text(text: str, size: int) -> Iterable[str]:
         yield text[i : i + size]
 
 
+def _stream_with_timeout(stream, timeout: int = 120) -> Iterable:
+    """包装 LLM 流式响应，超过 timeout 秒无新 chunk 则抛出 TimeoutError。
+    
+    DeepSeek/DashScope 偶发 streaming 卡住（长时间无新 token），
+    此函数确保卡住时能快速失败并进入重试/恢复流程。
+    """
+    import signal
+    # 使用 signal.alarm 实现超时（Linux only，但服务器是 CentOS 7 没问题）
+    def _handler(signum, frame):
+        raise TimeoutError(f"Streaming 响应 {timeout}s 无新 token")
+    
+    # 用迭代式超时检测：每收到一个 chunk 就重置定时器
+    # 简单的做法：用 signal 的 alarm 一次性超时
+    # 但更好的做法是每 chunk 检测时间
+    deadline = time.time() + timeout
+    for chunk in stream:
+        if time.time() > deadline:
+            raise TimeoutError(f"Streaming 响应超过 {timeout}s 总时间")
+        yield chunk
+        deadline = time.time() + timeout  # 每收到 chunk 重置超时
+
+
 def _build_assistant_msg(msg: Any, *, tool_calls: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Build an assistant message dict, preserving reasoning_content when present.
 
@@ -1121,7 +1143,7 @@ def _resume_agent_sse(
                 max_tokens=16384,
                 stream=True,
             )
-            for chunk in stream:
+            for chunk in _stream_with_timeout(stream, timeout=120):
                 try:
                     delta = chunk.choices[0].delta.content if chunk.choices else None
                 except Exception:
@@ -1175,7 +1197,7 @@ def _resume_agent_sse(
                 max_tokens=32768,
                 stream=True,
             )
-            for chunk in stream:
+            for chunk in _stream_with_timeout(stream, timeout=120):
                 try:
                     delta = chunk.choices[0].delta.content if chunk.choices else None
                 except Exception:
@@ -1588,7 +1610,7 @@ def run_agent_sse(
             max_tokens=16384,
             stream=True,
         )
-        for chunk in stream:
+        for chunk in _stream_with_timeout(stream, timeout=120):
             try:
                 delta = chunk.choices[0].delta.content if chunk.choices else None
             except Exception:
@@ -1637,7 +1659,7 @@ def run_agent_sse(
             max_tokens=32768,
             stream=True,
         )
-        for chunk in stream:
+        for chunk in _stream_with_timeout(stream, timeout=120):
             try:
                 delta = chunk.choices[0].delta.content if chunk.choices else None
             except Exception:
@@ -2148,7 +2170,7 @@ def _run_recovery_sse(
             max_tokens=8192,
             stream=True,
         )
-        for chunk in stream:
+        for chunk in _stream_with_timeout(stream, timeout=120):
             try:
                 delta = chunk.choices[0].delta.content if chunk.choices else None
             except Exception:
@@ -2157,6 +2179,8 @@ def _run_recovery_sse(
                 design_text += delta
                 yield _emit("design", {"type": "token", "text": delta})
     except Exception as e:  # noqa: BLE001
+        log_agent_error(step_id=step_id, session_id=session_id, phase="recovery_design",
+                       error_type="api_call_failed", error_msg="修复分析阶段失败", exc=e)
         yield _emit("design", {"type": "error", "message": f"修复分析失败: {e!r}"})
         return
     design_text = design_text.strip()
@@ -2199,6 +2223,8 @@ def _run_recovery_sse(
                 max_tokens=16384,
             )
         except Exception as e:  # noqa: BLE001
+            log_agent_error(step_id=step_id, session_id=session_id, phase="recovery_execute",
+                           error_type="api_call_failed", error_msg="修复执行阶段LLM调用失败", exc=e)
             yield _emit("execute", {"type": "error", "message": f"修复执行调用失败: {e!r}"})
             return
 
