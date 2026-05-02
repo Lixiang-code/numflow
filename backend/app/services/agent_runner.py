@@ -381,7 +381,7 @@ def _base_common_system(mode_norm: str) -> str:
             "①创建 2D 分配矩阵用 create_matrix_table（kind=attr_alloc 或 res_alloc）；"
             "②写入用 write_matrix_cells（行=玩法子系统，列=属性或资源）；"
             "③创建后必须调用 register_calculator 注册 fun(level, gameplay, attr|res[, grain])，"
-            "brief 必须 ≥8 字符；下游一律用 call_calculator 取值，避免硬编码。",
+            "brief 必填；下游一律用 call_calculator 取值，避免硬编码。",
             "【三维数据表（create_3d_table）】"
             "当一张表需要两个真实维度时（如 等级×宝石类型、等级×装备部位），必须用 create_3d_table，"
             "不要把其中一维硬塞成 level=1 或伪二维表。\n"

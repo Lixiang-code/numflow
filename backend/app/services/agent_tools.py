@@ -1109,7 +1109,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
             "name": "register_calculator",
             "description": (
                 "把一张 matrix 表（或普通表）注册为可被查询的 calculator。"
-                "axes 描述形参 → 数据库列的映射。brief 必填，至少 8 字符，必须说明用途与入参语义。"
+                "axes 描述形参 → 数据库列的映射。brief 必填，应说明用途与入参语义。"
             ),
             "parameters": {
                 "type": "object",
@@ -1129,7 +1129,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                         },
                     },
                     "value_column": {"type": "string", "default": "value"},
-                    "brief": {"type": "string", "description": "用途说明，必填，≥8 字符"},
+                    "brief": {"type": "string", "description": "用途说明，必填"},
                     "grain": {"type": "string", "description": "可选：matrix_resource 时的粒度（hourly/per_level/cumulative）"},
                 },
                 "required": ["name", "kind", "table_name", "axes", "brief"],

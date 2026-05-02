@@ -135,7 +135,7 @@ def test_matrix_auto_lookup_calculator_registered():
 
 # ---------- calculator registry ----------
 
-def test_register_calculator_brief_min_length():
+def test_register_calculator_brief_required():
     conn = _new_conn()
     create_dynamic_table(
         conn,
@@ -146,16 +146,16 @@ def test_register_calculator_brief_min_length():
     try:
         register_calculator(
             conn,
-            name="too_short",
+            name="no_brief",
             kind="lookup",
             table_name="t_brief",
             axes=[{"name": "level", "source": "level"}],
-            brief="short",
+            brief="",
         )
     except Exception as e:
-        assert "8" in str(e) or "brief" in str(e).lower()
+        assert "brief" in str(e).lower()
     else:
-        raise AssertionError("brief<8 应被拒绝")
+        raise AssertionError("空 brief 应被拒绝")
 
 
 def test_register_and_call_lookup_calculator():

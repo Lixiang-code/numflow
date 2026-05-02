@@ -189,7 +189,7 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
         "  6. `update_table_readme`：写每行子系统选这些属性的设计意图、留 0 的原因。\n"
         "★ 行覆盖步骤 2 注册的所有玩法表 table_id；列覆盖所有勾选属性；≥80% 属性出现在 ≥2 个子系统中。\n"
         "★ 若 get_gameplay_table_list 返回空，须暂停并提示用户：步骤 2 玩法规划尚未完成。\n"
-        "★ register_calculator 的 brief 必须 ≥8 字符。"
+        "★ register_calculator 的 brief 必填，应说明用途与入参语义。"
     ),
     "cultivation_resource_framework": (
         _NAMING_HEADER
@@ -229,7 +229,7 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
         "brief='查询玩法子系统在指定资源上的投放量；grain 选 per_hour/per_level/cumulative，"
         "内部从 num_resource_framework 取对应列再乘以分配比例')`；\n"
         "  6. README 列出 (玩法×资源) 切片示例。\n"
-        "★ register_calculator 必须含 grain 形参；brief ≥8 字符。\n"
+        "★ register_calculator 必须含 grain 形参；brief 必填，应说明用途。\n"
         "★ 留 0 的单元格在 README 注明设计原因（scope 隔离）。\n"
         "★ 若 get_gameplay_table_list 返回空，须暂停并提示用户：步骤 2 玩法规划尚未完成。"
     ),

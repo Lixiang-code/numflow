@@ -36,8 +36,8 @@ def register_calculator(
         raise ValueError(f"未知 calculator kind={kind}（允许：{sorted(_VALID_KINDS)}）")
     if not name or not name.replace("_", "").isalnum():
         raise ValueError(f"calculator 名称非法：{name!r}（要求 a-z/0-9/_）")
-    if not brief or len(brief.strip()) < 8:
-        raise ValueError("brief 至少 8 字符，必须说明本 calculator 的用途、入参语义、返回值含义")
+    if not brief or not brief.strip():
+        raise ValueError("brief 必填，应说明本 calculator 的用途、入参语义、返回值含义")
     cur = conn.execute("SELECT 1 FROM _table_registry WHERE table_name = ?", (table_name,))
     if not cur.fetchone():
         raise ValueError(f"目标表 {table_name} 不在 _table_registry")

@@ -69,7 +69,7 @@ _MATRIX_TABLE_HINT = (
     "   call_calculator 优先按公式算 level 切片；单切片常量模式下才回退基准；【禁止 matrix_resource 使用 scale_mode='static'】\n"
     "③写入用 write_matrix_cells，行=玩法子系统(如 equip_base/equip_enhance)，列=属性或资源；"
     "④创建后必须 register_calculator 注册 fun(gameplay, attr|res[, level, grain])，"
-    "brief 字段必须 ≥8 字符，写清楚函数语义与 grain 含义；"
+     "brief 字段必填，写清楚函数语义与 grain 含义；"
     "⑤下游可用 call_calculator 取值，不要手工 read_matrix 拼装。"
 )
 
@@ -274,7 +274,7 @@ PIPELINE_STEP_SPECS: List[StepSpec] = [
             "列覆盖所有勾选属性（缺一不可）",
             "全部属性都至少出现在 ≥1 个子系统的非零单元格中",
             "≥80% 的属性出现在 ≥2 个子系统中（README 中显式核对）",
-            "为这张表 register_calculator，brief 字段 ≥8 字符并写清 grain 语义",
+            "为这张表 register_calculator，brief 字段必填并写清 grain 语义",
             "下游可用 call_calculator(name, level=L, gameplay=G, attr=A) 拿到值",
         ],
         agent_hint=_AGENT_THREE_PHASE_HINT + "\n" + _MATRIX_TABLE_HINT + "\n" + _NAMING_RULE_HINT + (
@@ -367,7 +367,7 @@ PIPELINE_STEP_SPECS: List[StepSpec] = [
             "gameplay_res_alloc 用 create_matrix_table(kind='matrix_resource') 创建",
             "行覆盖所有玩法子系统（同 gameplay_attr_alloc 的行）",
             "列覆盖 num_resource_framework 中出现的所有资源",
-            "register_calculator 必须包含 grain 形参，brief ≥8 字符并描述三档语义",
+            "register_calculator 必须包含 grain 形参，brief 必填并描述三档语义",
             "下游可用 call_calculator(name, level=L, gameplay=G, res=R, grain='per_level') 取值",
             "未覆盖的 (玩法×资源) 单元格留空或 0，README 注明设计原因",
         ],
