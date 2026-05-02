@@ -18,6 +18,15 @@ from app.config import (
 _STREAM_READ_TIMEOUT = 120.0
 
 
+def _is_deepseek_model(model: str) -> bool:
+    """Only v4 models route to DeepSeek's own API; older deepseek-* models are served by DashScope."""
+    return model in DEEPSEEK_MODELS
+
+
+def _is_mimo_model(model: str) -> bool:
+    return model.startswith("mimo-")
+
+
 def get_client() -> OpenAI:
     if not DASHSCOPE_API_KEY:
         raise RuntimeError("DASHSCOPE_API_KEY 未配置（backend/.env 或环境变量）")
