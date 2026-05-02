@@ -282,34 +282,6 @@ def _chunk_text(text: str, size: int) -> Iterable[str]:
         yield text[i : i + size]
 
 
-def _stream_with_timeout(stream, timeout: int = 120) -> Iterable:
-    """包装 LLM 流式响应，超过 timeout 秒无新 chunk 则抛出 TimeoutError。
-    
-    DeepSeek/DashScope 偶发 streaming 卡住（长时间无新 token），
-    此函数使用 signal.alarm 确保卡住时能快速失败并进入重试/恢复流程。
-    """
-    import signal
-    
-    class _TimeoutError(Exception):
-        pass
-    
-    def _handler(signum, frame):
-        raise _TimeoutError(f"Streaming 响应 {timeout}s 无新 token")
-    
-    old_handler = signal.signal(signal.SIGALRM, _handler)
-    old_interval = signal.setitimer(signal.ITIMER_REAL, 0, 0)  # 清除旧定时器
-    try:
-        signal.setitimer(signal.ITIMER_REAL, timeout, 0)
-        for chunk in stream:
-            signal.setitimer(signal.ITIMER_REAL, timeout, 0)  # 重置
-            yield chunk
-    except _TimeoutError:
-        raise TimeoutError(f"Streaming 响应超过 {timeout}s 无新 token")
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0, 0)
-        signal.signal(signal.SIGALRM, old_handler)
-
-
 def _build_assistant_msg(msg: Any, *, tool_calls: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Build an assistant message dict, preserving reasoning_content when present.
 
@@ -1149,7 +1121,7 @@ def _resume_agent_sse(
                 max_tokens=16384,
                 stream=True,
             )
-            for chunk in _stream_with_timeout(stream, timeout=120):
+            for chunk in stream:
                 try:
                     delta = chunk.choices[0].delta.content if chunk.choices else None
                 except Exception:
@@ -1203,7 +1175,7 @@ def _resume_agent_sse(
                 max_tokens=32768,
                 stream=True,
             )
-            for chunk in _stream_with_timeout(stream, timeout=120):
+            for chunk in stream:
                 try:
                     delta = chunk.choices[0].delta.content if chunk.choices else None
                 except Exception:
@@ -1616,7 +1588,7 @@ def run_agent_sse(
             max_tokens=16384,
             stream=True,
         )
-        for chunk in _stream_with_timeout(stream, timeout=120):
+        for chunk in stream:
             try:
                 delta = chunk.choices[0].delta.content if chunk.choices else None
             except Exception:
@@ -1665,7 +1637,7 @@ def run_agent_sse(
             max_tokens=32768,
             stream=True,
         )
-        for chunk in _stream_with_timeout(stream, timeout=120):
+        for chunk in stream:
             try:
                 delta = chunk.choices[0].delta.content if chunk.choices else None
             except Exception:
@@ -2176,7 +2148,7 @@ def _run_recovery_sse(
             max_tokens=8192,
             stream=True,
         )
-        for chunk in _stream_with_timeout(stream, timeout=120):
+        for chunk in stream:
             try:
                 delta = chunk.choices[0].delta.content if chunk.choices else None
             except Exception:

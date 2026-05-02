@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+import httpx
 from openai import OpenAI
 
 from app.config import (
@@ -12,32 +13,36 @@ from app.config import (
     MIMO_API_KEY, MIMO_BASE_URL,
 )
 
-
-def _is_deepseek_model(model: str) -> bool:
-    """Only v4 models route to DeepSeek's own API; older deepseek-* models are served by DashScope."""
-    return model in DEEPSEEK_MODELS
-
-
-def _is_mimo_model(model: str) -> bool:
-    return model.startswith("mimo-")
+# 流式响应超时：每 chunk 之间最长等待 120 秒
+# 解决 DeepSeek/DashScope streaming 卡住导致 agent 永久挂起的问题
+_STREAM_READ_TIMEOUT = 120.0
 
 
 def get_client() -> OpenAI:
     if not DASHSCOPE_API_KEY:
         raise RuntimeError("DASHSCOPE_API_KEY 未配置（backend/.env 或环境变量）")
-    return OpenAI(api_key=DASHSCOPE_API_KEY, base_url=DASHSCOPE_BASE_URL)
+    return OpenAI(
+        api_key=DASHSCOPE_API_KEY, base_url=DASHSCOPE_BASE_URL,
+        timeout=httpx.Timeout(connect=10.0, read=_STREAM_READ_TIMEOUT, write=30.0, pool=10.0),
+    )
 
 
 def get_deepseek_client() -> OpenAI:
     if not DEEPSEEK_API_KEY:
         raise RuntimeError("DEEPSEEK_API_KEY 未配置（backend/.env 或环境变量）")
-    return OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+    return OpenAI(
+        api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL,
+        timeout=httpx.Timeout(connect=10.0, read=_STREAM_READ_TIMEOUT, write=30.0, pool=10.0),
+    )
 
 
 def get_mimo_client() -> OpenAI:
     if not MIMO_API_KEY:
         raise RuntimeError("MIMO_API_KEY 未配置（backend/.env 或环境变量）")
-    return OpenAI(api_key=MIMO_API_KEY, base_url=MIMO_BASE_URL)
+    return OpenAI(
+        api_key=MIMO_API_KEY, base_url=MIMO_BASE_URL,
+        timeout=httpx.Timeout(connect=10.0, read=_STREAM_READ_TIMEOUT, write=30.0, pool=10.0),
+    )
 
 
 def get_client_for_model(model: str) -> OpenAI:
