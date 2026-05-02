@@ -286,6 +286,11 @@ export default function ThreeDimTableEditor({
     setEditingFormulaText('')
   }
 
+  const unformulaedCols = useMemo(
+    () => (snapshot?.cols || []).filter((c) => !snapshot?.column_formulas?.[c.key]),
+    [snapshot],
+  )
+
   const loading = loadedRequestKey !== requestKey
 
   if (loading) return <div className="muted small" style={{ padding: '1rem' }}>加载三维表中…</div>
@@ -309,11 +314,6 @@ export default function ThreeDimTableEditor({
   }
 
   const getMetricFormula = (metricKey: string): FormulaInfo | undefined => snapshot.column_formulas?.[metricKey]
-
-  const unformulaedCols = useMemo(
-    () => (snapshot.cols || []).filter((c) => !snapshot.column_formulas?.[c.key]),
-    [snapshot],
-  )
 
   return (
     <div className="matrix-editor">
