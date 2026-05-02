@@ -458,6 +458,40 @@ export default function ThreeDimTableEditor({
 
   const getMetricFormula = (metricKey: string): FormulaInfo | undefined => snapshot.column_formulas?.[metricKey]
 
+  const FAB_STYLE: React.CSSProperties = {
+    fontFamily: '"Cascadia Code","Fira Code",ui-monospace,monospace',
+    fontSize: '.78rem',
+    lineHeight: '1.5',
+    padding: '.3rem .4rem',
+    borderRadius: 4,
+    border: '1px solid #90caf9',
+    color: '#333',
+  }
+
+  const renderFormulaOverlay = (text: string, map: Map<string, string>, rows: number) => {
+    const clampedRows = Math.min(rows, 12)
+    return (
+      <pre style={{
+        position: 'absolute', top: 0, left: 0, right: 0,
+        margin: 0, overflow: 'hidden',
+        whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+        pointerEvents: 'none', zIndex: 0,
+        fontFamily: FAB_STYLE.fontFamily,
+        fontSize: FAB_STYLE.fontSize,
+        lineHeight: FAB_STYLE.lineHeight,
+        padding: FAB_STYLE.padding,
+        border: '1px solid transparent',
+        minHeight: `calc(${FAB_STYLE.lineHeight} * ${clampedRows} + .6rem)`,
+      }}>
+        <span style={{ color: FAB_STYLE.color }}>
+          {renderColoredFormula(text, map)}
+          {!text && <span>&nbsp;</span>}
+          {'\n'}
+        </span>
+      </pre>
+    )
+  }
+
   const renderConstChips = (refs: string[]) => {
     if (refs.length === 0) return null
     return (
@@ -711,14 +745,17 @@ export default function ThreeDimTableEditor({
               </div>
               <div className="matrix-formula-add-row" style={{ marginTop: 6 }}>
                 <span className="muted small" style={{ minWidth: 48, alignSelf: 'flex-start', marginTop: 6 }}>公式</span>
-                <textarea
-                  className="matrix-formula-input"
-                  value={newFormulaText}
-                  onChange={(e) => setNewFormulaText(e.target.value)}
-                  placeholder="例如: @hp * 1.2 + @def * 0.5"
-                  rows={2}
-                  style={{ flex: 1, resize: 'vertical' }}
-                />
+                <div style={{ position: 'relative', flex: 1 }}>
+                  {renderFormulaOverlay(newFormulaText, refColorMap, 2)}
+                  <textarea
+                    className="matrix-formula-input"
+                    value={newFormulaText}
+                    onChange={(e) => setNewFormulaText(e.target.value)}
+                    placeholder="例如: @hp * 1.2 + @def * 0.5"
+                    rows={2}
+                    style={{ flex: 1, resize: 'vertical', position: 'relative', zIndex: 1, background: 'transparent', color: 'transparent', caretColor: '#333', border: '1px solid #90caf9' }}
+                  />
+                </div>
               </div>
               {renderRefLegend(colRefs, refColorMap)}
               {renderConstChips(activeConstRefs)}
@@ -772,14 +809,17 @@ export default function ThreeDimTableEditor({
                   </div>
                   {isEditing ? (
                     <div style={{ marginTop: 6 }}>
-                      <textarea
-                        className="matrix-formula-input"
-                        value={editingFormulaText}
-                        onChange={(e) => setEditingFormulaText(e.target.value)}
-                        rows={Math.min(editingFormulaText.split('\n').length, 6)}
-                        style={{ width: '100%', resize: 'vertical' }}
-                        autoFocus
-                      />
+                      <div style={{ position: 'relative' }}>
+                        {renderFormulaOverlay(editingFormulaText, editRefs.refColorMap, Math.min(editingFormulaText.split('\n').length, 6))}
+                        <textarea
+                          className="matrix-formula-input"
+                          value={editingFormulaText}
+                          onChange={(e) => setEditingFormulaText(e.target.value)}
+                          rows={Math.min(editingFormulaText.split('\n').length, 6)}
+                          style={{ width: '100%', resize: 'vertical', position: 'relative', zIndex: 1, background: 'transparent', color: 'transparent', caretColor: '#333', border: '1px solid #90caf9' }}
+                          autoFocus
+                        />
+                      </div>
                       {renderRefLegend(editRefs.colRefs, editRefs.refColorMap)}
                       {renderConstChips(editRefs.constRefs)}
                       <div style={{ display: 'flex', gap: 4, marginTop: 6 }}>

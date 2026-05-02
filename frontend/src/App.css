@@ -2528,6 +2528,7 @@ pre {
 .matrix-formula-text:hover { background: #eff1f5; border-color: #ccc; }
 .matrix-formula-input { font-family: 'Cascadia Code', 'Fira Code', ui-monospace, monospace; font-size: .78rem; padding: .3rem .4rem; border: 1px solid #90caf9; border-radius: 4px; width: 100%; box-sizing: border-box; outline: none; }
 .matrix-formula-input:focus { border-color: #1976d2; box-shadow: 0 0 0 2px rgba(25,118,210,.15); }
+.matrix-formula-input::placeholder { color: #aaa; }
 .matrix-formula-add { background: #fff; border: 1px solid #90caf9; border-radius: 6px; padding: .5rem .6rem; margin: .4rem; }
 .matrix-formula-add-row { display: flex; align-items: center; gap: .4rem; }
 
@@ -2543,7 +2544,7 @@ pre {
 .matrix-ref-legend-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 
 /* ===== Formula text (read-only) colorized ===== */
-.matrix-formula-text-colored { font-size: .78rem; }
+.matrix-formula-text-colored { font-family: 'Cascadia Code', 'Fira Code', ui-monospace, monospace; font-size: .78rem; color: #333; white-space: pre-wrap; word-break: break-word; }
 
 /* ===== Constant Chips ===== */
 .matrix-const-chips { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem; margin-top: .4rem; }

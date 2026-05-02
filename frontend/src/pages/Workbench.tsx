@@ -908,13 +908,14 @@ export default function Workbench() {
       loadCalculators(),
       loadGlossary(),
       loadDesignHistory(),
+      loadAllConstants(),
     ]).catch((e) => {
       if (!cancelled) setErr(String(e))
     })
     return () => {
       cancelled = true
     }
-  }, [pid, loadTables, loadProjectConfig, loadPipeline, loadValidation, loadSnapshots, loadAiModel, loadAiModels, loadCalculators, loadGlossary, loadDesignHistory])
+  }, [pid, loadTables, loadProjectConfig, loadPipeline, loadValidation, loadSnapshots, loadAiModel, loadAiModels, loadCalculators, loadGlossary, loadDesignHistory, loadAllConstants])
 
   /** 把一张表的数据写入对应 Univer sheet（首次或刷新调用） */
   const populateSheet = useCallback(
