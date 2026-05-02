@@ -29,6 +29,14 @@ type ThreeDimSnapshot = {
 }
 type AxisKey = 'dim1' | 'dim2' | 'metric'
 
+type ConstantItem = {
+  name_en: string
+  name_zh?: string
+  value?: unknown
+  formula?: string | null
+  brief?: string
+}
+
 function formatValue(value: unknown, fmt?: string): string {
   if (value == null || value === '') return '—'
   if (typeof value !== 'number') return String(value)
@@ -41,16 +49,39 @@ function formatValue(value: unknown, fmt?: string): string {
   return value.toFixed(decimals)
 }
 
+function parseFormulaRefs(text: string): { colRefs: Set<string>; constRefs: string[] } {
+  const colRefs = new Set<string>()
+  const constRefs: string[] = []
+  const constSeen = new Set<string>()
+  if (!text) return { colRefs, constRefs }
+  const colRe = /@(?!@)\w+/g
+  let m: RegExpExecArray | null
+  while ((m = colRe.exec(text)) !== null) {
+    colRefs.add(m[0].slice(1))
+  }
+  const constRe = /\$\{(\w+)\}/g
+  while ((m = constRe.exec(text)) !== null) {
+    const name = m[1]
+    if (!constSeen.has(name)) {
+      constSeen.add(name)
+      constRefs.push(name)
+    }
+  }
+  return { colRefs, constRefs }
+}
+
 export default function ThreeDimTableEditor({
   tableName,
   headers,
   glossary,
+  allConstants,
   canRecalculate = false,
   canWrite = false,
 }: {
   tableName: string
   headers: Record<string, string>
   glossary: GlossaryItem[]
+  allConstants?: ConstantItem[]
   canRecalculate?: boolean
   canWrite?: boolean
 }) {
@@ -73,6 +104,10 @@ export default function ThreeDimTableEditor({
   const [newFormulaType, setNewFormulaType] = useState('row')
   const [showAxisSettings, setShowAxisSettings] = useState(false)
   const addFormulaColSelectRef = useRef<HTMLSelectElement>(null)
+
+  const [editingConstName, setEditingConstName] = useState<string | null>(null)
+  const [editingConstValue, setEditingConstValue] = useState('')
+  const [constSaving, setConstSaving] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -102,6 +137,11 @@ export default function ThreeDimTableEditor({
   const glossaryMap = useMemo(
     () => new Map(glossary.map((item) => [item.term_en, item.term_zh])),
     [glossary],
+  )
+
+  const constMap = useMemo(
+    () => new Map((allConstants || []).map((c) => [c.name_en, c])),
+    [allConstants],
   )
 
   const dim1Keys = useMemo(
@@ -176,6 +216,12 @@ export default function ThreeDimTableEditor({
     if (rowAxis === 'metric' || colAxis === 'metric') return formulaEntries
     return formulaEntries
   }, [colAxis, effectiveFixedValue, fixedAxis, formulaEntries, rowAxis])
+
+  const activeFormulaText = editingFormulaCol ? editingFormulaText : showAddFormula ? newFormulaText : ''
+  const { colRefs: highlightedCols, constRefs: activeConstRefs } = useMemo(
+    () => parseFormulaRefs(activeFormulaText),
+    [activeFormulaText],
+  )
 
   const pickRowAxis = (next: AxisKey) => {
     if (next === colAxis) {
@@ -275,15 +321,43 @@ export default function ThreeDimTableEditor({
     }
   }
 
+  async function saveConstant(nameEn: string) {
+    if (!editingConstValue.trim()) return
+    setConstSaving(true)
+    setErr(null)
+    try {
+      const numVal = Number(editingConstValue)
+      await apiFetch(`/meta/constants/${encodeURIComponent(nameEn)}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify(isNaN(numVal) ? { value: editingConstValue } : { value: numVal }),
+      })
+      setEditingConstName(null)
+      setEditingConstValue('')
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setConstSaving(false)
+    }
+  }
+
+  function startConstEdit(nameEn: string) {
+    const c = constMap.get(nameEn)
+    setEditingConstName(nameEn)
+    setEditingConstValue(c?.value != null ? String(c.value) : c?.formula || '')
+  }
+
   const startEditFormula = (colKey: string, formula: string) => {
     setEditingFormulaCol(colKey)
     setEditingFormulaText(formula)
     setShowAddFormula(false)
+    setEditingConstName(null)
   }
 
   const cancelEdit = () => {
     setEditingFormulaCol(null)
     setEditingFormulaText('')
+    setEditingConstName(null)
   }
 
   const unformulaedCols = useMemo(
@@ -299,6 +373,18 @@ export default function ThreeDimTableEditor({
 
   const rowKeys = axisOptions[rowAxis].keys
   const colKeys = axisOptions[colAxis].keys
+  const isHighlightingActive = Boolean(activeFormulaText && highlightedCols.size > 0)
+
+  const colKeyHighlighted = (colKey: string) => {
+    if (!isHighlightingActive) return false
+    if (colAxis === 'metric') return highlightedCols.has(colKey)
+    return false
+  }
+  const rowKeyHighlighted = (rowKey: string) => {
+    if (!isHighlightingActive) return false
+    if (rowAxis === 'metric') return highlightedCols.has(rowKey)
+    return false
+  }
 
   const getValue = (rowKey: string, colKey: string): unknown => {
     if (!effectiveFixedValue) return null
@@ -314,6 +400,48 @@ export default function ThreeDimTableEditor({
   }
 
   const getMetricFormula = (metricKey: string): FormulaInfo | undefined => snapshot.column_formulas?.[metricKey]
+
+  const renderConstChips = (refs: string[]) => {
+    if (refs.length === 0) return null
+    return (
+      <div className="matrix-const-chips">
+        <span className="muted small" style={{ marginRight: 4 }}>常量引用:</span>
+        {refs.map((name) => {
+          const c = constMap.get(name)
+          const isEditing = editingConstName === name
+          return (
+            <span key={name} className={`matrix-const-chip${isEditing ? ' matrix-const-chip-edit' : ''}`}>
+              {isEditing ? (
+                <span className="matrix-const-chip-edit-row">
+                  <code className="matrix-const-chip-name">{name}</code>
+                  <input
+                    className="matrix-const-chip-input"
+                    value={editingConstValue}
+                    onChange={(e) => setEditingConstValue(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void saveConstant(name) } }}
+                    autoFocus
+                    size={10}
+                  />
+                  <button type="button" className="btn tiny primary" onClick={() => void saveConstant(name)} disabled={constSaving}>✓</button>
+                  <button type="button" className="btn tiny" onClick={() => { setEditingConstName(null); setEditingConstValue('') }}>✕</button>
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className="matrix-const-chip-btn"
+                  onClick={() => startConstEdit(name)}
+                  title={c ? `当前值: ${c.value ?? c.formula ?? '未设置'}${c.brief ? ' — ' + c.brief : ''}` : '未找到常量'}
+                >
+                  <code>{name}</code>
+                  <span className="matrix-const-chip-val">{c?.value != null ? String(c.value) : c?.formula || '?'}</span>
+                </button>
+              )}
+            </span>
+          )
+        })}
+      </div>
+    )
+  }
 
   return (
     <div className="matrix-editor">
@@ -337,7 +465,7 @@ export default function ThreeDimTableEditor({
         <button
           type="button"
           className={`btn tiny${showFormulaPanel ? ' primary' : ''}`}
-          onClick={() => { setShowFormulaPanel(!showFormulaPanel); setShowAddFormula(false); setEditingFormulaCol(null) }}
+          onClick={() => { setShowFormulaPanel(!showFormulaPanel); setShowAddFormula(false); setEditingFormulaCol(null); setEditingConstName(null) }}
           style={{ marginRight: 4 }}
         >
           {showFormulaPanel ? '收起公式' : `公式 (${formulaEntries.length})`}
@@ -409,11 +537,13 @@ export default function ThreeDimTableEditor({
               </th>
               {colKeys.map((colKey) => {
                 const formula = colAxis === 'metric' ? getMetricFormula(colKey) : undefined
+                const hl = colKeyHighlighted(colKey)
                 return (
                   <th
                     key={colKey}
-                    className="matrix-col-head"
+                    className={`matrix-col-head${hl ? ' matrix-col-highlighted' : ''}`}
                     title={formula?.formula || axisOptions[colAxis].subTitle(colKey)}
+                    style={hl ? { boxShadow: 'inset 0 -3px 0 #1976d2' } : undefined}
                   >
                     <span className="matrix-head-zh">
                       {axisOptions[colAxis].title(colKey)}
@@ -428,9 +558,14 @@ export default function ThreeDimTableEditor({
           <tbody>
             {rowKeys.map((rowKey) => {
               const rowFormula = rowAxis === 'metric' ? getMetricFormula(rowKey) : undefined
+              const rowHl = rowKeyHighlighted(rowKey)
               return (
                 <tr key={rowKey}>
-                  <td className="matrix-row-head" title={rowFormula?.formula || axisOptions[rowAxis].subTitle(rowKey)}>
+                  <td
+                    className={`matrix-row-head${rowHl ? ' matrix-row-highlighted' : ''}`}
+                    title={rowFormula?.formula || axisOptions[rowAxis].subTitle(rowKey)}
+                    style={rowHl ? { boxShadow: 'inset -3px 0 0 #1976d2' } : undefined}
+                  >
                     <span className="matrix-head-zh">
                       {axisOptions[rowAxis].title(rowKey)}
                       {rowFormula && <span className="sl-preview-tag" style={{ marginLeft: 6 }}>公式</span>}
@@ -445,8 +580,9 @@ export default function ThreeDimTableEditor({
                         : effectiveFixedValue
                     const metricMeta = metricKey ? metricMetaMap.get(metricKey) : undefined
                     const value = getValue(rowKey, colKey)
+                    const cellHl = colKeyHighlighted(colKey) || rowKeyHighlighted(rowKey)
                     return (
-                      <td key={colKey} className={`matrix-cell${value == null ? ' matrix-cell-empty' : ''}`}>
+                      <td key={colKey} className={`matrix-cell${value == null ? ' matrix-cell-empty' : ''}${cellHl ? ' matrix-cell-highlighted' : ''}`}>
                         {formatValue(value, metricMeta?.number_format)}
                       </td>
                     )
@@ -467,9 +603,9 @@ export default function ThreeDimTableEditor({
             </span>
             <div style={{ display: 'flex', gap: 4 }}>
               {canWrite && !showAddFormula && (
-                <button type="button" className="btn tiny" onClick={() => setShowAddFormula(true)}>添加公式</button>
+                <button type="button" className="btn tiny" onClick={() => { setShowAddFormula(true); setEditingFormulaCol(null); setEditingConstName(null) }}>添加公式</button>
               )}
-              <button type="button" className="btn tiny" onClick={() => setShowFormulaPanel(false)}>收起</button>
+              <button type="button" className="btn tiny" onClick={() => { setShowFormulaPanel(false); setEditingFormulaCol(null); setEditingConstName(null) }}>收起</button>
             </div>
           </div>
 
@@ -509,11 +645,17 @@ export default function ThreeDimTableEditor({
                   style={{ flex: 1, resize: 'vertical' }}
                 />
               </div>
+              {renderConstChips(activeConstRefs)}
+              {isHighlightingActive && (
+                <div className="muted small" style={{ marginTop: 4 }}>
+                  引用列已高亮：{[...highlightedCols].join(', ')}
+                </div>
+              )}
               <div style={{ display: 'flex', gap: 4, marginTop: 8 }}>
                 <button type="button" className="btn tiny primary" onClick={() => void addFormula()} disabled={formulaSaving || !newFormulaCol || !newFormulaText.trim()}>
                   {formulaSaving ? '保存中…' : '保存'}
                 </button>
-                <button type="button" className="btn tiny" onClick={() => { setShowAddFormula(false); setNewFormulaCol(''); setNewFormulaText('') }}>取消</button>
+                <button type="button" className="btn tiny" onClick={() => { setShowAddFormula(false); setNewFormulaCol(''); setNewFormulaText(''); setEditingConstName(null) }}>取消</button>
               </div>
             </div>
           )}
@@ -531,6 +673,7 @@ export default function ThreeDimTableEditor({
             {formulaEntries.map(({ col, formula }) => {
               const isEditing = editingFormulaCol === col.key
               const isRelevant = relevantFormulaEntries.some((e) => e.col.key === col.key)
+              const editRefs = isEditing ? parseFormulaRefs(editingFormulaText) : { colRefs: new Set<string>(), constRefs: [] as string[] }
               return (
                 <div
                   key={col.key}
@@ -564,6 +707,12 @@ export default function ThreeDimTableEditor({
                         style={{ width: '100%', resize: 'vertical' }}
                         autoFocus
                       />
+                      {renderConstChips(editRefs.constRefs)}
+                      {editRefs.colRefs.size > 0 && (
+                        <div className="muted small" style={{ marginTop: 4 }}>
+                          引用列已高亮：{[...editRefs.colRefs].join(', ')}
+                        </div>
+                      )}
                       <div style={{ display: 'flex', gap: 4, marginTop: 6 }}>
                         <button
                           type="button"

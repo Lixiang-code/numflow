@@ -483,6 +483,7 @@ export default function Workbench() {
     name_en: string
     name_zh: string
     value: unknown
+    formula?: string | null
     brief?: string
     scope_table?: string | null
     tags: string[]
@@ -513,6 +514,10 @@ export default function Workbench() {
   const [formulaBarDirty, setFormulaBarDirty] = useState(false)
   /** 公式栏：是否正在保存 */
   const [formulaBarSaving, setFormulaBarSaving] = useState(false)
+  /** 公式栏：常量编辑状态 */
+  const [fabConstEditName, setFabConstEditName] = useState<string | null>(null)
+  const [fabConstEditVal, setFabConstEditVal] = useState('')
+  const [fabConstSaving, setFabConstSaving] = useState(false)
   /** 当前活动表的列顺序（用于将 Univer 行/列索引映射回 row_id/列名） */
   const [activeCols, setActiveCols] = useState<string[]>([])
   /** 当前活动表的列元信息（中文名/数据类型，用于 3 行表头） */
@@ -1452,6 +1457,41 @@ export default function Workbench() {
     return 'SQL公式'
   }
 
+  function parseFabRefs(text: string): { colRefs: Set<string>; constRefs: string[] } {
+    const colRefs = new Set<string>()
+    const constRefs: string[] = []
+    const seen = new Set<string>()
+    if (!text) return { colRefs, constRefs }
+    const colRe = /@(?!@)\w+/g
+    let m: RegExpExecArray | null
+    while ((m = colRe.exec(text)) !== null) colRefs.add(m[0].slice(1))
+    const constRe = /\$\{(\w+)\}/g
+    while ((m = constRe.exec(text)) !== null) {
+      if (!seen.has(m[1])) { seen.add(m[1]); constRefs.push(m[1]) }
+    }
+    return { colRefs, constRefs }
+  }
+
+  async function saveFabConstant(nameEn: string) {
+    if (!fabConstEditVal.trim()) return
+    setFabConstSaving(true)
+    setErr(null)
+    try {
+      const numVal = Number(fabConstEditVal)
+      await apiFetch(`/meta/constants/${encodeURIComponent(nameEn)}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify(isNaN(numVal) ? { value: fabConstEditVal } : { value: numVal }),
+      })
+      setFabConstEditName(null)
+      setFabConstEditVal('')
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setFabConstSaving(false)
+    }
+  }
+
   async function saveColumnFormula() {
     if (!selected || !formulaBarCol || !formulaBarText.trim()) return
     setFormulaBarSaving(true)
@@ -1780,6 +1820,7 @@ export default function Workbench() {
                 tableName={selected}
                 headers={headers}
                 glossary={glossary}
+                allConstants={allConstants}
                 canRecalculate={!readOnly}
                 canWrite={!readOnly}
               />
@@ -1866,6 +1907,56 @@ export default function Workbench() {
               </span>
             )}
           </div>
+          {formulaBarCol && formulaBarText && (() => {
+            const refs = parseFabRefs(formulaBarText)
+            const constMap = new Map(allConstants.map((c) => [c.name_en, c]))
+            return (
+              <>
+                {refs.colRefs.size > 0 && (
+                  <div className="wb-formula-ref-info">
+                    本表引用列已高亮：{[...refs.colRefs].map((c) => <code key={c} style={{margin:'0 3px'}}>{c}</code>)} （Univer 当前版本暂不支持自动列边框染色，请在表格中确认对应列）
+                  </div>
+                )}
+                {refs.constRefs.length > 0 && (
+                  <div className="wb-formula-const-chips">
+                    <span className="muted small" style={{ marginRight: 4 }}>常量引用:</span>
+                    {refs.constRefs.map((name) => {
+                      const c = constMap.get(name)
+                      const isEditing = fabConstEditName === name
+                      return (
+                        <span key={name} style={{ display: 'inline-flex' }}>
+                          {isEditing ? (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '.2rem', background: '#fff', border: '1px solid #1976d2', borderRadius: 6, padding: '.15rem .4rem' }}>
+                              <code style={{ fontSize: '.72rem', fontWeight: 600, color: '#1565c0' }}>{name}</code>
+                              <input
+                                style={{ fontSize: '.75rem', fontFamily: 'monospace', padding: '.1rem .3rem', border: '1px solid #90caf9', borderRadius: 3, width: 80, outline: 'none' }}
+                                value={fabConstEditVal}
+                                onChange={(e) => setFabConstEditVal(e.target.value)}
+                                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void saveFabConstant(name) } }}
+                                autoFocus
+                              />
+                              <button type="button" className="btn tiny primary" onClick={() => void saveFabConstant(name)} disabled={fabConstSaving}>✓</button>
+                              <button type="button" className="btn tiny" onClick={() => { setFabConstEditName(null); setFabConstEditVal('') }}>✕</button>
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              style={{ display: 'inline-flex', alignItems: 'center', gap: '.25rem', border: '1px solid #b2dfdb', background: '#e0f2f1', borderRadius: 12, padding: '.1rem .5rem', fontSize: '.72rem', cursor: 'pointer', color: '#00695c', whiteSpace: 'nowrap' }}
+                              onClick={() => { setFabConstEditName(name); setFabConstEditVal(c?.value != null ? String(c.value) : c?.formula || '') }}
+                              title={c ? `当前值: ${c.value ?? c.formula ?? '未设置'}${c.brief ? ' — ' + c.brief : ''}` : '未找到常量'}
+                            >
+                              <code style={{ fontWeight: 600 }}>{name}</code>
+                              <span style={{ fontWeight: 600, color: '#004d40' }}>{c?.value != null ? String(c.value) : c?.formula || '?'}</span>
+                            </button>
+                          )}
+                        </span>
+                      )
+                    })}
+                  </div>
+                )}
+              </>
+            )
+          })()}
           </>
           ) : null}
           {/* wb-univer-host 始终挂载在 DOM，避免 Univer 宿主容器被卸载后引用断裂；

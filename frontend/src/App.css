@@ -2531,6 +2531,30 @@ pre {
 .matrix-formula-add { background: #fff; border: 1px solid #90caf9; border-radius: 6px; padding: .5rem .6rem; margin: .4rem; }
 .matrix-formula-add-row { display: flex; align-items: center; gap: .4rem; }
 
+/* ===== Formula Column Highlighting (Excel-like) ===== */
+.matrix-col-highlighted { background: #e3f2fd !important; border-color: #1976d2 !important; }
+.matrix-row-highlighted { background: #e3f2fd !important; border-color: #1976d2 !important; }
+.matrix-cell-highlighted { background: #e8eaf6 !important; }
+.matrix-table .matrix-col-highlighted { border-left: 2px solid #1976d2; border-right: 2px solid #1976d2; }
+.matrix-table .matrix-row-highlighted { border-top: 2px solid #1976d2; border-bottom: 2px solid #1976d2; }
+
+/* ===== Constant Chips ===== */
+.matrix-const-chips { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem; margin-top: .4rem; }
+.matrix-const-chip { display: inline-flex; }
+.matrix-const-chip-btn { display: inline-flex; align-items: center; gap: .25rem; border: 1px solid #b2dfdb; background: #e0f2f1; border-radius: 12px; padding: .1rem .5rem; font-size: .72rem; cursor: pointer; color: #00695c; transition: all .15s; white-space: nowrap; }
+.matrix-const-chip-btn:hover { background: #b2dfdb; border-color: #4db6ac; }
+.matrix-const-chip-btn code { font-family: monospace; font-weight: 600; }
+.matrix-const-chip-val { font-weight: 600; color: #004d40; }
+.matrix-const-chip-edit { }
+.matrix-const-chip-edit-row { display: inline-flex; align-items: center; gap: .2rem; background: #fff; border: 1px solid #1976d2; border-radius: 6px; padding: .15rem .4rem; }
+.matrix-const-chip-name { font-size: .72rem; font-family: monospace; font-weight: 600; color: #1565c0; }
+.matrix-const-chip-input { font-size: .75rem; font-family: monospace; padding: .1rem .3rem; border: 1px solid #90caf9; border-radius: 3px; width: 80px; outline: none; }
+.matrix-const-chip-input:focus { border-color: #1976d2; }
+
+/* ===== 2D Formula Bar Constant Chips ===== */
+.wb-formula-const-chips { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem; padding: .15rem .5rem; border-top: 1px solid #e0e0e0; background: #fafafa; }
+.wb-formula-ref-info { font-size: .72rem; color: #1565c0; padding: .15rem .5rem; border-top: 1px solid #e0e0e0; background: #e3f2fd; }
+
 /* ===== Round 4: Exposed Params Banner ===== */
 .exposed-params-banner { display: flex; align-items: center; flex-wrap: wrap; gap: .35rem; padding: .35rem .6rem; background: #e8f5e9; border-bottom: 1px solid #c8e6c9; flex-shrink: 0; font-size: .8rem; }
 .exposed-params-banner .banner-label { font-weight: 600; color: #2e7d32; white-space: nowrap; }
