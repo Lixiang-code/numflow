@@ -1869,11 +1869,20 @@ export default function Workbench() {
           </>
           ) : null}
           {/* wb-univer-host 始终挂载在 DOM，避免 Univer 宿主容器被卸载后引用断裂；
-              在常量页 / 矩阵页时用 CSS 隐藏 */}
+               在常量页 / 矩阵页时用 absolute+hidden 替代 display:none，保持容器始终有真实尺寸，
+               避免 Univer 内部列宽计算因容器宽度为 0 而报 "column width < 0" */}
           <div
             className="wb-univer-host"
             ref={univerHostRef}
-            style={{ display: (selected === '__constants__' || selectedIsMatrix || selectedIs3DMatrix) ? 'none' : undefined }}
+            style={(selected === '__constants__' || selectedIsMatrix || selectedIs3DMatrix) ? {
+              position: 'absolute',
+              visibility: 'hidden',
+              pointerEvents: 'none',
+              top: 0,
+              left: 0,
+              width: '100%',
+              height: '100%',
+            } : undefined}
           />
           {readOnly && selected !== '__constants__' && !selectedIsMatrix && !selectedIs3DMatrix && (
             <div className="wb-readonly-overlay" title="只读模式">
