@@ -207,13 +207,21 @@ export default function MatrixEditor({
     setErr(null)
     try {
       const numVal = Number(editingCellValue)
-      const rid = `${r}__${c}__${level}`
+      const lvKey = level === '_' ? 'na' : level
+      const rid = `${r}__${c}__${lvKey}`
+      const rowAxisCol = snapshot?.row_axis || ''
+      const colAxisCol = snapshot?.col_axis || ''
       await apiFetch('/data/cells/write', {
         method: 'POST',
         headers,
         body: JSON.stringify({
           table_name: tableName,
-          updates: [{ row_id: rid, column: 'value', value: isNaN(numVal) ? editingCellValue : numVal }],
+          updates: [
+            { row_id: rid, column: 'value', value: isNaN(numVal) ? editingCellValue : numVal },
+            { row_id: rid, column: rowAxisCol, value: r },
+            { row_id: rid, column: colAxisCol, value: c },
+            { row_id: rid, column: 'level', value: level === '_' ? null : Number(level) },
+          ],
           source_tag: 'ai_generated',
         }),
       })
@@ -222,6 +230,12 @@ export default function MatrixEditor({
         headers,
         body: JSON.stringify({ table_name: tableName, row_id: rid, column: 'value' }),
       })
+      // 触发连锁重算
+      if (snapshot?.formula_cells && Object.keys(snapshot.formula_cells).length > 0) {
+        await apiFetch(`/compute/column-formula/recalculate-table?table_name=${encodeURIComponent(tableName)}`, {
+          method: 'POST', headers,
+        }).catch(() => {})
+      }
       setEditingCell(null)
       setEditingCellValue('')
       await refreshSnapshot()
