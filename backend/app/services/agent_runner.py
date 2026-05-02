@@ -286,22 +286,28 @@ def _stream_with_timeout(stream, timeout: int = 120) -> Iterable:
     """包装 LLM 流式响应，超过 timeout 秒无新 chunk 则抛出 TimeoutError。
     
     DeepSeek/DashScope 偶发 streaming 卡住（长时间无新 token），
-    此函数确保卡住时能快速失败并进入重试/恢复流程。
+    此函数使用 signal.alarm 确保卡住时能快速失败并进入重试/恢复流程。
     """
     import signal
-    # 使用 signal.alarm 实现超时（Linux only，但服务器是 CentOS 7 没问题）
-    def _handler(signum, frame):
-        raise TimeoutError(f"Streaming 响应 {timeout}s 无新 token")
     
-    # 用迭代式超时检测：每收到一个 chunk 就重置定时器
-    # 简单的做法：用 signal 的 alarm 一次性超时
-    # 但更好的做法是每 chunk 检测时间
-    deadline = time.time() + timeout
-    for chunk in stream:
-        if time.time() > deadline:
-            raise TimeoutError(f"Streaming 响应超过 {timeout}s 总时间")
-        yield chunk
-        deadline = time.time() + timeout  # 每收到 chunk 重置超时
+    class _TimeoutError(Exception):
+        pass
+    
+    def _handler(signum, frame):
+        raise _TimeoutError(f"Streaming 响应 {timeout}s 无新 token")
+    
+    old_handler = signal.signal(signal.SIGALRM, _handler)
+    old_interval = signal.setitimer(signal.ITIMER_REAL, 0, 0)  # 清除旧定时器
+    try:
+        signal.setitimer(signal.ITIMER_REAL, timeout, 0)
+        for chunk in stream:
+            signal.setitimer(signal.ITIMER_REAL, timeout, 0)  # 重置
+            yield chunk
+    except _TimeoutError:
+        raise TimeoutError(f"Streaming 响应超过 {timeout}s 无新 token")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0, 0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 def _build_assistant_msg(msg: Any, *, tool_calls: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
