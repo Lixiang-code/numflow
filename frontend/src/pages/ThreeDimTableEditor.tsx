@@ -121,6 +121,7 @@ export default function ThreeDimTableEditor({
   allConstants,
   canRecalculate = false,
   canWrite = false,
+  onConstantsChanged,
 }: {
   tableName: string
   headers: Record<string, string>
@@ -128,6 +129,7 @@ export default function ThreeDimTableEditor({
   allConstants?: ConstantItem[]
   canRecalculate?: boolean
   canWrite?: boolean
+  onConstantsChanged?: () => void
 }) {
   const [snapshot, setSnapshot] = useState<ThreeDimSnapshot | null>(null)
   const [loadedRequestKey, setLoadedRequestKey] = useState('')
@@ -152,6 +154,10 @@ export default function ThreeDimTableEditor({
   const [editingConstName, setEditingConstName] = useState<string | null>(null)
   const [editingConstValue, setEditingConstValue] = useState('')
   const [constSaving, setConstSaving] = useState(false)
+
+  const [editingCell, setEditingCell] = useState<{ dim1Key: string; dim2Key: string; metricKey: string } | null>(null)
+  const [editingCellValue, setEditingCellValue] = useState('')
+  const [cellSaving, setCellSaving] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -378,10 +384,44 @@ export default function ThreeDimTableEditor({
       })
       setEditingConstName(null)
       setEditingConstValue('')
+      onConstantsChanged?.()
+      await apiFetch(`/compute/column-formula/recalculate-table?table_name=${encodeURIComponent(tableName)}`, { method: 'POST', headers })
+      await refreshSnapshot()
     } catch (e) {
       setErr(String(e))
     } finally {
       setConstSaving(false)
+    }
+  }
+
+  async function saveCellEdit(dim1Key: string, dim2Key: string, metricKey: string) {
+    if (!editingCellValue.trim()) return
+    setCellSaving(true)
+    setErr(null)
+    const rowId = `${dim1Key}_${dim2Key}`
+    try {
+      const numVal = Number(editingCellValue)
+      await apiFetch('/data/cells/write', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          table_name: tableName,
+          updates: [{ row_id: rowId, column: metricKey, value: isNaN(numVal) ? editingCellValue : numVal }],
+          source_tag: 'ai_generated',
+        }),
+      })
+      await apiFetch('/data/cells/mark-manual', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ table_name: tableName, row_id: rowId, column: metricKey }),
+      })
+      setEditingCell(null)
+      setEditingCellValue('')
+      await refreshSnapshot()
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setCellSaving(false)
     }
   }
 
@@ -454,6 +494,17 @@ export default function ThreeDimTableEditor({
       [fixedAxis]: effectiveFixedValue,
     }
     return snapshot.data?.[values.dim1]?.[values.dim2]?.[values.metric]
+  }
+
+  const getCellCoords = (rowKey: string, colKey: string): { dim1Key: string; dim2Key: string; metricKey: string } | null => {
+    if (!effectiveFixedValue) return null
+    const coords: Record<AxisKey, string> = {
+      dim1: '', dim2: '', metric: '',
+      [rowAxis]: rowKey,
+      [colAxis]: colKey,
+      [fixedAxis]: effectiveFixedValue,
+    }
+    return { dim1Key: coords.dim1, dim2Key: coords.dim2, metricKey: coords.metric }
   }
 
   const getMetricFormula = (metricKey: string): FormulaInfo | undefined => snapshot.column_formulas?.[metricKey]
@@ -690,9 +741,37 @@ export default function ThreeDimTableEditor({
                     const metricMeta = metricKey ? metricMetaMap.get(metricKey) : undefined
                     const value = getValue(rowKey, colKey)
                     const cellBg = getCellBg(colKey, rowKey)
+                    const coords = getCellCoords(rowKey, colKey)
+                    const isEditingCell = editingCell?.dim1Key === coords?.dim1Key
+                      && editingCell?.dim2Key === coords?.dim2Key
+                      && editingCell?.metricKey === coords?.metricKey
                     return (
-                      <td key={colKey} className={`matrix-cell${value == null ? ' matrix-cell-empty' : ''}`} style={cellBg ? { background: cellBg } : undefined}>
-                        {formatValue(value, metricMeta?.number_format)}
+                      <td
+                        key={colKey}
+                        className={`matrix-cell${value == null ? ' matrix-cell-empty' : ''}${canWrite ? ' matrix-cell-editable' : ''}`}
+                        style={cellBg ? { background: cellBg } : undefined}
+                        title={canWrite ? '点击编辑' : undefined}
+                        onClick={() => {
+                          if (!canWrite || !coords || cellSaving) return
+                          setEditingCell(coords)
+                          setEditingCellValue(value != null ? (typeof value === 'number' ? String(value) : String(value)) : '')
+                        }}
+                      >
+                        {isEditingCell ? (
+                          <input
+                            className="matrix-cell-edit-input"
+                            value={editingCellValue}
+                            onChange={(e) => setEditingCellValue(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') { e.preventDefault(); void saveCellEdit(coords!.dim1Key, coords!.dim2Key, coords!.metricKey) }
+                              if (e.key === 'Escape') { setEditingCell(null); setEditingCellValue('') }
+                            }}
+                            onBlur={() => { setEditingCell(null); setEditingCellValue('') }}
+                            autoFocus
+                          />
+                        ) : (
+                          formatValue(value, metricMeta?.number_format)
+                        )}
                       </td>
                     )
                   })}

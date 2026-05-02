@@ -1824,6 +1824,7 @@ export default function Workbench() {
                 allConstants={allConstants}
                 canRecalculate={!readOnly}
                 canWrite={!readOnly}
+                onConstantsChanged={() => void loadAllConstants()}
               />
             </>
           ) : selected !== '__constants__' && !selectedIsMatrix ? (
