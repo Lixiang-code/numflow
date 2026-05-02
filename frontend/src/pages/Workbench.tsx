@@ -1825,6 +1825,7 @@ export default function Workbench() {
                 matrixMeta={selectedMatrixMeta}
                 headers={headers}
                 glossary={glossary}
+                canWrite={!readOnly}
               />
             </>
           ) : selected && selectedIs3DMatrix ? (

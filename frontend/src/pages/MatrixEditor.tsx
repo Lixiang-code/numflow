@@ -1,7 +1,6 @@
 /**
- * Matrix / 伪三维表只读可视化编辑器。
- * matrix_resource 在 scale_mode='fallback' 下把第三维改为"公式维"：
- * 二维基准值仍直接展示；指定等级时，后端会优先返回公式计算结果。
+ * Matrix / 伪三维表可视化编辑器（含单元格内联编辑 + 公式面板）。
+ * matrix_resource 在 scale_mode='fallback' 下把第三维改为"公式维"。
  */
 import { useEffect, useMemo, useState } from 'react'
 import { apiFetch } from '../api'
@@ -66,11 +65,13 @@ export default function MatrixEditor({
   matrixMeta,
   headers,
   glossary,
+  canWrite = false,
 }: {
   tableName: string
   matrixMeta: Record<string, unknown>
   headers: Record<string, string>
   glossary: GlossaryItem[]
+  canWrite?: boolean
 }) {
   const [snapshot, setSnapshot] = useState<MatrixSnapshot | null>(null)
   const [loadedRequestKey, setLoadedRequestKey] = useState('')
@@ -79,6 +80,9 @@ export default function MatrixEditor({
   const [previewLevel, setPreviewLevel] = useState<string>('')
   const [pendingLevel, setPendingLevel] = useState<string>('')
   const [showFormulaPanel, setShowFormulaPanel] = useState(false)
+  const [editingCell, setEditingCell] = useState<{ row: string; col: string; level: string } | null>(null)
+  const [editingCellValue, setEditingCellValue] = useState('')
+  const [cellSaving, setCellSaving] = useState(false)
   const requestKey = `${tableName}::${previewLevel}`
 
   const glossaryMap = new Map(glossary.map((g) => [g.term_en, g.term_zh]))
@@ -133,6 +137,14 @@ export default function MatrixEditor({
     }
   }, [headers, previewLevel, requestKey, tableName])
 
+  const refreshSnapshot = async () => {
+    const query = previewLevel ? `?level=${encodeURIComponent(previewLevel)}` : ''
+    const snap = (await apiFetch(`/meta/matrix/${encodeURIComponent(tableName)}${query}`, { headers })) as MatrixSnapshot
+    setSnapshot(snap)
+    setErr(null)
+    setLoadedRequestKey(requestKey)
+  }
+
   const formulaEntries = useMemo(() => {
     const out: Array<{ row: string; col: string; formula: FormulaInfo }> = []
     const cells = snapshot?.formula_cells || {}
@@ -143,6 +155,7 @@ export default function MatrixEditor({
     }
     return out
   }, [snapshot])
+
   const loading = loadedRequestKey !== requestKey
 
   if (loading) return <div className="muted small" style={{ padding: '1rem' }}>加载 Matrix 数据中…</div>
@@ -186,6 +199,37 @@ export default function MatrixEditor({
 
   function termDisplay(key: string): string {
     return glossaryMap.get(key) || rowDisplayMap.get(key) || colDisplayMap.get(key) || key
+  }
+
+  async function saveCellEdit(r: string, c: string, level: string) {
+    if (!editingCellValue.trim() || cellSaving) return
+    setCellSaving(true)
+    setErr(null)
+    try {
+      const numVal = Number(editingCellValue)
+      const rid = `${r}__${c}__${level}`
+      await apiFetch('/data/cells/write', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          table_name: tableName,
+          updates: [{ row_id: rid, column: 'value', value: isNaN(numVal) ? editingCellValue : numVal }],
+          source_tag: 'ai_generated',
+        }),
+      })
+      await apiFetch('/data/cells/mark-manual', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ table_name: tableName, row_id: rid, column: 'value' }),
+      })
+      setEditingCell(null)
+      setEditingCellValue('')
+      await refreshSnapshot()
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setCellSaving(false)
+    }
   }
 
   return (
@@ -294,18 +338,38 @@ export default function MatrixEditor({
                   const formula = snapshot.formula_cells?.[r]?.[c]
                   const hasNote = Boolean(note)
                   const isEmpty = val == null
+                  const hasFormula = Boolean(formula)
+                  const isEditingCell = editingCell?.row === r && editingCell?.col === c && editingCell?.level === displayLevel
+                  const cellEditable = canWrite && !hasFormula && !cellSaving
                   return (
                     <td
                       key={c}
-                      className={`matrix-cell${isEmpty ? ' matrix-cell-empty' : ''}${hasNote ? ' matrix-cell-noted' : ''}`}
-                      title={formula?.formula || (hasNote ? note : undefined)}
+                      className={`matrix-cell${isEmpty ? ' matrix-cell-empty' : ''}${hasNote ? ' matrix-cell-noted' : ''}${cellEditable ? ' matrix-cell-editable' : ''}`}
+                      title={formula?.formula || (hasNote ? note : cellEditable ? '点击编辑' : undefined)}
+                      onClick={() => {
+                        if (!cellEditable) return
+                        setEditingCell({ row: r, col: c, level: displayLevel })
+                        setEditingCellValue(val != null ? String(val) : '')
+                      }}
                     >
-                      {isEmpty ? (
+                      {isEditingCell ? (
+                        <input
+                          className="matrix-cell-edit-input"
+                          value={editingCellValue}
+                          onChange={(e) => setEditingCellValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') { e.preventDefault(); void saveCellEdit(r, c, displayLevel) }
+                            if (e.key === 'Escape') { setEditingCell(null); setEditingCellValue('') }
+                          }}
+                          onBlur={() => { setEditingCell(null); setEditingCellValue('') }}
+                          autoFocus
+                        />
+                      ) : isEmpty ? (
                         <span className="muted">—</span>
                       ) : (
                         <span>{formatVal(val, valueFormat)}</span>
                       )}
-                      {formula && (
+                      {!isEditingCell && formula && (
                         <div className="muted small" style={{ marginTop: 4 }}>
                           {cell?.source === 'formula' ? '公式切片' : '有公式'}
                         </div>
