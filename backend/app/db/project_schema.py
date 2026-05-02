@@ -211,6 +211,20 @@ def init_project_db(conn: sqlite3.Connection, *, seed_readme: bool = True) -> No
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+
+        -- AI 工具反馈：记录 AI 在使用工具过程中发现的问题和需求
+        -- 反馈文件位置：各项目 project.db 的 _tool_feedback 表 + 可用 sqlite3 命令行查看
+        CREATE TABLE IF NOT EXISTS _tool_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_slug TEXT NOT NULL DEFAULT '',
+            pipeline_step TEXT NOT NULL DEFAULT '',
+            category TEXT NOT NULL DEFAULT 'bug',
+            title TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            tool_names TEXT NOT NULL DEFAULT '[]',
+            context TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        );
         """
     )
     # 增量迁移：为旧库补 _constants.tags（JSON 数组字符串）

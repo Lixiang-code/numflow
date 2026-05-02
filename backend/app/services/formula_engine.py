@@ -154,17 +154,18 @@ def _vlookup(
     lookup_val: Any,
     lookup_arr: List[Any],
     return_arr: List[Any],
-    exact: Any = True,
+    exact: Any = False,
 ) -> Any:
-    """VLOOKUP(查找值, @@查找列, @@返回列, [exact=TRUE])
-    exact=True(默认)：精确匹配；exact=False：近似（≤ 最大值，需升序排列）。
-    未找到返回 NaN。"""
+    """VLOOKUP(查找值, @@查找列, @@返回列, [exact=FALSE])
+    与 Excel 语义一致：FALSE/0=精确匹配；TRUE/1=近似匹配（≤ 最大值，需升序排列）。
+    默认精确匹配。未找到返回 NaN。"""
     if not isinstance(lookup_arr, (list, pd.Series)):
         raise ValueError("VLOOKUP 第 2 参须为 @@列 整列引用")
     if not isinstance(return_arr, (list, pd.Series)):
         raise ValueError("VLOOKUP 第 3 参须为 @@列 整列引用")
-    exact_bool = _to_bool(exact) if not isinstance(exact, bool) else exact
-    if exact_bool:
+    # Excel 语义：FALSE/0 → 精确匹配，TRUE/1 → 近似匹配
+    is_exact = not (_to_bool(exact) if not isinstance(exact, bool) else exact)
+    if is_exact:
         for lv, rv in zip(lookup_arr, return_arr):
             if _values_equal(lv, lookup_val):
                 return _coerce(rv)
@@ -401,9 +402,9 @@ def _eval_ast(node: ast.AST, names: Dict[str, Any]) -> Any:
     if isinstance(node, ast.Expression):
         return _eval_ast(node.body, names)
     if isinstance(node, ast.Constant):
-        if isinstance(node.value, (int, float, bool)):
+        if isinstance(node.value, (int, float, bool, str)) or node.value is None:
             return node.value
-        raise ValueError("仅允许数字/布尔常量")
+        raise ValueError("仅允许数字/布尔/字符串常量")
     if isinstance(node, ast.Num):  # pragma: no cover
         return node.n
     if isinstance(node, ast.Name):
@@ -451,20 +452,21 @@ def _eval_ast(node: ast.AST, names: Dict[str, Any]) -> Any:
             left_is_arr = isinstance(left, (list, pd.Series))
             right_is_arr = isinstance(right, (list, pd.Series))
             if left_is_arr or right_is_arr:
-                lv = _arr_to_floats(left) if left_is_arr else None
-                rv = _arr_to_floats(right) if right_is_arr else None
+                lv = list(left) if left_is_arr else None
+                rv = list(right) if right_is_arr else None
                 if lv is not None and rv is not None:
                     left = [cmp(a, b) for a, b in zip(lv, rv)]
                 elif lv is not None:
-                    r = float(right)
-                    left = [cmp(a, r) for a in lv]
+                    left = [cmp(a, right) for a in lv]
                 else:
-                    l = float(left)
-                    left = [cmp(l, b) for b in rv]
+                    left = [cmp(left, b) for b in rv]
             else:
                 if not cmp(left, right):
                     return False
                 left = right
+        # 单个比较操作返回布尔值；链式比较保持现有行为（返回最后右值，truthy/falsy 语义）
+        if len(node.ops) == 1 and not isinstance(left, (list, pd.Series)):
+            return bool(left)
         return left
     if isinstance(node, ast.IfExp):
         cond = _eval_ast(node.test, names)
@@ -517,7 +519,7 @@ def substitute_refs(
             )
             key = f"__a{a_idx}"
             a_idx += 1
-            array_map[key] = pd.to_numeric(df[col], errors="coerce").tolist()
+            array_map[key] = df[col].tolist()
             out = out.replace(token, key)
 
     # 再处理 @（逐行引用）
@@ -532,7 +534,7 @@ def substitute_refs(
             raise ValueError(f"表 {tbl} 无列 {col}")
         key = f"__s{s_idx}"
         s_idx += 1
-        scalar_map[key] = pd.to_numeric(df[col], errors="coerce")
+        scalar_map[key] = df[col]
         out = out.replace(token, key)
 
     return out, scalar_map, array_map
@@ -626,15 +628,20 @@ def substitute_constants(formula: str, constants: Dict[str, Any]) -> Tuple[str, 
             missing.append(nm)
             return m.group(0)
         v = constants[nm]
-        # 数值直接转字符串；其他类型回退为 0
+        # 尝试数值，失败则尝试字符串字面量
         try:
             return repr(float(v))
         except (TypeError, ValueError):
             try:
                 return repr(int(v))
             except (TypeError, ValueError):
-                missing.append(nm)
-                return m.group(0)
+                try:
+                    if isinstance(v, str):
+                        return repr(v)
+                    return repr(float(v))
+                except (TypeError, ValueError):
+                    missing.append(nm)
+                    return m.group(0)
 
     out = _CONST_REF.sub(_rep, formula)
     return out, missing
@@ -665,10 +672,7 @@ def eval_row_formula(
         key = f"__r{i}__"
         ref_to_key[ref] = key
         val = row_dict.get(ref)
-        try:
-            name_map[key] = float(val) if val is not None else 0.0
-        except (TypeError, ValueError):
-            name_map[key] = 0.0
+        name_map[key] = val if val is not None else 0.0
 
     for ref, key in ref_to_key.items():
         expr = re.sub(r"@" + re.escape(ref) + r"(?!\[)", key, expr)
@@ -693,7 +697,7 @@ def safe_eval_vector(
     static: Dict[str, Any] = dict(array_map or {})
     out = []
     for i in range(n):
-        env: Dict[str, Any] = {k: float(v.iloc[i]) for k, v in scalar_map.items()}
+        env: Dict[str, Any] = {k: v.iloc[i] for k, v in scalar_map.items()}
         env.update(static)
         token = _CURRENT_ROW_INDEX.set(i)
         try:

@@ -360,6 +360,10 @@ def _base_common_system(mode_norm: str) -> str:
             "典型场景：宝石属性表（dim1=等级1~N, dim2=宝石类型atk/def/…, cols=atk_bonus/def_bonus/…），"
             "属性列只允许数值型。\n"
             "dim1 通常为数字等级（key 填整数字符串'1','2'…），dim2 为分类（key 填英文标识符）。\n"
+            "【重要】dim1/dim2 有大量等间距值（如等级 1~200）时，必须用 range 快捷参数，禁止手写 keys 数组：\n"
+            "  例：dim1={col_name:'level', display_name:'等级', range:{start:1, end:200}}\n"
+            "  range 包含 start/end（含两端）和可选 display_template（{i} 替换数值，默认='{i}'即key与display相同）。\n"
+            "  只有少量非等间距值（如宝石类型5种）才用手写 keys。range 与 keys 互斥：传了 range 则忽略 keys。\n"
             "属性列（cols[]）可附 formula 字段，公式可用 @dim1列名/@dim2列名 同行引用：\n"
             "  例：atk_bonus 公式 = @level * ${gem_base_atk}（需先注册常量 gem_base_atk）\n"
             "若公式含 ${常量}，先 const_register；常量就绪后再重算整表，确保不要手填展开值。\n"
@@ -396,7 +400,8 @@ def _base_common_system(mode_norm: str) -> str:
             "read_matrix 在 view_slice_only=true 的表上必须传 rows/cols 过滤。\n"
             "公式引用语法：@表名[列名]=逐行取同行值（数学计算用）；@@表名[列名]=整列数组（VLOOKUP/INDEX/MATCH/SUM/AVERAGE 等查找聚合用）。\n"
             "工具 JSON 固定含字段：status（success|error|partial）、data、warnings、blocked_cells；"
-            "遇 partial/error 须阅读 warnings/blocked_cells 再决定是否继续。",
+            "遇 partial/error 须阅读 warnings/blocked_cells 再决定是否继续。\n"
+            "若工具层面有问题（工具缺失/缺陷/描述不符/功能不足等），你可以使用 submit_feedback 工具登记反馈，我们会持续优化。",
             flow_block,
         ]
     )

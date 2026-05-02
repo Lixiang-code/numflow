@@ -1303,7 +1303,13 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                     "display_name": {"type": "string", "description": "中文显示名，必填"},
                     "dim1": {
                         "type": "object",
-                        "description": "第一维度（行维度1，通常是等级）",
+                        "description": (
+                            "第一维度（行维度1，通常是等级）。\n"
+                            "两种方式提供轴值：\n"
+                            "1) keys 数组（少量值手写，如宝石类型 5 种）\n"
+                            "2) range 对象（大量等间距值，如等级 1~200 时强烈推荐）\n"
+                            "range 与 keys 互斥：传 range 则忽略 keys。"
+                        ),
                         "properties": {
                             "col_name": {"type": "string", "description": "维度列名（英文，如 level）"},
                             "display_name": {"type": "string", "description": "维度中文名（如 等级）"},
@@ -1317,14 +1323,35 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                                     },
                                     "required": ["key", "display_name"],
                                 },
-                                "description": "所有维度值，顺序即行顺序",
+                                "description": "手动列出所有维度值（少量值时使用）。与 range 互斥。",
+                            },
+                            "range": {
+                                "type": "object",
+                                "description": (
+                                    "数值范围快捷生成 keys（大量等间距值时强烈推荐，避免手写几百个 key）。\n"
+                                    "自动生成 {key: 'N', display_name: 'N'} 条目（数字 key 自动转为 INTEGER 列型）。\n"
+                                    "与 keys 互斥：传了 range 则自动覆盖 keys。"
+                                ),
+                                "properties": {
+                                    "start": {"type": "integer", "description": "起始值（含），如 1"},
+                                    "end": {"type": "integer", "description": "结束值（含），如 200"},
+                                    "display_template": {
+                                        "type": "string",
+                                        "description": "可选，display_name 模板，{i} 替换为数值。默认 '{i}'（即 key 和 display_name 相同）",
+                                        "default": "{i}",
+                                    },
+                                },
+                                "required": ["start", "end"],
                             },
                         },
-                        "required": ["col_name", "display_name", "keys"],
+                        "required": ["col_name", "display_name"],
                     },
                     "dim2": {
                         "type": "object",
-                        "description": "第二维度（行维度2，通常是分类，如宝石类型）",
+                        "description": (
+                            "第二维度（行维度2，通常是分类，如宝石类型）。\n"
+                            "与 dim1 类似：少量值用 keys 手写，大量等间距数值可用 range 快捷生成。"
+                        ),
                         "properties": {
                             "col_name": {"type": "string"},
                             "display_name": {"type": "string"},
@@ -1339,8 +1366,22 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                                     "required": ["key", "display_name"],
                                 },
                             },
+                            "range": {
+                                "type": "object",
+                                "description": "数值范围快捷生成 keys。与 keys 互斥：传了 range 则忽略 keys。",
+                                "properties": {
+                                    "start": {"type": "integer"},
+                                    "end": {"type": "integer"},
+                                    "display_template": {
+                                        "type": "string",
+                                        "description": "可选 display_name 模板，{i} 替换为数值。默认 '{i}'",
+                                        "default": "{i}",
+                                    },
+                                },
+                                "required": ["start", "end"],
+                            },
                         },
-                        "required": ["col_name", "display_name", "keys"],
+                        "required": ["col_name", "display_name"],
                     },
                     "cols": {
                         "type": "array",
@@ -1440,6 +1481,62 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_feedback",
+            "description": (
+                "向开发团队提交工具层面的反馈。\n"
+                "适用场景：\n"
+                "· 当前任务需要某个工具但该工具未提供\n"
+                "· 工具功能存在缺陷或 bug\n"
+                "· 工具应当支持的功能没有支持\n"
+                "· 工具的使用效果与描述存在显著差异\n"
+                "· 任何其他工具层面的问题或改进建议\n"
+                "⚠ 本工具始终可用（无需写权限），请放心使用。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "enum": ["bug", "missing_feature", "defect", "confusion", "suggestion"],
+                        "description": (
+                            "反馈类别：\n"
+                            "bug=工具运行报错或结果错误；\n"
+                            "missing_feature=需要但未提供的功能；\n"
+                            "defect=功能存在但与描述不符；\n"
+                            "confusion=工具行为令人困惑；\n"
+                            "suggestion=改进建议"
+                        ),
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "反馈标题（一句话概述，如「VLOOKUP 不支持字符串列匹配」）",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "详细说明：你当时在做什么任务、使用了哪些工具、期望的结果是什么、实际发生了什么。\n"
+                            "越具体越好，方便我们复现并修复。"
+                        ),
+                    },
+                    "tool_names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "涉及的工具名称列表（如 ['create_3d_table', 'register_formula']），方便定位",
+                        "default": [],
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "补充上下文：当前流水线步骤、已尝试的workaround等（可选）",
+                        "default": "",
+                    },
+                },
+                "required": ["category", "title", "description"],
+            },
+        },
+    },
 ]
 
 
@@ -1513,6 +1610,7 @@ _TOOL_TITLE_ZH: Dict[str, str] = {
     "register_gameplay_table": "注册玩法落地表",
     "get_gameplay_table_list": "读取玩法表清单",
     "set_gameplay_table_status": "更新玩法表状态",
+    "submit_feedback": "提交工具反馈",
 }
 
 _TOOL_GROUP_BY_NAME: Dict[str, str] = {
@@ -1575,6 +1673,7 @@ _TOOL_GROUP_BY_NAME: Dict[str, str] = {
     "register_gameplay_table": "advanced_modeling",
     "get_gameplay_table_list": "advanced_modeling",
     "set_gameplay_table_status": "advanced_modeling",
+    "submit_feedback": "read_core",
 }
 
 
@@ -1638,6 +1737,7 @@ _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "register_gameplay_table": "在玩法规划步骤中将一个玩法落地表注册到规划清单。",
     "get_gameplay_table_list": "列出所有已注册的玩法落地表及其执行状态。",
     "set_gameplay_table_status": "将玩法落地表的状态更新为进行中或已完成。",
+    "submit_feedback": "当工具缺少、存在缺陷、描述不符或其他工具层面问题时提交反馈给开发团队。",
 }
 
 
@@ -3516,12 +3616,14 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
             out = {"error": "无写权限"}
         else:
             try:
+                dim1 = _expand_dim_range(args.get("dim1") or {})
+                dim2 = _expand_dim_range(args.get("dim2") or {})
                 out = create_3d_table(
                     conn,
                     table_name=str(args.get("table_name", "")),
                     display_name=str(args.get("display_name", "")),
-                    dim1=args.get("dim1") or {},
-                    dim2=args.get("dim2") or {},
+                    dim1=dim1,
+                    dim2=dim2,
                     cols=args.get("cols") or [],
                     readme=str(args.get("readme", "")),
                     purpose=str(args.get("purpose", "")),
@@ -3533,6 +3635,8 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                     "error": str(e),
                     "fix": "create_3d_table 用于三维数据表：dim1/dim2 是可手填的轴值集合，但属性列只能存数值。若变化本质上来自维度展开，优先把变化写进 cols[].formula，而不是手填展开后的整表常量。",
                 }
+    elif name == "submit_feedback":
+        out = _submit_feedback(conn, args, p.project_slug)
     else:
         out = {"error": f"未知工具 {name}"}
     return json.dumps(wrap_tool_payload(out), ensure_ascii=False)
@@ -3616,6 +3720,82 @@ def _list_exposed_params(conn: sqlite3.Connection, target_step: str) -> Dict[str
 
 
 # ─── 术语 / 常数：实现 ───────────────────────────────────────────────
+
+
+def _expand_dim_range(dim: Dict[str, Any]) -> Dict[str, Any]:
+    """将 dim.range 自动展开为 dim.keys 数组。
+
+    当 AI 传 range={start,end,display_template} 时，自动生成完整 keys。
+    数字 key 直接转字符串，display_name 按模板替换 {i}。
+    与 keys 互斥：有 range 则忽略 keys，反之直接返回原 dim。
+    """
+    rng = dim.get("range")
+    if not rng or not isinstance(rng, dict):
+        return dim
+    start = int(rng.get("start", 1))
+    end = int(rng.get("end", 1))
+    if start > end:
+        start, end = end, start
+    template = str(rng.get("display_template", "{i}"))
+    keys = []
+    for i in range(start, end + 1):
+        display_name = template.replace("{i}", str(i))
+        keys.append({"key": str(i), "display_name": display_name})
+    result = {k: v for k, v in dim.items() if k != "range"}
+    result["keys"] = keys
+    return result
+
+
+def _submit_feedback(conn: sqlite3.Connection, args: Dict[str, Any], project_slug: str = "") -> Dict[str, Any]:
+    """AI 工具反馈：将问题/需求写入 _tool_feedback 表。
+
+    反馈文件位置：各项目 project.db 的 _tool_feedback 表。
+    可用 sqlite3 project.db "SELECT * FROM _tool_feedback ORDER BY id DESC LIMIT 20;" 查看。
+    """
+    import time as _t
+    category = str(args.get("category", "bug")).strip()
+    title = str(args.get("title", "")).strip()
+    description = str(args.get("description", "")).strip()
+    tool_names_raw = args.get("tool_names") or []
+    if not isinstance(tool_names_raw, list):
+        tool_names_raw = []
+    tool_names = json.dumps([str(t) for t in tool_names_raw], ensure_ascii=False)
+    context = str(args.get("context", "")).strip()
+
+    if not title:
+        return {"error": "title 必填，请至少提供反馈标题"}
+    if not description:
+        return {"error": "description 必填，请详细说明遇到的问题"}
+    if category not in ("bug", "missing_feature", "defect", "confusion", "suggestion"):
+        return {"error": f"category 必须是 bug/missing_feature/defect/confusion/suggestion，而不是 {category!r}"}
+
+    now = _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime())
+    pipeline_step = ""
+    try:
+        cur = conn.execute("SELECT current_step FROM pipeline_state LIMIT 1")
+        row = cur.fetchone()
+        if row:
+            pipeline_step = str(row[0] or "")
+    except Exception:  # noqa: BLE001
+        pass
+
+    conn.execute(
+        """
+        INSERT INTO _tool_feedback
+            (project_slug, pipeline_step, category, title, description, tool_names, context, created_at)
+        VALUES (?,?,?,?,?,?,?,?)
+        """,
+        (project_slug, pipeline_step, category, title, description, tool_names, context, now),
+    )
+    conn.commit()
+
+    return {
+        "ok": True,
+        "message": "反馈已记录，感谢！我们会基于社区反馈持续优化工具能力。",
+        "feedback_id": conn.execute("SELECT last_insert_rowid()").fetchone()[0],
+        "category": category,
+        "title": title,
+    }
 
 
 def _now_iso() -> str:
