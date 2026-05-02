@@ -345,7 +345,7 @@ def _base_common_system(mode_norm: str) -> str:
             "如 '基础/属性'、'分配/玩法属性'、'落地/装备'）以便目录化管理；"
             "可用 list_directories / set_table_directory 查询和移动。",
             "【SKILL 库使用】当前步骤可能已自动暴露默认 SKILL；当你需要核对更细的玩法制作说明时，"
-            "优先使用 list_skills / get_skill_detail / render_skill_file 查询，不要凭空补写玩法规则。",
+            "应当使用 list_skills / get_skill_detail / render_skill_file 查询，不要凭空补写玩法规则。",
             context_block,
             "【游戏类型适配】game_type 字段在 fixed_layer_config.core 中，已在 gather 阶段读取；设计时必须适配：\n"
             "  · rpg_turn（回合制）：战斗以回合为单位，速度影响行动顺序，无攻击间隔概念；\n"
@@ -575,9 +575,9 @@ _GATHER_SYSTEM = (
     "  · get_project_config — 核心定义（game_type/level_cap/游戏系统等）\n"
     "  · get_default_system_rules — 02 机读设计约束\n"
     "  · get_table_list — 已有表清单（仅 table_name / display_name / view_slice_only）\n"
-    "  · list_skills — 列出当前项目可用的 SKILL 制作说明（按 step_id 过滤更精准）\n\n"
+    "  · list_skills — 列出当前项目可用的 SKILL 制作说明\n\n"
     "根据上述结果，按需追加调用（**应**并行，独立读取一次发出）：\n"
-    "  · render_skill_file — 对 list_skills 返回的每个 enabled SKILL 逐一调用，读取其完整内容\n"
+    "  · render_skill_file — 根据 list_skills 的结果，选择若干个你需要进一步使用的skill，读取其完整内容\n"
     "  · get_table_schema — 查看关键表结构；若 view_slice_only=true，必须先看它\n"
     "  · get_table_readme / read_table — 查看关键表 README 与 <=200 行数据切片\n"
     "  · sparse_sample — 对大表看代表性样本，避免直接读大结果集\n"
