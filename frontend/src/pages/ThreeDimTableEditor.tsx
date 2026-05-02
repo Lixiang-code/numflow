@@ -384,9 +384,17 @@ export default function ThreeDimTableEditor({
       })
       setEditingConstName(null)
       setEditingConstValue('')
-      onConstantsChanged?.()
+      // 1. 重算当前表所有行公式（常量值变更后重新求值）
       await apiFetch(`/compute/column-formula/recalculate-table?table_name=${encodeURIComponent(tableName)}`, { method: 'POST', headers })
+      // 2. 沿依赖图级联重算下游表（连锁反应）
+      for (const entry of formulaEntries) {
+        await apiFetch(
+          `/compute/recalculate-downstream?table_name=${encodeURIComponent(tableName)}&column_name=${encodeURIComponent(entry.col.key)}`,
+          { method: 'POST', headers },
+        ).catch(() => { /* 无下游依赖则跳过 */ })
+      }
       await refreshSnapshot()
+      onConstantsChanged?.()
     } catch (e) {
       setErr(String(e))
     } finally {
@@ -745,14 +753,16 @@ export default function ThreeDimTableEditor({
                     const isEditingCell = editingCell?.dim1Key === coords?.dim1Key
                       && editingCell?.dim2Key === coords?.dim2Key
                       && editingCell?.metricKey === coords?.metricKey
+                    const cellFormula = coords ? getMetricFormula(coords.metricKey) : undefined
+                    const cellEditable = canWrite && !cellFormula && coords && !cellSaving
                     return (
                       <td
                         key={colKey}
-                        className={`matrix-cell${value == null ? ' matrix-cell-empty' : ''}${canWrite ? ' matrix-cell-editable' : ''}`}
+                        className={`matrix-cell${value == null ? ' matrix-cell-empty' : ''}${cellEditable ? ' matrix-cell-editable' : ''}`}
                         style={cellBg ? { background: cellBg } : undefined}
-                        title={canWrite ? '点击编辑' : undefined}
+                        title={cellFormula ? '公式列值，自动计算不可编辑' : cellEditable ? '点击编辑' : undefined}
                         onClick={() => {
-                          if (!canWrite || !coords || cellSaving) return
+                          if (!cellEditable || !coords) return
                           setEditingCell(coords)
                           setEditingCellValue(value != null ? (typeof value === 'number' ? String(value) : String(value)) : '')
                         }}
