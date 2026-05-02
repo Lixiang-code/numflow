@@ -515,7 +515,13 @@ export default function ThreeDimTableEditor({
     return { dim1Key: coords.dim1, dim2Key: coords.dim2, metricKey: coords.metric }
   }
 
-  const getMetricFormula = (metricKey: string): FormulaInfo | undefined => snapshot.column_formulas?.[metricKey]
+  const getMetricFormula = (metricKey: string): FormulaInfo | undefined => {
+    const reg = snapshot.column_formulas?.[metricKey]
+    if (reg) return reg
+    const colDef = metricMetaMap.get(metricKey)
+    if (colDef?.formula) return { formula: colDef.formula, type: 'row' }
+    return undefined
+  }
 
   const FAB_STYLE: React.CSSProperties = {
     fontFamily: '"Cascadia Code","Fira Code",ui-monospace,monospace',

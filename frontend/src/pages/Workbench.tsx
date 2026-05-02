@@ -1486,6 +1486,31 @@ export default function Workbench() {
       })
       setFabConstEditName(null)
       setFabConstEditVal('')
+      void loadAllConstants()
+      // 如果当前正在编辑公式列，立即重算该列
+      if (formulaBarCol && columnFormulas[formulaBarCol]) {
+        await apiFetch(
+          `/compute/column-formula/recalculate?table_name=${encodeURIComponent(selected!)}&column_name=${encodeURIComponent(formulaBarCol)}`,
+          { method: 'POST', headers },
+        )
+      }
+      // 重算当前表所有公式列 + 级联下游
+      if (selected && selected !== '__constants__') {
+        await apiFetch(
+          `/compute/column-formula/recalculate-table?table_name=${encodeURIComponent(selected)}`,
+          { method: 'POST', headers },
+        )
+        // 级联重算每个公式列的下游
+        for (const col of activeCols) {
+          if (columnFormulas[col]) {
+            await apiFetch(
+              `/compute/recalculate-downstream?table_name=${encodeURIComponent(selected)}&column_name=${encodeURIComponent(col)}`,
+              { method: 'POST', headers },
+            ).catch(() => {})
+          }
+        }
+      }
+      await reloadActiveTable()
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
