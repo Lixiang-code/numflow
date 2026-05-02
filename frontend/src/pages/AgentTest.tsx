@@ -1298,14 +1298,20 @@ export default function AgentTest() {
           )}
 
           {activeView === 'phases' && (
-            <PromptSourcesBlock
-              sources={[
-                ...(promptSources.gather ?? []),
-                ...(promptSources.design ?? []),
-                ...(promptSources.review ?? []),
-                ...(promptSources.execute ?? []),
-              ]}
-            />
+            <>
+              <PromptSourcesBlock
+                sources={[
+                  ...(promptSources.gather ?? []),
+                  ...(promptSources.design ?? []),
+                  ...(promptSources.review ?? []),
+                  ...(promptSources.execute ?? []),
+                ]}
+              />
+              <div style={{ marginBottom: '1rem' }}>
+                {toolsMeta.gather && <ToolsMetaBadge meta={toolsMeta.gather} />}
+                {toolsMeta.execute && <ToolsMetaBadge meta={toolsMeta.execute} />}
+              </div>
+            </>
           )}
 
           {/* 三阶段面板 */}
