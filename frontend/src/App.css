@@ -2484,15 +2484,21 @@ pre {
 
 /* ===== Round 4: Matrix Editor ===== */
 .matrix-editor { display: flex; flex-direction: column; height: 100%; }
-.matrix-topbar { display: flex; align-items: center; gap: .5rem; padding: .4rem .6rem; background: #f5f5f5; border-bottom: 1px solid #ddd; flex-shrink: 0; }
+.matrix-topbar { display: flex; align-items: center; gap: .4rem; padding: .3rem .5rem; background: #f5f5f5; border-bottom: 1px solid #ddd; flex-shrink: 0; min-height: 32px; }
 .matrix-topbar h3 { margin: 0; font-size: .95rem; }
 .matrix-meta-chip { display: inline-flex; align-items: center; gap: .25rem; background: #e8f5e9; border: 1px solid #c8e6c9; border-radius: 4px; padding: .1rem .4rem; font-size: .78rem; color: #2e7d32; }
-.matrix-kind-badge { background: #fff3e0; border: 1px solid #ffe0b2; border-radius: 4px; padding: .1rem .4rem; font-size: .75rem; color: #e65100; font-weight: 600; text-transform: uppercase; }
+.matrix-kind-badge { background: #fff3e0; border: 1px solid #ffe0b2; border-radius: 4px; padding: .1rem .4rem; font-size: .75rem; color: #e65100; font-weight: 600; text-transform: uppercase; white-space: nowrap; }
+.matrix-axis-bar { padding: .4rem .5rem; background: #fafafa; border-bottom: 1px solid #e0e0e0; flex-shrink: 0; }
+.matrix-axis-row { display: flex; align-items: center; gap: .5rem; margin-bottom: .3rem; }
+.matrix-axis-row:last-child { margin-bottom: 0; }
+.matrix-axis-label { font-size: .75rem; color: #888; min-width: 42px; font-weight: 600; }
+.matrix-axis-btns { display: flex; gap: .2rem; align-items: center; }
+.matrix-axis-select { font-size: .78rem; padding: .15rem .35rem; border: 1px solid #ccc; border-radius: 4px; background: #fff; min-width: 160px; }
 .matrix-level-tabs { display: flex; gap: .25rem; padding: .3rem .5rem; background: #fafafa; border-bottom: 1px solid #e0e0e0; flex-shrink: 0; overflow-x: auto; }
 .matrix-level-tabs button { background: none; border: 1px solid transparent; border-radius: 4px; padding: .2rem .6rem; font-size: .8rem; cursor: pointer; color: #555; }
 .matrix-level-tabs button:hover { background: #e8f5e9; color: #2e7d32; }
 .matrix-level-tabs button.active { background: #217346; color: #fff; border-color: #1a5c38; }
-.matrix-scroll { flex: 1; overflow: auto; padding: .5rem; }
+.matrix-scroll { flex: 1; overflow: auto; padding: .5rem; min-height: 0; }
 .matrix-table { border-collapse: collapse; font-size: .8rem; }
 .matrix-corner, .matrix-row-head, .matrix-col-head { background: #f5f5f5; font-weight: 600; padding: .35rem .6rem; border: 1px solid #ddd; white-space: nowrap; position: sticky; z-index: 1; }
 .matrix-corner { top: 0; left: 0; z-index: 2; }
@@ -2504,6 +2510,26 @@ pre {
 .matrix-cell .cell-val { font-family: monospace; font-size: .85rem; font-weight: 600; }
 .matrix-cell .cell-note { display: block; font-size: .7rem; color: #888; margin-top: .1rem; }
 .matrix-cell.has-value { background: #fffde7; }
+
+/* ===== Formula Panel (collapsible bottom panel) ===== */
+.matrix-formula-panel { border-top: 1px solid #ddd; flex-shrink: 0; max-height: 320px; display: flex; flex-direction: column; background: #fafafa; }
+.matrix-formula-panel-header { display: flex; align-items: center; justify-content: space-between; padding: .4rem .6rem; border-bottom: 1px solid #e0e0e0; background: #f0f0f0; flex-shrink: 0; }
+.matrix-formula-list { flex: 1; overflow-y: auto; padding: .4rem; }
+.matrix-formula-item { background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: .5rem .6rem; margin-bottom: .4rem; }
+.matrix-formula-item:last-child { margin-bottom: 0; }
+.matrix-formula-item-irrelevant { opacity: .6; background: #f8f8f8; }
+.matrix-formula-item-header { display: flex; align-items: center; gap: .4rem; }
+.matrix-formula-col-name { font-weight: 600; font-size: .82rem; display: flex; align-items: center; }
+.matrix-formula-type-badge { font-size: .65rem; padding: .05rem .35rem; border-radius: 3px; font-weight: 600; white-space: nowrap; }
+.matrix-formula-type-row { background: #e3f2fd; color: #1565c0; }
+.matrix-formula-type-row_template { background: #f3e5f5; color: #7b1fa2; }
+.matrix-formula-type-sql { background: #fff3e0; color: #e65100; }
+.matrix-formula-text { display: block; margin-top: .35rem; font-size: .78rem; color: #333; white-space: pre-wrap; word-break: break-word; background: #f8f9fb; padding: .3rem .4rem; border-radius: 4px; border: 1px solid #e8e8e8; cursor: pointer; }
+.matrix-formula-text:hover { background: #eff1f5; border-color: #ccc; }
+.matrix-formula-input { font-family: 'Cascadia Code', 'Fira Code', ui-monospace, monospace; font-size: .78rem; padding: .3rem .4rem; border: 1px solid #90caf9; border-radius: 4px; width: 100%; box-sizing: border-box; outline: none; }
+.matrix-formula-input:focus { border-color: #1976d2; box-shadow: 0 0 0 2px rgba(25,118,210,.15); }
+.matrix-formula-add { background: #fff; border: 1px solid #90caf9; border-radius: 6px; padding: .5rem .6rem; margin: .4rem; }
+.matrix-formula-add-row { display: flex; align-items: center; gap: .4rem; }
 
 /* ===== Round 4: Exposed Params Banner ===== */
 .exposed-params-banner { display: flex; align-items: center; flex-wrap: wrap; gap: .35rem; padding: .35rem .6rem; background: #e8f5e9; border-bottom: 1px solid #c8e6c9; flex-shrink: 0; font-size: .8rem; }

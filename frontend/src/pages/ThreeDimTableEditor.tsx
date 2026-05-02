@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch } from '../api'
 
 type GlossaryItem = { term_en: string; term_zh: string }
@@ -46,11 +46,13 @@ export default function ThreeDimTableEditor({
   headers,
   glossary,
   canRecalculate = false,
+  canWrite = false,
 }: {
   tableName: string
   headers: Record<string, string>
   glossary: GlossaryItem[]
   canRecalculate?: boolean
+  canWrite?: boolean
 }) {
   const [snapshot, setSnapshot] = useState<ThreeDimSnapshot | null>(null)
   const [loadedRequestKey, setLoadedRequestKey] = useState('')
@@ -59,7 +61,18 @@ export default function ThreeDimTableEditor({
   const [colAxis, setColAxis] = useState<AxisKey>('metric')
   const [fixedValue, setFixedValue] = useState<string | null>(null)
   const [recalculating, setRecalculating] = useState(false)
+  const [showFormulaPanel, setShowFormulaPanel] = useState(false)
   const requestKey = tableName
+
+  const [editingFormulaCol, setEditingFormulaCol] = useState<string | null>(null)
+  const [editingFormulaText, setEditingFormulaText] = useState('')
+  const [formulaSaving, setFormulaSaving] = useState(false)
+  const [showAddFormula, setShowAddFormula] = useState(false)
+  const [newFormulaCol, setNewFormulaCol] = useState('')
+  const [newFormulaText, setNewFormulaText] = useState('')
+  const [newFormulaType, setNewFormulaType] = useState('row')
+  const [showAxisSettings, setShowAxisSettings] = useState(false)
+  const addFormulaColSelectRef = useRef<HTMLSelectElement>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -143,7 +156,7 @@ export default function ThreeDimTableEditor({
         title: (key: string) => metricMetaMap.get(key)?.display_name || glossaryMap.get(key) || key,
         subTitle: (key: string) => key,
       },
-      } satisfies Record<AxisKey, { label: string; keys: string[]; title: (key: string) => string; subTitle: (key: string) => string }>
+    } satisfies Record<AxisKey, { label: string; keys: string[]; title: (key: string) => string; subTitle: (key: string) => string }>
   }, [dim1DisplayMap, dim1Keys, dim2DisplayMap, dim2Keys, glossaryMap, metricKeys, metricMetaMap, snapshot])
   const fixedKeys = fixedAxis && axisOptions ? axisOptions[fixedAxis].keys : []
   const effectiveFixedValue = fixedValue && fixedKeys.includes(fixedValue) ? fixedValue : (fixedKeys[0] ?? null)
@@ -154,30 +167,6 @@ export default function ThreeDimTableEditor({
       .filter((item): item is { col: ValueCol; formula: FormulaInfo } => Boolean(item.formula)),
     [snapshot],
   )
-  const sliceExamples = useMemo(() => {
-    if (!axisOptions) return []
-    const firstDim1 = dim1Keys[0]
-    const firstDim2 = dim2Keys[0]
-    const firstMetric = metricKeys[0]
-    if (!firstDim1 || !firstDim2 || !firstMetric) return []
-    return [
-      {
-        title: '查看某个分类的全部属性',
-        description: `固定 ${axisOptions.dim2.label} = ${axisOptions.dim2.title(firstDim2)}，保留 ${axisOptions.dim1.label} × ${axisOptions.metric.label}`,
-        tool: `read_3d_table keep_axes=['dim1','metric'] + dim2_keys=['${firstDim2}']`,
-      },
-      {
-        title: '查看某个等级/档位的全部分类属性',
-        description: `固定 ${axisOptions.dim1.label} = ${axisOptions.dim1.title(firstDim1)}，保留 ${axisOptions.dim2.label} × ${axisOptions.metric.label}`,
-        tool: `read_3d_table keep_axes=['dim2','metric'] + dim1_keys=['${firstDim1}']`,
-      },
-      {
-        title: '查看单个三维点的完整属性列',
-        description: `固定 ${axisOptions.dim1.label} = ${axisOptions.dim1.title(firstDim1)} 且 ${axisOptions.dim2.label} = ${axisOptions.dim2.title(firstDim2)}，只保留 ${axisOptions.metric.label}`,
-        tool: `read_3d_table keep_axes=['metric'] + dim1_keys=['${firstDim1}'] + dim2_keys=['${firstDim2}']`,
-      },
-    ]
-  }, [axisOptions, dim1Keys, dim2Keys, metricKeys])
 
   const relevantFormulaEntries = useMemo(() => {
     if (!fixedAxis) return formulaEntries
@@ -217,6 +206,86 @@ export default function ThreeDimTableEditor({
       setRecalculating(false)
     }
   }
+
+  async function saveFormula(columnName: string, formula: string) {
+    setFormulaSaving(true)
+    setErr(null)
+    try {
+      await apiFetch('/compute/column-formula', {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ table_name: tableName, column_name: columnName, formula: formula.trim() }),
+      })
+      setEditingFormulaCol(null)
+      setEditingFormulaText('')
+      await refreshSnapshot()
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setFormulaSaving(false)
+    }
+  }
+
+  async function deleteFormula(columnName: string) {
+    setErr(null)
+    try {
+      await apiFetch(`/compute/column-formula?table_name=${encodeURIComponent(tableName)}&column_name=${encodeURIComponent(columnName)}`, {
+        method: 'DELETE',
+        headers,
+      })
+      setEditingFormulaCol(null)
+      await refreshSnapshot()
+    } catch (e) {
+      setErr(String(e))
+    }
+  }
+
+  async function recalculateSingleFormula(columnName: string) {
+    setErr(null)
+    try {
+      await apiFetch(`/compute/column-formula/recalculate?table_name=${encodeURIComponent(tableName)}&column_name=${encodeURIComponent(columnName)}`, {
+        method: 'POST',
+        headers,
+      })
+      await refreshSnapshot()
+    } catch (e) {
+      setErr(String(e))
+    }
+  }
+
+  async function addFormula() {
+    if (!newFormulaCol || !newFormulaText.trim()) return
+    setFormulaSaving(true)
+    setErr(null)
+    try {
+      await apiFetch('/compute/column-formula', {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ table_name: tableName, column_name: newFormulaCol, formula: newFormulaText.trim() }),
+      })
+      setShowAddFormula(false)
+      setNewFormulaCol('')
+      setNewFormulaText('')
+      setNewFormulaType('row')
+      await refreshSnapshot()
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setFormulaSaving(false)
+    }
+  }
+
+  const startEditFormula = (colKey: string, formula: string) => {
+    setEditingFormulaCol(colKey)
+    setEditingFormulaText(formula)
+    setShowAddFormula(false)
+  }
+
+  const cancelEdit = () => {
+    setEditingFormulaCol(null)
+    setEditingFormulaText('')
+  }
+
   const loading = loadedRequestKey !== requestKey
 
   if (loading) return <div className="muted small" style={{ padding: '1rem' }}>加载三维表中…</div>
@@ -241,86 +310,95 @@ export default function ThreeDimTableEditor({
 
   const getMetricFormula = (metricKey: string): FormulaInfo | undefined => snapshot.column_formulas?.[metricKey]
 
+  const unformulaedCols = useMemo(
+    () => (snapshot.cols || []).filter((c) => !snapshot.column_formulas?.[c.key]),
+    [snapshot],
+  )
+
   return (
     <div className="matrix-editor">
       <div className="matrix-topbar">
         <span className="matrix-kind-badge">三维数据表</span>
-        <span className="matrix-meta-chip muted">
+        <span className="matrix-meta-chip muted" style={{ fontWeight: 500 }}>
           {snapshot.dim1.display_name || snapshot.dim1.col_name} × {snapshot.dim2.display_name || snapshot.dim2.col_name} × 属性列
         </span>
-        <span className="matrix-meta-chip muted">{snapshot.row_count} 组合</span>
-        <span className="matrix-meta-chip muted">{snapshot.cols.length} 属性列</span>
-        {formulaEntries.length > 0 && <span className="matrix-meta-chip mono">{formulaEntries.length} 个公式列</span>}
+        <span className="matrix-meta-chip" style={{ background: '#e3f2fd', borderColor: '#bbdefb', color: '#1565c0' }}>
+          {snapshot.row_count} 组合 · {snapshot.cols.length} 属性
+        </span>
+        <div style={{ flex: 1 }} />
+        <button
+          type="button"
+          className={`btn tiny${showAxisSettings ? ' primary' : ''}`}
+          onClick={() => setShowAxisSettings(!showAxisSettings)}
+          style={{ marginRight: 4 }}
+        >
+          {showAxisSettings ? '隐藏切片' : '切片设置'}
+        </button>
+        <button
+          type="button"
+          className={`btn tiny${showFormulaPanel ? ' primary' : ''}`}
+          onClick={() => { setShowFormulaPanel(!showFormulaPanel); setShowAddFormula(false); setEditingFormulaCol(null) }}
+          style={{ marginRight: 4 }}
+        >
+          {showFormulaPanel ? '收起公式' : `公式 (${formulaEntries.length})`}
+        </button>
         {canRecalculate && formulaEntries.length > 0 && (
-          <button type="button" className="btn tiny" onClick={() => void recalculateTable()} disabled={recalculating}>
-            {recalculating ? '重算中…' : '重算公式'}
+          <button type="button" className="btn tiny primary" onClick={() => void recalculateTable()} disabled={recalculating}>
+            {recalculating ? '重算中…' : '重算全部'}
           </button>
         )}
       </div>
 
-      {sliceExamples.length > 0 && (
-        <div className="panel" style={{ padding: '0.75rem 0.9rem', marginBottom: '0.75rem' }}>
-          <div className="muted small" style={{ marginBottom: '0.45rem' }}>
-            前端的“行轴 / 列轴 / 第三维”与 AI 工具 <code>read_3d_table</code> 的切片语义一致：保留的两个轴就是 <code>keep_axes</code>，固定项就是其余维度的 key 过滤。
+      {showAxisSettings && (
+        <div className="matrix-axis-bar">
+          <div className="matrix-axis-row">
+            <span className="matrix-axis-label">行轴</span>
+            <div className="matrix-axis-btns">
+              {(['dim1', 'dim2', 'metric'] as AxisKey[]).map((axis) => (
+                <button
+                  key={`row-${axis}`}
+                  type="button"
+                  className={`btn tiny${rowAxis === axis ? ' primary' : ''}`}
+                  onClick={() => pickRowAxis(axis)}
+                >
+                  {axisOptions[axis].label}
+                </button>
+              ))}
+            </div>
           </div>
-          <div style={{ display: 'grid', gap: '0.45rem' }}>
-            {sliceExamples.map((example) => (
-              <div key={example.tool}>
-                <strong>{example.title}</strong>
-                <div className="muted small">{example.description}</div>
-                <code style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{example.tool}</code>
-              </div>
-            ))}
+          <div className="matrix-axis-row">
+            <span className="matrix-axis-label">列轴</span>
+            <div className="matrix-axis-btns">
+              {(['dim1', 'dim2', 'metric'] as AxisKey[]).map((axis) => (
+                <button
+                  key={`col-${axis}`}
+                  type="button"
+                  className={`btn tiny${colAxis === axis ? ' primary' : ''}`}
+                  onClick={() => pickColAxis(axis)}
+                  disabled={axis === rowAxis}
+                >
+                  {axisOptions[axis].label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="matrix-axis-row">
+            <span className="matrix-axis-label">第三维</span>
+            <span className="matrix-meta-chip" style={{ marginRight: 6 }}>{axisOptions[fixedAxis].label}</span>
+            <select
+              value={effectiveFixedValue || ''}
+              onChange={(e) => setFixedValue(e.target.value)}
+              className="matrix-axis-select"
+            >
+              {fixedKeys.map((key) => (
+                <option key={key} value={key}>
+                  {axisOptions[fixedAxis].title(key)} · {axisOptions[fixedAxis].subTitle(key)}
+                </option>
+              ))}
+            </select>
           </div>
         </div>
       )}
-
-      <div className="matrix-level-tabs" style={{ marginBottom: '0.5rem', flexWrap: 'wrap' }}>
-        <span className="muted small" style={{ marginRight: '0.5rem' }}>行轴：</span>
-        {(['dim1', 'dim2', 'metric'] as AxisKey[]).map((axis) => (
-          <button
-            key={`row-${axis}`}
-            type="button"
-            className={`btn tiny${rowAxis === axis ? ' primary' : ''}`}
-            onClick={() => pickRowAxis(axis)}
-            style={{ marginRight: 4, marginBottom: 4 }}
-          >
-            {axisOptions[axis].label}
-          </button>
-        ))}
-      </div>
-
-      <div className="matrix-level-tabs" style={{ marginBottom: '0.5rem', flexWrap: 'wrap' }}>
-        <span className="muted small" style={{ marginRight: '0.5rem' }}>列轴：</span>
-        {(['dim1', 'dim2', 'metric'] as AxisKey[]).map((axis) => (
-          <button
-            key={`col-${axis}`}
-            type="button"
-            className={`btn tiny${colAxis === axis ? ' primary' : ''}`}
-            onClick={() => pickColAxis(axis)}
-            disabled={axis === rowAxis}
-            style={{ marginRight: 4, marginBottom: 4 }}
-          >
-            {axisOptions[axis].label}
-          </button>
-        ))}
-      </div>
-
-      <div className="matrix-level-tabs" style={{ marginBottom: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
-        <span className="muted small" style={{ marginRight: '0.5rem' }}>第三维：</span>
-        <span className="matrix-meta-chip muted" style={{ marginRight: '0.5rem' }}>{axisOptions[fixedAxis].label}</span>
-        <select
-          value={effectiveFixedValue || ''}
-          onChange={(e) => setFixedValue(e.target.value)}
-          style={{ minWidth: 240 }}
-        >
-          {fixedKeys.map((key) => (
-            <option key={key} value={key}>
-              {axisOptions[fixedAxis].title(key)} · {axisOptions[fixedAxis].subTitle(key)}
-            </option>
-          ))}
-        </select>
-      </div>
 
       <div className="matrix-scroll">
         <table className="matrix-table">
@@ -380,19 +458,130 @@ export default function ThreeDimTableEditor({
         </table>
       </div>
 
-      {relevantFormulaEntries.length > 0 && (
-        <div style={{ marginTop: '1rem' }}>
-          <h4 style={{ marginBottom: '0.5rem' }}>当前视图相关公式</h4>
-          <div style={{ display: 'grid', gap: '0.5rem' }}>
-            {relevantFormulaEntries.map(({ col, formula }) => (
-              <div key={col.key} className="panel" style={{ padding: '0.75rem' }}>
-                <div style={{ marginBottom: '0.25rem' }}>
-                  <strong>{col.display_name || col.key}</strong>
-                  <span className="muted small" style={{ marginLeft: '0.5rem' }}>{formula.type}</span>
-                </div>
-                <code style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{formula.formula}</code>
+      {showFormulaPanel && (
+        <div className="matrix-formula-panel">
+          <div className="matrix-formula-panel-header">
+            <span>
+              <strong>公式管理</strong>
+              <span className="muted small" style={{ marginLeft: 8 }}>{formulaEntries.length} 个公式</span>
+            </span>
+            <div style={{ display: 'flex', gap: 4 }}>
+              {canWrite && !showAddFormula && (
+                <button type="button" className="btn tiny" onClick={() => setShowAddFormula(true)}>添加公式</button>
+              )}
+              <button type="button" className="btn tiny" onClick={() => setShowFormulaPanel(false)}>收起</button>
+            </div>
+          </div>
+
+          {showAddFormula && (
+            <div className="matrix-formula-add">
+              <div className="matrix-formula-add-row">
+                <span className="muted small" style={{ minWidth: 48 }}>目标列</span>
+                <select
+                  ref={addFormulaColSelectRef}
+                  value={newFormulaCol}
+                  onChange={(e) => setNewFormulaCol(e.target.value)}
+                  className="matrix-axis-select"
+                  style={{ flex: 1, maxWidth: 200 }}
+                >
+                  <option value="">请选择列</option>
+                  {unformulaedCols.map((c) => (
+                    <option key={c.key} value={c.key}>{c.display_name || c.key}</option>
+                  ))}
+                  {formulaEntries.map(({ col }) => (
+                    <option key={col.key} value={col.key} disabled>{col.display_name || col.key} (已有公式)</option>
+                  ))}
+                </select>
+                <span className="muted small" style={{ minWidth: 48, marginLeft: 12 }}>类型</span>
+                <select value={newFormulaType} onChange={(e) => setNewFormulaType(e.target.value)} className="matrix-axis-select" style={{ width: 100 }}>
+                  <option value="row">行公式</option>
+                  <option value="row_template">运行时模板</option>
+                </select>
               </div>
-            ))}
+              <div className="matrix-formula-add-row" style={{ marginTop: 6 }}>
+                <span className="muted small" style={{ minWidth: 48, alignSelf: 'flex-start', marginTop: 6 }}>公式</span>
+                <textarea
+                  className="matrix-formula-input"
+                  value={newFormulaText}
+                  onChange={(e) => setNewFormulaText(e.target.value)}
+                  placeholder="例如: @hp * 1.2 + @def * 0.5"
+                  rows={2}
+                  style={{ flex: 1, resize: 'vertical' }}
+                />
+              </div>
+              <div style={{ display: 'flex', gap: 4, marginTop: 8 }}>
+                <button type="button" className="btn tiny primary" onClick={() => void addFormula()} disabled={formulaSaving || !newFormulaCol || !newFormulaText.trim()}>
+                  {formulaSaving ? '保存中…' : '保存'}
+                </button>
+                <button type="button" className="btn tiny" onClick={() => { setShowAddFormula(false); setNewFormulaCol(''); setNewFormulaText('') }}>取消</button>
+              </div>
+            </div>
+          )}
+
+          {relevantFormulaEntries.length === 0 && formulaEntries.length > 0 ? (
+            <div className="muted small" style={{ padding: '0.75rem' }}>
+              当前视图相关公式：共 {formulaEntries.length} 个公式，当前切片视角下显示 {relevantFormulaEntries.length} 个。
+            </div>
+          ) : null}
+
+          <div className="matrix-formula-list">
+            {formulaEntries.length === 0 && (
+              <div className="muted small" style={{ padding: '0.75rem', textAlign: 'center' }}>暂无公式</div>
+            )}
+            {formulaEntries.map(({ col, formula }) => {
+              const isEditing = editingFormulaCol === col.key
+              const isRelevant = relevantFormulaEntries.some((e) => e.col.key === col.key)
+              return (
+                <div
+                  key={col.key}
+                  className={`matrix-formula-item${isRelevant ? '' : ' matrix-formula-item-irrelevant'}`}
+                >
+                  <div className="matrix-formula-item-header">
+                    <span className="matrix-formula-col-name">
+                      {col.display_name || col.key}
+                      <code className="muted small" style={{ marginLeft: 6 }}>{col.key}</code>
+                    </span>
+                    <span className={`matrix-formula-type-badge matrix-formula-type-${formula.type}`}>
+                      {formula.type === 'row' ? '行公式' : formula.type === 'row_template' ? '运行时模板' : formula.type}
+                    </span>
+                    {!isRelevant && <span className="muted small" style={{ marginLeft: 4 }}>(当前视图无影响)</span>}
+                    <div style={{ flex: 1 }} />
+                    {canWrite && !isEditing && (
+                      <div style={{ display: 'flex', gap: 4 }}>
+                        <button type="button" className="btn tiny" onClick={() => startEditFormula(col.key, formula.formula)}>编辑</button>
+                        <button type="button" className="btn tiny" onClick={() => void recalculateSingleFormula(col.key)} title="重算此列">重算</button>
+                        <button type="button" className="btn tiny danger" onClick={() => void deleteFormula(col.key)} title="删除公式">删除</button>
+                      </div>
+                    )}
+                  </div>
+                  {isEditing ? (
+                    <div style={{ marginTop: 6 }}>
+                      <textarea
+                        className="matrix-formula-input"
+                        value={editingFormulaText}
+                        onChange={(e) => setEditingFormulaText(e.target.value)}
+                        rows={Math.min(editingFormulaText.split('\n').length, 6)}
+                        style={{ width: '100%', resize: 'vertical' }}
+                        autoFocus
+                      />
+                      <div style={{ display: 'flex', gap: 4, marginTop: 6 }}>
+                        <button
+                          type="button"
+                          className="btn tiny primary"
+                          onClick={() => void saveFormula(col.key, editingFormulaText)}
+                          disabled={formulaSaving || !editingFormulaText.trim()}
+                        >
+                          {formulaSaving ? '保存中…' : '保存'}
+                        </button>
+                        <button type="button" className="btn tiny" onClick={cancelEdit}>取消</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <code className="matrix-formula-text">{formula.formula}</code>
+                  )}
+                </div>
+              )
+            })}
           </div>
         </div>
       )}

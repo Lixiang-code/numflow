@@ -1781,6 +1781,7 @@ export default function Workbench() {
                 headers={headers}
                 glossary={glossary}
                 canRecalculate={!readOnly}
+                canWrite={!readOnly}
               />
             </>
           ) : selected !== '__constants__' && !selectedIsMatrix ? (

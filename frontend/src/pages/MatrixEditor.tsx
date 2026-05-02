@@ -1,6 +1,6 @@
 /**
  * Matrix / 伪三维表只读可视化编辑器。
- * matrix_resource 在 scale_mode='fallback' 下把第三维改为“公式维”：
+ * matrix_resource 在 scale_mode='fallback' 下把第三维改为"公式维"：
  * 二维基准值仍直接展示；指定等级时，后端会优先返回公式计算结果。
  */
 import { useEffect, useMemo, useState } from 'react'
@@ -78,6 +78,7 @@ export default function MatrixEditor({
   const [activeLevel, setActiveLevel] = useState<string | null>(null)
   const [previewLevel, setPreviewLevel] = useState<string>('')
   const [pendingLevel, setPendingLevel] = useState<string>('')
+  const [showFormulaPanel, setShowFormulaPanel] = useState(false)
   const requestKey = `${tableName}::${previewLevel}`
 
   const glossaryMap = new Map(glossary.map((g) => [g.term_en, g.term_zh]))
@@ -194,12 +195,17 @@ export default function MatrixEditor({
         {valueDtype && <span className="matrix-meta-chip">{valueDtype}</span>}
         {valueFormat && <span className="matrix-meta-chip mono">{valueFormat}</span>}
         {directory && <span className="matrix-meta-chip muted">📁 {directory}</span>}
-        <span className="matrix-meta-chip muted small">
+        <span className="matrix-meta-chip" style={{ background: '#e3f2fd', borderColor: '#bbdefb', color: '#1565c0' }}>
           {rows.length} 行 × {cols.length} 列
         </span>
-        {formulaEntries.length > 0 && (
-          <span className="matrix-meta-chip mono">{formulaEntries.length} 个第三维公式</span>
-        )}
+        <div style={{ flex: 1 }} />
+        <button
+          type="button"
+          className={`btn tiny${showFormulaPanel ? ' primary' : ''}`}
+          onClick={() => setShowFormulaPanel(!showFormulaPanel)}
+        >
+          {showFormulaPanel ? '收起公式' : `公式 (${formulaEntries.length})`}
+        </button>
       </div>
 
       {formulaEntries.length > 0 ? (
@@ -313,21 +319,33 @@ export default function MatrixEditor({
         </table>
       </div>
 
-      {formulaEntries.length > 0 && (
-        <div style={{ marginTop: '1rem' }}>
-          <h4 style={{ marginBottom: '0.5rem' }}>第三维公式</h4>
-          <div style={{ display: 'grid', gap: '0.5rem' }}>
-            {formulaEntries.map(({ row, col, formula }) => (
-              <div key={`${row}-${col}`} className="panel" style={{ padding: '0.75rem' }}>
-                <div style={{ marginBottom: '0.25rem' }}>
-                  <strong>{rowDisplayMap.get(row) || termDisplay(row)}</strong>
-                  <span className="muted small"> / {colDisplayMap.get(col) || termDisplay(col)}</span>
-                  <span className="muted small" style={{ marginLeft: '0.5rem' }}>{formula.type}</span>
-                </div>
-                <code style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{formula.formula}</code>
-              </div>
-            ))}
+      {showFormulaPanel && (
+        <div className="matrix-formula-panel">
+          <div className="matrix-formula-panel-header">
+            <span>
+              <strong>第三维公式</strong>
+              <span className="muted small" style={{ marginLeft: 8 }}>{formulaEntries.length} 个单元格公式</span>
+            </span>
+            <button type="button" className="btn tiny" onClick={() => setShowFormulaPanel(false)}>收起</button>
           </div>
+          {formulaEntries.length === 0 ? (
+            <div className="muted small" style={{ padding: '0.75rem', textAlign: 'center' }}>暂无公式</div>
+          ) : (
+            <div className="matrix-formula-list">
+              {formulaEntries.map(({ row, col, formula }) => (
+                <div key={`${row}-${col}`} className="matrix-formula-item">
+                  <div className="matrix-formula-item-header">
+                    <strong>{rowDisplayMap.get(row) || termDisplay(row)}</strong>
+                    <span className="muted small"> / {colDisplayMap.get(col) || termDisplay(col)}</span>
+                    <span className={`matrix-formula-type-badge matrix-formula-type-${formula.type}`}>
+                      {formula.type}
+                    </span>
+                  </div>
+                  <code className="matrix-formula-text">{formula.formula}</code>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
