@@ -228,18 +228,11 @@ def init_project_db(conn: sqlite3.Connection, *, seed_readme: bool = True) -> No
     except Exception:  # noqa: BLE001
         pass
     try:
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(_gameplay_table_registry)")}
-        if "started_at" not in cols:
-            conn.execute("ALTER TABLE _gameplay_table_registry ADD COLUMN started_at TEXT")
-            conn.execute(
-                """
-                UPDATE _gameplay_table_registry
-                SET started_at = updated_at
-                WHERE status='进行中' AND COALESCE(started_at, '') = ''
-                """
-            )
+        from app.services.skill_library import ensure_default_skills
+        ensure_default_skills(conn)
     except Exception:  # noqa: BLE001
         pass
+    conn.commit()
     if seed_readme:
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         cur = conn.execute(
@@ -362,6 +355,9 @@ def update_agent_session(
     messages_json: Optional[str] = None,
     user_message: Optional[str] = None,
     model_used: Optional[str] = None,
+    current_phase: Optional[str] = None,
+    completed_phases: Optional[str] = None,
+    gather_context_json: Optional[str] = None,
     finished: bool = False,
 ) -> None:
     """Partial update of a session record (only non-None fields are updated)."""
@@ -394,6 +390,21 @@ def update_agent_session(
     if model_used is not None:
         try:
             fields.append("model_used = ?"); params.append(model_used)
+        except Exception:  # noqa: BLE001
+            pass
+    if current_phase is not None:
+        try:
+            fields.append("current_phase = ?"); params.append(current_phase)
+        except Exception:  # noqa: BLE001
+            pass
+    if completed_phases is not None:
+        try:
+            fields.append("completed_phases = ?"); params.append(completed_phases)
+        except Exception:  # noqa: BLE001
+            pass
+    if gather_context_json is not None:
+        try:
+            fields.append("gather_context_json = ?"); params.append(gather_context_json)
         except Exception:  # noqa: BLE001
             pass
     if finished:
@@ -526,4 +537,106 @@ def get_latest_agent_session(conn: sqlite3.Connection, step_id: str) -> Optional
         "execute_text": row[7] or "",
         "tools": tools,
         "error_text": row[9],
+    }
+
+
+def get_resumable_session(conn: sqlite3.Connection, step_id: str) -> Optional[Dict[str, Any]]:
+    """获取可恢复的session（失败但有部分完成内容的session）。
+    
+    返回包含恢复所需上下文的session信息，如果没有可恢复的session则返回None。
+    """
+    # 查找最近的非成功session（error或running状态）
+    cur = conn.execute(
+        """SELECT id, step_id, status, started_at, finished_at,
+                  design_text, review_text, execute_text, tools_json, error_text,
+                  COALESCE(messages_json,'[]') AS messages_json,
+                  COALESCE(current_phase,'') AS current_phase,
+                  COALESCE(completed_phases,'[]') AS completed_phases,
+                  COALESCE(gather_context_json,'') AS gather_context_json,
+                  COALESCE(user_message,'') AS user_message
+           FROM _agent_sessions 
+           WHERE step_id = ? AND status IN ('error', 'running') 
+           ORDER BY id DESC LIMIT 1""",
+        (step_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    
+    session_id = row[0]
+    status = row[2]
+    design_text = row[5] or ""
+    review_text = row[6] or ""
+    execute_text = row[7] or ""
+    error_text = row[9] or ""
+    current_phase = row[11] or ""
+    
+    # 解析completed_phases
+    try:
+        completed_phases = json.loads(row[12] or "[]")
+    except json.JSONDecodeError:
+        completed_phases = []
+    
+    # 解析messages_json获取对话历史
+    try:
+        messages = json.loads(row[10] or "[]")
+    except json.JSONDecodeError:
+        messages = []
+    
+    # 解析gather_context
+    gather_context = []
+    if row[13]:
+        try:
+            gather_context = json.loads(row[13])
+        except json.JSONDecodeError:
+            pass
+    
+    # 判断可以从哪个阶段恢复
+    # 优先使用 completed_phases（更可靠），其次 current_phase，最后 fallback 到文本推断
+    resumable_from = None
+    
+    if completed_phases:
+        # 基于已完成阶段判断下一个需要恢复的阶段
+        if "review" in completed_phases:
+            # review 已完成，但从 execute 恢复（可能 execute 已部分执行）
+            resumable_from = "execute"
+        elif "design" in completed_phases:
+            resumable_from = "review"
+        elif "gather" in completed_phases:
+            resumable_from = "design"
+    
+    # 如果 completed_phases 没有给出明确信息，使用 current_phase
+    if not resumable_from and current_phase:
+        resumable_from = current_phase
+    
+    # 最后 fallback：根据已有文本内容推断
+    if not resumable_from:
+        if execute_text or (messages and any(m.get("role") == "tool" for m in messages)):
+            resumable_from = "execute"
+        elif review_text:
+            resumable_from = "execute"  # review完成，从execute开始
+        elif design_text:
+            resumable_from = "review"  # design完成，从review开始
+        elif gather_context:
+            resumable_from = "design"  # gather完成，从design开始
+    
+    # gather 阶段失败则不需要恢复（重新开始更可靠）
+    if resumable_from and resumable_from not in ("design", "review", "execute"):
+        return None
+    
+    if not resumable_from:
+        return None
+    
+    return {
+        "session_id": session_id,
+        "step_id": step_id,
+        "status": status,
+        "resumable_from": resumable_from,
+        "design_text": design_text,
+        "review_text": review_text,
+        "execute_text": execute_text,
+        "error_text": error_text,
+        "gather_context": gather_context,
+        "messages": messages,
+        "user_message": row[14] or "",
     }

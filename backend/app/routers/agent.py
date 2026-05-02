@@ -16,6 +16,7 @@ from app.config import DASHSCOPE_API_KEY, DEEPSEEK_API_KEY, QWEN_MODEL
 from app.db.project_schema import (
     create_agent_session,
     get_agent_session_messages,
+    get_resumable_session,
     list_agent_sessions,
     update_agent_session,
 )
@@ -62,6 +63,9 @@ def _session_tracking_wrapper(
     conversation_turns: list[dict] = []
     _user_message_stored = False
     _model_stored = ""
+    _current_phase = ""  # 追踪当前阶段
+    _completed_phases: list[str] = []  # 追踪已完成的阶段
+    _gather_context_saved = False  # 是否已保存gather上下文
     _tracked_event_types = {
         "user_message",
         "prompt_route",
@@ -154,8 +158,28 @@ def _session_tracking_wrapper(
                         text = str(raw.get("text", ""))
                         if phase == "design":
                             design_buf.append(text)
+                            # 更新当前阶段
+                            if _current_phase != "design":
+                                _current_phase = "design"
+                                try:
+                                    update_agent_session(conn, session_id, current_phase="design")
+                                except Exception:  # noqa: BLE001
+                                    pass
                         elif phase == "review":
                             review_buf.append(text)
+                            # 更新当前阶段
+                            if _current_phase != "review":
+                                _current_phase = "review"
+                                if "design" not in _completed_phases:
+                                    _completed_phases.append("design")
+                                try:
+                                    update_agent_session(
+                                        conn, session_id,
+                                        current_phase="review",
+                                        completed_phases=json.dumps(_completed_phases),
+                                    )
+                                except Exception:  # noqa: BLE001
+                                    pass
                             # Save design text once review starts (phase transition checkpoint)
                             if len(review_buf) == 1 and design_buf:
                                 try:
@@ -164,10 +188,31 @@ def _session_tracking_wrapper(
                                     pass
                         elif phase == "execute":
                             execute_buf.append(text)
+                            # 更新当前阶段
+                            if _current_phase != "execute":
+                                _current_phase = "execute"
+                                if "review" not in _completed_phases:
+                                    _completed_phases.append("review")
+                                try:
+                                    update_agent_session(
+                                        conn, session_id,
+                                        current_phase="execute",
+                                        completed_phases=json.dumps(_completed_phases),
+                                    )
+                                except Exception:  # noqa: BLE001
+                                    pass
                             # Save review text once execute starts (phase transition checkpoint)
                             if len(execute_buf) == 1 and review_buf:
                                 try:
                                     update_agent_session(conn, session_id, review_text="".join(review_buf))
+                                except Exception:  # noqa: BLE001
+                                    pass
+                        elif phase == "gather":
+                            # 更新当前阶段
+                            if _current_phase != "gather":
+                                _current_phase = "gather"
+                                try:
+                                    update_agent_session(conn, session_id, current_phase="gather")
                                 except Exception:  # noqa: BLE001
                                     pass
 
@@ -202,24 +247,57 @@ def _session_tracking_wrapper(
                         except Exception:  # noqa: BLE001
                             pass
 
+                    elif etype == "done" and phase == "gather":
+                        # Gather阶段完成，保存gather_context
+                        if not _gather_context_saved:
+                            _gather_context_saved = True
+                            if "gather" not in _completed_phases:
+                                _completed_phases.append("gather")
+                            # 从conversation_turns中提取gather阶段的消息作为context
+                            gather_msgs = []
+                            for turn in conversation_turns:
+                                if turn.get("phase") == "gather":
+                                    gather_msgs.extend(turn.get("messages", []))
+                            try:
+                                update_agent_session(
+                                    conn, session_id,
+                                    current_phase="design",
+                                    completed_phases=json.dumps(_completed_phases),
+                                    gather_context_json=json.dumps(gather_msgs, ensure_ascii=False),
+                                )
+                            except Exception:  # noqa: BLE001
+                                pass
+
                     elif etype == "done" and phase == "execute":
                         # All three phases complete — final save
+                        if "execute" not in _completed_phases:
+                            _completed_phases.append("execute")
+                        # 优先使用事件中携带的 design/review 文本（恢复模式下 design_buf/review_buf 可能为空）
+                        _design_final = str(raw.get("design") or "") or "".join(design_buf)
+                        _review_final = str(raw.get("review") or "") or "".join(review_buf)
                         try:
                             update_agent_session(
                                 conn, session_id,
                                 status="done",
-                                design_text="".join(design_buf),
-                                review_text="".join(review_buf),
+                                design_text=_design_final,
+                                review_text=_review_final,
                                 execute_text=str(raw.get("full_text", "".join(execute_buf))),
                                 tools_json=json.dumps(tools, ensure_ascii=False),
                                 events_json=json.dumps(tracked_events, ensure_ascii=False),
                                 messages_json=json.dumps(conversation_turns, ensure_ascii=False),
+                                completed_phases=json.dumps(_completed_phases),
                                 finished=True,
                             )
                         except Exception:  # noqa: BLE001
                             pass
 
                     elif etype == "error":
+                        # 保存错误状态和当前进度，以便恢复
+                        # 从conversation_turns中提取gather_context
+                        gather_ctx = []
+                        for turn in conversation_turns:
+                            if turn.get("phase") == "gather":
+                                gather_ctx.extend(turn.get("messages", []))
                         try:
                             update_agent_session(
                                 conn, session_id,
@@ -231,6 +309,9 @@ def _session_tracking_wrapper(
                                 events_json=json.dumps(tracked_events, ensure_ascii=False),
                                 messages_json=json.dumps(conversation_turns, ensure_ascii=False),
                                 error_text=str(raw.get("message", ""))[:2000],
+                                current_phase=_current_phase,
+                                completed_phases=json.dumps(_completed_phases),
+                                gather_context_json=json.dumps(gather_ctx, ensure_ascii=False),
                                 finished=True,
                             )
                         except Exception:  # noqa: BLE001
@@ -266,15 +347,6 @@ def agent_chat(body: ChatBody, p: ProjectDB = Depends(get_project_write)):
     except Exception:  # noqa: BLE001
         pass
 
-    gen = run_agent_sse(
-        body.message,
-        p,
-        mode=body.mode,
-        strict_review=body.strict_review,
-        failure_context=body.failure_context,
-        model=_project_model,
-    )
-
     # Persist session for ALL agent runs (so AgentMonitor can browse project history).
     # init/recovery use the explicit step_id; maintain runs use synthetic step_id "maintain"
     step_id = body.step_id or (
@@ -282,10 +354,40 @@ def agent_chat(body: ChatBody, p: ProjectDB = Depends(get_project_write)):
     )
     if not step_id:
         step_id = body.mode  # "maintain" / "init" / "recovery"
+    
+    # 检查是否有可恢复的session
+    resume_context: Optional[Dict[str, Any]] = None
+    try:
+        resume_context = get_resumable_session(p.conn, step_id)
+        if resume_context:
+            # 标记旧session为已恢复（避免重复恢复）
+            old_session_id = resume_context.get("session_id")
+            if old_session_id:
+                update_agent_session(p.conn, old_session_id, status="resumed")
+    except Exception:  # noqa: BLE001
+        resume_context = None
+    
+    session_id: Optional[int] = None
     try:
         session_id = create_agent_session(p.conn, step_id)
-        gen = _session_tracking_wrapper(gen, p.conn, session_id)
     except Exception:  # noqa: BLE001 — don't break streaming if session creation fails
+        pass
+
+    gen = run_agent_sse(
+        body.message,
+        p,
+        mode=body.mode,
+        strict_review=body.strict_review,
+        failure_context=body.failure_context,
+        model=_project_model,
+        session_id=session_id,
+        resume_context=resume_context,
+    )
+
+    try:
+        if session_id:
+            gen = _session_tracking_wrapper(gen, p.conn, session_id)
+    except Exception:  # noqa: BLE001
         pass
 
     return StreamingResponse(gen, media_type="text/event-stream")

@@ -19,6 +19,7 @@ from app.services.prompt_overrides import (
 )
 from app.services.prompt_router import route_prompt
 from app.services.qwen_client import get_client_for_model
+from app.util.error_logger import log_agent_error, log_api_call
 
 
 def _retry_llm_call(
@@ -27,6 +28,10 @@ def _retry_llm_call(
     attempts: int = 4,
     base_delay: float = 1.0,
     on_retry: Optional[Callable[[int, Exception, float], None]] = None,
+    step_id: str = "",
+    session_id: Optional[int] = None,
+    phase: str = "",
+    model: str = "",
 ) -> Any:
     """对 LLM 调用做指数退避重试。
 
@@ -34,13 +39,40 @@ def _retry_llm_call(
     重试 ``attempts`` 次（含首次），失败时仅在用尽后再向上抛出。
     """
     last_exc: Optional[Exception] = None
+    start_ts = time.time()
+    
     for i in range(1, attempts + 1):
         try:
-            return fn()
+            result = fn()
+            # 成功：记录 API 调用
+            latency_ms = int((time.time() - start_ts) * 1000)
+            log_api_call(
+                step_id=step_id, session_id=session_id, phase=phase,
+                model=model, attempt=i, success=True, latency_ms=latency_ms,
+            )
+            return result
         except Exception as exc:  # noqa: BLE001 — 网络/服务端错误均需要重试
             last_exc = exc
+            latency_ms = int((time.time() - start_ts) * 1000)
+            
+            # 记录失败
+            log_api_call(
+                step_id=step_id, session_id=session_id, phase=phase,
+                model=model, attempt=i, success=False, latency_ms=latency_ms,
+                error_msg=repr(exc)[:300],
+            )
+            
             if i >= attempts:
+                # 最终失败：记录详细错误
+                log_agent_error(
+                    step_id=step_id, session_id=session_id, phase=phase,
+                    error_type="api_final_failure",
+                    error_msg=f"LLM 调用 {attempts} 次均失败",
+                    exc=exc,
+                    context={"attempts": attempts, "model": model},
+                )
                 break
+            
             delay = base_delay * (2 ** (i - 1))
             if on_retry:
                 try:
@@ -48,6 +80,7 @@ def _retry_llm_call(
                 except Exception:  # noqa: BLE001
                     pass
             time.sleep(delay)
+    
     assert last_exc is not None
     raise last_exc
 
@@ -732,6 +765,8 @@ def _stream_phase_text(
     max_tokens: int,
     temperature: float = 0.2,
     model: Optional[str] = None,
+    step_id: str = "",
+    session_id: Optional[int] = None,
 ) -> Generator[bytes, None, str]:
     """无工具的纯文本阶段：调用一次模型，按 token 切片 emit；返回完整文本。"""
     def _do() -> Any:
@@ -742,7 +777,10 @@ def _stream_phase_text(
             max_tokens=max_tokens,
         )
 
-    resp = _retry_llm_call(_do, attempts=4, base_delay=1.0)
+    resp = _retry_llm_call(
+        _do, attempts=4, base_delay=1.0,
+        step_id=step_id, session_id=session_id, phase=phase, model=model or QWEN_MODEL,
+    )
     text = (resp.choices[0].message.content or "").strip()
     for chunk in _chunk_text(text, 80):
         yield _emit(phase, {"type": "token", "text": chunk})
@@ -983,6 +1021,449 @@ def _run_gather_phase(
     return exchange_messages
 
 
+# ---------- resume from failure ----------
+
+def _resume_agent_sse(
+    user_message: str,
+    p: ProjectDB,
+    resume_context: Dict[str, Any],
+    *,
+    mode_norm: str = "maintain",
+    strict_review: bool = False,
+    model: Optional[str] = None,
+    session_id: Optional[int] = None,
+) -> Generator[bytes, None, None]:
+    """从失败点恢复Agent执行。
+    
+    根据resume_context中的信息，跳过已完成的阶段，从失败的阶段继续。
+    """
+    _model = model or QWEN_MODEL
+    client = get_client_for_model(_model)
+    step_id = _current_step_id(p)
+    resumable_from = resume_context.get("resumable_from", "")
+    
+    # 获取之前的上下文
+    design_text = resume_context.get("design_text", "")
+    review_text = resume_context.get("review_text", "")
+    gather_context = resume_context.get("gather_context", [])
+    previous_messages = resume_context.get("messages", [])
+    
+    # 从 previous_messages (conversation_turns) 中提取 execute 阶段的完整对话历史
+    # conversation_turns 格式: [{phase, round?, messages: [{role, content, ...}]}]
+    _previous_execute_history: List[Dict[str, Any]] = []
+    if previous_messages:
+        # 倒序查找最后一条 execute 快照（因为中间轮次覆盖式存储，最后一条就是最新状态）
+        for turn in reversed(previous_messages):
+            if turn.get("phase") == "execute":
+                _previous_execute_history = list(turn.get("messages", []))
+                break
+    
+    # 获取系统提示词
+    common_prompt_key = "agent_common_init" if mode_norm == "init" else "agent_common_maintain"
+    base_system_detail = _resolve_agent_system_prompt_detail(p.conn, common_prompt_key, global_conn=p.server_conn)
+    base_system = str(base_system_detail["content"])
+    
+    # 获取路由信息
+    cfg_summary = _project_config_summary(p)
+    try:
+        route = route_prompt(step_id, user_message, cfg_summary, model=_model, conn=p.conn, global_conn=p.server_conn)
+    except Exception:
+        route = {"hit": False, "prompt": "", "gather_hint": "", "skills": []}
+    
+    routed_prompt = (route.get("prompt") or "").strip()
+    routed_block = "【5/4 路由提示词】" + routed_prompt if routed_prompt else ""
+    exposed_block = _build_exposed_params_block(p, step_id)
+    
+    # 发出必要的 meta 事件（供监控追踪）
+    yield _emit("route", {
+        "type": "prompt_route",
+        "hit": bool(route.get("hit")),
+        "prompt": route.get("prompt", ""),
+        "gather_hint": route.get("gather_hint", ""),
+        "route_system": route.get("route_system", ""),
+        "rationale": f"resume_from_{resumable_from}",
+        "step_id": step_id,
+        "skills": route.get("skills", []),
+    })
+    yield _emit("meta", {"type": "user_message", "content": user_message, "model": _model})
+    yield _emit("route", {"type": "log", "message": f"恢复上下文：design={len(design_text)}chars, review={len(review_text)}chars"})
+    
+    # 根据恢复阶段执行
+    if resumable_from == "design":
+        # 从design阶段恢复（gather已完成）
+        yield _emit("design", {"type": "log", "message": "从design阶段恢复（gather已完成）"})
+        
+        design_messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": base_system},
+        ]
+        if routed_block:
+            design_messages.append({"role": "system", "content": routed_block})
+        if exposed_block:
+            design_messages.append({"role": "system", "content": exposed_block})
+        design_tail_detail = _resolve_agent_system_prompt_detail(p.conn, "agent_design_tail", global_conn=p.server_conn)
+        design_messages.append({"role": "system", "content": str(design_tail_detail["content"])})
+        design_messages.append({"role": "user", "content": user_message})
+        design_messages.extend(gather_context)
+        design_messages.append({
+            "role": "user",
+            "content": "以上是你在信息收集阶段主动读取的项目信息。请基于这些信息，开始 design 阶段（三段式 CoT，严禁工具调用）。",
+        })
+        
+        yield _emit("design", {"type": "prompt_sources", "phase": "design", "sources": [base_system_detail, design_tail_detail]})
+        yield _emit("design", {"type": "phase_messages", "phase": "design", "messages": design_messages})
+        
+        design_text = ""
+        try:
+            stream = client.chat.completions.create(
+                model=_model,
+                messages=design_messages,
+                temperature=0.2,
+                max_tokens=16384,
+                stream=True,
+            )
+            for chunk in stream:
+                try:
+                    delta = chunk.choices[0].delta.content if chunk.choices else None
+                except Exception:
+                    delta = None
+                if delta:
+                    design_text += delta
+                    yield _emit("design", {"type": "token", "text": delta})
+        except Exception as e:
+            log_agent_error(step_id=step_id, session_id=session_id, phase="design_resume",
+                          error_type="api_call_failed", error_msg="design恢复阶段失败", exc=e)
+            yield _emit("design", {"type": "error", "message": f"design恢复失败: {e!r}"})
+            return
+        
+        design_text = design_text.strip()
+        yield _emit("design", {"type": "log", "message": f"design恢复完成（{len(design_text)} chars）"})
+        # 继续到review阶段
+        resumable_from = "review"
+    
+    if resumable_from == "review":
+        # 从review阶段恢复（design已完成）
+        if not design_text:
+            # 使用之前保存的design_text
+            yield _emit("review", {"type": "log", "message": "从review阶段恢复（使用之前完成的design）"})
+        else:
+            yield _emit("review", {"type": "log", "message": "从review阶段恢复"})
+        
+        review_messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": base_system},
+        ]
+        if routed_block:
+            review_messages.append({"role": "system", "content": routed_block})
+        if exposed_block:
+            review_messages.append({"role": "system", "content": exposed_block})
+        review_tail_detail = _resolve_agent_system_prompt_detail(p.conn, "agent_review_tail", global_conn=p.server_conn)
+        review_messages.append({"role": "system", "content": str(review_tail_detail["content"])})
+        review_messages.append({"role": "user", "content": user_message})
+        review_messages.append({
+            "role": "user",
+            "content": "以下是 design 阶段的输出，请自审并给出最终操作方案：\n\n" + design_text,
+        })
+        
+        yield _emit("review", {"type": "prompt_sources", "phase": "review", "sources": [base_system_detail, review_tail_detail]})
+        yield _emit("review", {"type": "phase_messages", "phase": "review", "messages": review_messages})
+        
+        review_text = ""
+        try:
+            stream = client.chat.completions.create(
+                model=_model,
+                messages=review_messages,
+                temperature=0.2,
+                max_tokens=32768,
+                stream=True,
+            )
+            for chunk in stream:
+                try:
+                    delta = chunk.choices[0].delta.content if chunk.choices else None
+                except Exception:
+                    delta = None
+                if delta:
+                    review_text += delta
+                    yield _emit("review", {"type": "token", "text": delta})
+        except Exception as e:
+            log_agent_error(step_id=step_id, session_id=session_id, phase="review_resume",
+                          error_type="api_call_failed", error_msg="review恢复阶段失败", exc=e)
+            yield _emit("review", {"type": "error", "message": f"review恢复失败: {e!r}"})
+            return
+        
+        review_text = review_text.strip()
+        yield _emit("review", {"type": "log", "message": f"review恢复完成（{len(review_text)} chars）"})
+        # 继续到execute阶段
+        resumable_from = "execute"
+    
+    if resumable_from == "execute":
+        # 从execute阶段恢复（review已完成）
+        yield _emit("execute", {"type": "log", "message": f"从execute阶段恢复（共{len(_previous_execute_history)}条历史消息）"})
+        
+        # 关键：恢复 execute 历史消息，模型才能知道之前做了哪些工具调用
+        if _previous_execute_history:
+            # 使用之前的 execute 消息作为基础，替换 system prompt 为新构建的
+            execute_messages: List[Dict[str, Any]] = [
+                {"role": "system", "content": base_system},
+            ]
+            if routed_block:
+                execute_messages.append({"role": "system", "content": routed_block})
+            if exposed_block:
+                execute_messages.append({"role": "system", "content": exposed_block})
+            execute_tail_detail = _resolve_agent_system_prompt_detail(p.conn, "agent_execute_tail", global_conn=p.server_conn)
+            execute_messages.append({"role": "system", "content": str(execute_tail_detail["content"])})
+            
+            # 追加原始用户消息和 design/review 摘要
+            execute_messages.append({"role": "user", "content": user_message})
+            execute_messages.append({
+                "role": "assistant",
+                "content": "[design]\n" + design_text + "\n\n[review]\n" + review_text,
+            })
+            
+            # 注入之前 execute 阶段的所有对话历史（跳过旧的 system prompt，保留 user/assistant/tool 消息）
+            for m in _previous_execute_history:
+                role = m.get("role", "")
+                if role in ("user", "assistant", "tool"):
+                    execute_messages.append(m)
+            
+            execute_messages.append({
+                "role": "user",
+                "content": (
+                    "⚠ 这是从失败点恢复的执行。上面的历史消息展示了之前已经执行过的操作和结果。\n"
+                    "请先查看之前的状态：哪些表已创建、哪些数据已写入、哪些 TODO 已完成。\n"
+                    "然后**只执行尚未完成的操作**，不要重复已经成功的操作。\n"
+                    "如果之前的操作已经全部完成，直接输出最终总结。"
+                ),
+            })
+        else:
+            # 没有 execute 历史，从零开始
+            execute_messages = [
+                {"role": "system", "content": base_system},
+            ]
+            if routed_block:
+                execute_messages.append({"role": "system", "content": routed_block})
+            if exposed_block:
+                execute_messages.append({"role": "system", "content": exposed_block})
+            execute_tail_detail = _resolve_agent_system_prompt_detail(p.conn, "agent_execute_tail", global_conn=p.server_conn)
+            execute_messages.append({"role": "system", "content": str(execute_tail_detail["content"])})
+            execute_messages.append({"role": "user", "content": user_message})
+            execute_messages.append({
+                "role": "assistant",
+                "content": "[design]\n" + design_text + "\n\n[review]\n" + review_text,
+            })
+            execute_messages.append({
+                "role": "user",
+                "content": "请按上述 review 的最终操作方案执行（execute 阶段，可调用工具）。\n\n注意：这是从失败点恢复的执行，之前没有工具调用记录，请从零开始执行。",
+            })
+        
+        yield _emit("execute", {"type": "prompt_sources", "phase": "execute", "sources": [base_system_detail, execute_tail_detail]})
+        yield _emit("execute", {
+            "type": "tools_meta", "phase": "execute",
+            "tools": sorted(WRITE_TOOLS | READ_TOOLS),
+            "tool_schemas": _tool_schema_payload(build_tools_openai(p.conn, global_conn=p.server_conn), WRITE_TOOLS | READ_TOOLS),
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "skills_meta": route.get("skills") or [],
+        })
+        yield _emit("execute", {"type": "phase_messages", "phase": "execute", "messages": list(execute_messages)})
+        
+        # 复用完整的execute循环逻辑（注入到execute_messages然后直接走主流程的while循环）
+        # 实际上直接内联执行完整的execute循环会更简单
+        final_text = ""
+        round_i = 0
+        consec_errors = 0
+        total_errors = 0
+        total_success = 0
+        MAX_CONSEC_ERRORS = 4
+        # 反循环计数器
+        _snapshot_count = 0
+        _validation_count = 0
+        _recalc_count = 0
+        _recent_tools: List[str] = []
+        _final_validation_injected = False
+        _ending_prompt_injected = False
+        
+        while True:
+            round_i += 1
+            
+            # 每20轮发出一次进度警告
+            if round_i > 1 and round_i % 20 == 0:
+                yield _emit("execute", {"type": "log", "message": f"⏱ 已进行 {round_i} 轮推理，成功={total_success} 失败={total_errors}"})
+            
+            # 每5轮注入状态锚点
+            if round_i > 1 and round_i % 5 == 0:
+                anchor = _make_state_anchor(round_i, user_message, total_success, total_errors)
+                execute_messages.append({"role": "user", "content": anchor})
+                yield _emit("execute", {"type": "log", "message": f"第 {round_i} 轮：注入状态锚点"})
+            
+            # 反循环检测
+            if _snapshot_count >= 3:
+                execute_messages.append({"role": "user", "content": "⚠ 反循环保护触发：create_snapshot 已超 3 次，立即停止并输出最终总结。"})
+                yield _emit("execute", {"type": "log", "message": "⚠ 反循环保护：快照次数超限"})
+                _snapshot_count = -9999
+            elif _validation_count >= 8:
+                execute_messages.append({"role": "user", "content": f"⚠ 反循环保护触发：run_validation 已 {_validation_count} 次，检查 TODO 并结束。"})
+                yield _emit("execute", {"type": "log", "message": f"⚠ 反循环保护：验证次数={_validation_count}"})
+                _validation_count = -9999
+            
+            yield _emit("execute", {"type": "log", "message": f"恢复执行轮次 {round_i}"})
+            if round_i > 1:
+                yield _emit("execute", {"type": "phase_messages", "phase": "execute", "round": round_i, "messages": list(execute_messages)})
+            
+            try:
+                _retry_log: List[Dict[str, Any]] = []
+                def _do_call() -> Any:
+                    return client.chat.completions.create(
+                        model=_model,
+                        messages=execute_messages,
+                        tools=build_tools_openai(p.conn, global_conn=p.server_conn),
+                        tool_choice="auto",
+                        parallel_tool_calls=True,
+                        temperature=0.2,
+                        max_tokens=16384,
+                    )
+                
+                def _on_retry(i: int, exc: Exception, delay: float) -> None:
+                    _retry_log.append({"i": i, "err": repr(exc)[:300], "delay": delay})
+                
+                resp = _retry_llm_call(
+                    _do_call, attempts=4, base_delay=1.0, on_retry=_on_retry,
+                    step_id=step_id, session_id=session_id, phase="execute_resume", model=_model,
+                )
+                for entry in _retry_log:
+                    yield _emit("execute", {"type": "log", "message": f"⚠ LLM调用第{entry['i']}次失败，{entry['delay']:.1f}s后重试：{entry['err']}"})
+            except Exception as e:
+                log_agent_error(step_id=step_id, session_id=session_id, phase="execute_resume",
+                              error_type="api_final_failure", error_msg="execute恢复阶段LLM调用最终失败", exc=e,
+                              context={"round": round_i, "total_success": total_success, "total_errors": total_errors})
+                yield _emit("execute", {"type": "error", "message": f"execute恢复调用最终失败: {e!r}"})
+                return
+            
+            choice = resp.choices[0]
+            finish_reason = getattr(choice, "finish_reason", None) or ""
+            msg = choice.message
+            tool_calls = getattr(msg, "tool_calls", None) or []
+            _text_fallback = False
+            if not tool_calls:
+                _text_parsed = _extract_text_tool_calls(msg.content or "")
+                if _text_parsed:
+                    tool_calls = _text_parsed
+                    _text_fallback = True
+            
+            # token截断处理
+            if finish_reason == "length":
+                yield _emit("execute", {"type": "log", "message": "⚠ 模型输出被截断，注入重试提示"})
+                execute_messages.append(_build_assistant_msg(msg))
+                execute_messages.append({"role": "user", "content": "你的输出被 token 截断，请重新分批执行。"})
+                continue
+            
+            if tool_calls:
+                if _text_fallback:
+                    execute_messages.append(_build_assistant_msg(msg))
+                else:
+                    execute_messages.append(_build_assistant_msg(msg, tool_calls=[
+                        {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments or "{}"}}
+                        for tc in tool_calls
+                    ]))
+                
+                exec_text_results: List[str] = []
+                for tc in tool_calls:
+                    name = tc.function.name
+                    args = tc.function.arguments or "{}"
+                    call_id = tc.id
+                    label = _TOOL_LABELS.get(name, name)
+                    yield _emit("execute", {"type": "tool_call", "call_id": call_id, "name": name, "label": label, "arguments": args})
+                    
+                    try:
+                        result = dispatch_tool(name, args, p)
+                    except Exception as tool_exc:
+                        err_msg = f"工具执行异常: {tool_exc!r}"
+                        yield _emit("execute", {"type": "log", "message": err_msg})
+                        result = json.dumps({"ok": False, "error": err_msg}, ensure_ascii=False)
+                    
+                    tool_status = "error" if ('"status": "error"' in result or '"ok": false' in result.lower()) else "success"
+                    if tool_status == "error":
+                        consec_errors += 1
+                        total_errors += 1
+                    else:
+                        consec_errors = 0
+                        total_success += 1
+                    
+                    # 反循环计数
+                    _recent_tools.append(name)
+                    if len(_recent_tools) > 20:
+                        _recent_tools.pop(0)
+                    if name == "create_snapshot" and tool_status == "success":
+                        _snapshot_count += 1
+                    elif name == "run_validation" and tool_status == "success":
+                        _validation_count += 1
+                    elif name == "recalculate_downstream" and tool_status == "success":
+                        _recalc_count += 1
+                    
+                    yield _emit("execute", {"type": "tool_result", "call_id": call_id, "name": name, "status": tool_status, "preview": result[:2000], "hint": "检查 JSON 内 status/warnings/blocked_cells"})
+                    
+                    if _text_fallback:
+                        exec_text_results.append(f"[{name}]\n{result}")
+                    else:
+                        execute_messages.append({"role": "tool", "tool_call_id": call_id, "content": result})
+                
+                if _text_fallback and exec_text_results:
+                    execute_messages.append({"role": "user", "content": "[工具调用结果]\n" + "\n---\n".join(exec_text_results)})
+                
+                # 错误后注入状态锚点
+                if consec_errors == 1:
+                    anchor = _make_state_anchor(round_i, user_message, total_success, total_errors, is_after_error=True)
+                    execute_messages.append({"role": "user", "content": anchor})
+                    yield _emit("execute", {"type": "log", "message": "注入错误恢复锚点"})
+                
+                if consec_errors >= MAX_CONSEC_ERRORS:
+                    execute_messages.append({
+                        "role": "user",
+                        "content": f"STOP — 连续 {MAX_CONSEC_ERRORS} 次工具调用失败。必须立即输出失败原因分析并继续执行其他未完成项。",
+                    })
+                    consec_errors = 0
+                
+                continue
+            
+            final_text = msg.content or ""
+            
+            # 收尾前主动校验
+            if not _final_validation_injected:
+                _final_validation_injected = True
+                try:
+                    vresult = dispatch_tool("run_validation", "{}", p)
+                    vdata = json.loads(vresult) if isinstance(vresult, str) else {}
+                    vpayload = vdata.get("data") if isinstance(vdata, dict) else None
+                    violations = (vpayload or {}).get("violations") or []
+                    if len(violations) > 0:
+                        yield _emit("execute", {"type": "log", "message": f"⚠ 收尾自检：仍有 {len(violations)} 条违反"})
+                        sample = violations[:30]
+                        feedback = f"自动收尾校验：仍有 {len(violations)} 条违反，必须修正。\n```json\n{json.dumps(sample, ensure_ascii=False, indent=2)}\n```"
+                        execute_messages.append({"role": "user", "content": feedback})
+                        continue
+                except Exception as exc:
+                    yield _emit("execute", {"type": "log", "message": f"收尾自检失败：{exc!r}"})
+            
+            # 结束审核
+            if not _ending_prompt_injected:
+                _ending_prompt_injected = True
+                ending_detail = _resolve_agent_system_prompt_detail(p.conn, "agent_ending_review", global_conn=p.server_conn)
+                ending_text = str(ending_detail["content"])
+                execute_messages.append(_build_assistant_msg(msg))
+                execute_messages.append({"role": "user", "content": ending_text})
+                yield _emit("execute", {"type": "prompt_sources", "phase": "execute", "sources": [ending_detail]})
+                yield _emit("execute", {"type": "log", "message": "⏹ 进入结束审核阶段"})
+                continue
+            
+            break
+        
+        for chunk in _chunk_text(final_text, 80):
+            yield _emit("execute", {"type": "token", "text": chunk})
+        yield _emit("execute", {"type": "done", "full_text": final_text, "design": design_text, "review": review_text})
+        return
+    
+    # 如果没有匹配的恢复阶段，返回错误
+    yield _emit("route", {"type": "error", "message": f"无法恢复：未知阶段 {resumable_from}"})
+
+
 # ---------- main entry ----------
 
 def run_agent_sse(
@@ -993,6 +1474,8 @@ def run_agent_sse(
     strict_review: bool = False,
     failure_context: Optional[Dict[str, Any]] = None,
     model: Optional[str] = None,
+    session_id: Optional[int] = None,
+    resume_context: Optional[Dict[str, Any]] = None,
 ) -> Generator[bytes, None, None]:
     _model = model or QWEN_MODEL
     # recovery 模式：专门用于分析失败原因并尝试修复
@@ -1002,6 +1485,18 @@ def run_agent_sse(
 
     mode_norm = mode if mode in ("init", "maintain") else "maintain"
     role_label = "初始化 Agent" if mode_norm == "init" else "维护 Agent"
+    
+    # 检查是否从失败点恢复
+    if resume_context and resume_context.get("resumable_from"):
+        resumable_from = resume_context["resumable_from"]
+        yield _emit("route", {"type": "log", "message": f"从失败点恢复 Agent（{role_label}），恢复阶段：{resumable_from}"})
+        yield from _resume_agent_sse(
+            user_message, p, resume_context,
+            mode_norm=mode_norm, strict_review=strict_review,
+            model=_model, session_id=session_id,
+        )
+        return
+    
     yield _emit("route", {"type": "log", "message": f"开始调度 Agent（{role_label}）"})
 
     client = get_client_for_model(_model)
@@ -1102,6 +1597,10 @@ def run_agent_sse(
                 design_text += delta
                 yield _emit("design", {"type": "token", "text": delta})
     except Exception as e:  # noqa: BLE001
+        log_agent_error(
+            step_id=step_id, session_id=session_id, phase="design",
+            error_type="api_call_failed", error_msg="design 阶段 LLM 调用失败", exc=e,
+        )
         yield _emit("design", {"type": "error", "message": f"design 调用失败: {e!r}"})
         return
     design_text = design_text.strip()
@@ -1147,6 +1646,10 @@ def run_agent_sse(
                 review_text += delta
                 yield _emit("review", {"type": "token", "text": delta})
     except Exception as e:  # noqa: BLE001
+        log_agent_error(
+            step_id=step_id, session_id=session_id, phase="review",
+            error_type="api_call_failed", error_msg="review 阶段 LLM 调用失败", exc=e,
+        )
         yield _emit("review", {"type": "error", "message": f"review 调用失败: {e!r}"})
         return
     review_text = review_text.strip()
@@ -1269,7 +1772,10 @@ def run_agent_sse(
             def _on_retry(i: int, exc: Exception, delay: float) -> None:
                 _retry_log.append({"i": i, "err": repr(exc)[:300], "delay": delay})
 
-            resp = _retry_llm_call(_do_call, attempts=4, base_delay=1.0, on_retry=_on_retry)
+            resp = _retry_llm_call(
+                _do_call, attempts=4, base_delay=1.0, on_retry=_on_retry,
+                step_id=step_id, session_id=session_id, phase="execute", model=_model,
+            )
             for entry in _retry_log:
                 yield _emit(
                     "execute",
@@ -1279,6 +1785,11 @@ def run_agent_sse(
                     },
                 )
         except Exception as e:  # noqa: BLE001
+            log_agent_error(
+                step_id=step_id, session_id=session_id, phase="execute",
+                error_type="api_final_failure", error_msg="execute 阶段 LLM 调用最终失败", exc=e,
+                context={"round": round_i, "total_success": total_success, "total_errors": total_errors},
+            )
             yield _emit(
                 "execute",
                 {"type": "error", "message": f"execute 调用最终失败（已重试 4 次）: {e!r}"},

@@ -314,4 +314,9 @@ def ensure_project_migrations(conn: sqlite3.Connection) -> None:
     except Exception:  # noqa: BLE001
         pass
 
+    # Agent 失败恢复：进度追踪字段
+    _add_column_if_missing(conn, "_agent_sessions", "current_phase", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "_agent_sessions", "completed_phases", "TEXT NOT NULL DEFAULT '[]'")
+    _add_column_if_missing(conn, "_agent_sessions", "gather_context_json", "TEXT NOT NULL DEFAULT ''")
+
     conn.commit()

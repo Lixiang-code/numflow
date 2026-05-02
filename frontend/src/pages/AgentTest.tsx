@@ -294,6 +294,10 @@ function rebuildFromEvents(events: SseEvent[]) {
         rationale: ev.raw.rationale ? String(ev.raw.rationale) : null,
         skills: Array.isArray(ev.raw.skills) ? ev.raw.skills as Array<{ id?: number; slug: string; title: string }> : [],
       }
+    } else if (type === 'done') {
+      if (phase && phases[phase]) {
+        phases[phase].finished = ev.ts
+      }
     }
   }
 
@@ -1018,13 +1022,21 @@ export default function AgentTest() {
             : []
           if (rawEvents.length > 0) {
             const next = rebuildFromEvents(rawEvents)
-            setPhases(next.phases)
-            setTools(next.tools)
-            setMetrics({ ...s.metrics, toolCalls: next.toolCalls })
-            setRouteInfo(next.routeInfo)
+            // 服务器端 events_json 不含 token 事件，所以 rebuild 出的阶段文本可能为空
+            // 只在服务器端数据有实质内容时才覆盖本地重建结果
+            const hasServerPhaseData = Object.values(next.phases).some(
+              (p) => (p.text && p.text.length > 0) || p.hasContent
+            )
+            if (hasServerPhaseData) {
+              setPhases(next.phases)
+              setTools(next.tools)
+              setRouteInfo(next.routeInfo)
+              setToolsMeta(next.toolsMeta)
+              setPromptSources(next.promptSources)
+            }
+            // 无论是否有阶段文本，conversation 和 metrics 始终使用服务器端数据
             setConversationTurns(next.turns)
-            setToolsMeta(next.toolsMeta)
-            setPromptSources(next.promptSources)
+            setMetrics(prev => prev ? { ...prev, toolCalls: next.toolCalls } : prev)
           } else {
             const msgs = data?.messages
             if (Array.isArray(msgs) && msgs.length > 0) {
