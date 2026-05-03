@@ -369,16 +369,17 @@ def create_matrix_table(
         # 默认 calculator 名 = <table>_lookup
         calc_name = f"{t}_lookup"
         try:
+            axes = []
+            if scale_mode != "none":
+                axes.append({"name": "level", "source": "level"})
+            axes.append({"name": row_axis_name, "source": row_axis_name})
+            axes.append({"name": col_axis_name, "source": col_axis_name})
             register_calculator(
                 conn,
                 name=calc_name,
                 kind=kind,
                 table_name=t,
-                axes=[
-                    {"name": "level", "source": "level"},
-                    {"name": row_axis_name, "source": row_axis_name},
-                    {"name": col_axis_name, "source": col_axis_name},
-                ],
+                axes=axes,
                 value_column="value",
                 brief=(
                     f"按 ({row_axis_name}, {col_axis_name}) 查询 {display_name} 的投放比例；"

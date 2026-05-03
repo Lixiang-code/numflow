@@ -755,6 +755,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                     },
                     "readme": {"type": "string", "default": ""},
                     "purpose": {"type": "string", "default": ""},
+                    "display_name": {"type": "string", "description": "表中文名（如「基础属性框架」），可选，用于前端展示"},
                     "directory": {"type": "string", "description": "表所属目录（如 '属性系统/基础'），可选"},
                     "tags": {
                         "type": "array",
@@ -1144,7 +1145,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "read_matrix",
-            "description": "以宽表形式读取 matrix。可按 level / 行子集 / 列子集 切片。若 get_table_list 返回该表 view_slice_only=true，必须传 rows 和/或 cols 缩小范围，禁止全量读取。",
+            "description": "以宽表形式读取 matrix。可按 level / 行子集 / 列子集 切片。若 get_table_list 返回该表 view_slice_only=true，必须传 rows 和/或 cols 缩小范围，禁止全量读取。★ 只传 rows 不传 cols 时自动返回该行的所有列，无需逐个 call_calculator。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2911,7 +2912,7 @@ def _bulk_register_and_compute(
             errors.append(f"item 缺少 column_name/formula_string: {it!r}")
             continue
         try:
-            register_formula(conn, table_name, col, formula)
+            register_formula(conn, table_name, col, formula, defer=True)
             registered.append({"column": col, "formula": formula})
         except ValueError as e:
             known_cols = _list_table_columns(conn, table_name)
@@ -2954,6 +2955,7 @@ def _setup_level_table(
     columns: List[Dict[str, Any]],
     readme: str = "",
     purpose: str = "",
+    display_name: str = "",
     directory: str = "",
     tags: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
@@ -2994,6 +2996,7 @@ def _setup_level_table(
             columns=pairs,
             readme=readme,
             purpose=purpose,
+            display_name=display_name,
             column_meta=col_meta_list,
             directory=directory,
             tags=tags,
@@ -3583,6 +3586,7 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                 columns=args.get("columns") or [],
                 readme=str(args.get("readme", "")),
                 purpose=str(args.get("purpose", "")),
+                display_name=str(args.get("display_name", "")),
                 directory=str(args.get("directory") or ""),
                 tags=args.get("tags") if isinstance(args.get("tags"), list) else None,
             )

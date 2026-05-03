@@ -133,7 +133,11 @@ def call_calculator(
                 params.append(int(level_value))
             continue
         if nm not in kwargs:
-            continue
+            # name 未命中时，再尝试 source 列名作为调用键（兼容 AI 直接用数据库列名调用）
+            if src and src in kwargs:
+                nm = src
+            else:
+                continue
         v = kwargs.get(nm)
         if v is None or v == "":
             continue
