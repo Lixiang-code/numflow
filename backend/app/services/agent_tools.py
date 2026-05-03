@@ -830,7 +830,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "支持 ${name} 引用其他已注册常量及数学运算）。"
                 "★ tags 必填且至少 1 个：用于在前端常量页按『主系统/分类』聚合展示，"
                 "可使用 const_tag_register 预先创建标签；通常至少包含所属主系统名。"
-                "★ brief 是常量的概念定义（是什么/含义/单位），应以自然语言描述，不应出现具体数值。"
+                "★ brief 是常量的概念定义（是什么），应以自然语言描述，不应出现具体数值。"
                 "★ design_intent 可选，用于记录设计意图、边界限制、调参方向（如'后续可上调至0.8'），不必填。"
             ),
             "parameters": {
@@ -848,7 +848,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                     },
                     "brief": {
                         "type": "string",
-                        "description": "概念定义（是什么/含义/单位），禁止出现具体数值（如 '10'、'0.5'）",
+                        "description": "概念定义（是什么），禁止出现具体数值（如 '10'、'0.5'）",
                     },
                     "design_intent": {
                         "type": "string",
