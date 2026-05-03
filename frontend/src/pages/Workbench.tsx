@@ -138,6 +138,7 @@ type ConstantItem = {
   value: unknown
   formula?: string | null
   brief?: string
+  design_intent?: string
   scope_table?: string | null
   tags: string[]
 }
@@ -272,6 +273,7 @@ function ConstantsPanel({
                   <th style={{ padding: '0.25rem 0.5rem' }}>中文</th>
                   <th style={{ padding: '0.25rem 0.5rem' }}>值 / 公式 {canWrite && <span className="muted small">（点击编辑；=公式）</span>}</th>
                   <th style={{ padding: '0.25rem 0.5rem' }}>简介</th>
+                  <th style={{ padding: '0.25rem 0.5rem' }}>设计意图</th>
                   <th style={{ padding: '0.25rem 0.5rem' }}>范围表</th>
                 </tr>
               </thead>
@@ -316,6 +318,7 @@ function ConstantsPanel({
                       )}
                     </td>
                     <td style={{ padding: '0.25rem 0.5rem' }} className="small">{c.brief || '—'}</td>
+                    <td style={{ padding: '0.25rem 0.5rem' }} className="small muted">{c.design_intent || '—'}</td>
                     <td style={{ padding: '0.25rem 0.5rem' }} className="small muted">{c.scope_table || '全局'}</td>
                   </tr>
                 ))}

@@ -193,6 +193,7 @@ READ_TOOLS = {
     "glossary_lookup",
     "glossary_list",
     "const_list",
+    "const_detail",
     "const_tag_list",
     "sparse_sample",
     "list_directories",
@@ -238,12 +239,12 @@ _TOOL_LABELS: Dict[str, str] = {
     "set_project_setting": "更新项目配置",
     "global_search": "全局搜索",
     "suggest_action": "获取 Agent 建议",
-    "register_gameplay_table": "注册玩法表",
-    "get_gameplay_table_list": "读取玩法表清单",
-    "set_gameplay_table_status": "更新玩法表状态",
+    "register_gameplay_table": "注册任务",
+    "get_gameplay_table_list": "任务池清单",
+    "set_gameplay_table_status": "更新任务状态",
     "expose_param_to_subsystems": "暴露参数给下游",
     "list_exposed_params": "读取上游暴露参数",
-    "request_table_revision": "发起玩法表修订",
+    "request_table_revision": "发起任务修订",
     "submit_feedback": "提交工具反馈",
     "get_project_config": "获取项目配置",
     "get_table_list": "列出所有表",
@@ -267,6 +268,7 @@ _TOOL_LABELS: Dict[str, str] = {
     "const_register": "登记常量",
     "const_set": "修改常量",
     "const_list": "列出常量",
+    "const_detail": "查询常量详情",
     "const_delete": "删除常量",
     "const_tag_register": "登记常量标签",
     "const_tag_list": "列出常量标签",
@@ -785,7 +787,7 @@ _ENDING_REVIEW_PROMPT = (
     "【结束审核】主体工作已完成，请对本次会话进行最终自我复查。\n\n"
     "**1. 产出验证（使用只读工具抽查）**\n"
     "   · 抽查 1-3 张本步刚创建或修改的主要表：核心列无空值/异常值、行数符合预期；\n"
-    "   · 若是玩法落地步骤，调用 `get_gameplay_table_list()` 确认目标表已标记「已完成」；\n\n"
+    "   · 若是任务池步骤，调用 `get_gameplay_table_list()` 确认目标任务已标记「已完成」；\n\n"
     "**2. README 验收**\n"
     "   · 调用 `get_table_readme` 确认主要产出表的 README 已更新，包含 goal 与 acceptance_criteria；\n\n"
     "**3. 问题处置**\n"

@@ -747,6 +747,12 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                     },
                     "readme": {"type": "string", "default": ""},
                     "purpose": {"type": "string", "default": ""},
+                    "directory": {"type": "string", "description": "表所属目录（如 '属性系统/基础'），可选"},
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "分类标签列表（如 ['combat','base']），可选",
+                    },
                 },
                 "required": ["table_name", "max_level", "columns"],
             },
@@ -824,7 +830,8 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "支持 ${name} 引用其他已注册常量及数学运算）。"
                 "★ tags 必填且至少 1 个：用于在前端常量页按『主系统/分类』聚合展示，"
                 "可使用 const_tag_register 预先创建标签；通常至少包含所属主系统名。"
-                "★ brief 是对常量的描述性介绍（含义/单位/用途），应以自然语言说明，不应出现具体数值（数值由 value/formula 承载）。"
+                "★ brief 是常量的概念定义（是什么/含义/单位），应以自然语言描述，不应出现具体数值。"
+                "★ design_intent 可选，用于记录设计意图、边界限制、调参方向（如'后续可上调至0.8'），不必填。"
             ),
             "parameters": {
                 "type": "object",
@@ -841,7 +848,11 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                     },
                     "brief": {
                         "type": "string",
-                        "description": "语义描述，禁止出现具体数值（如 '10'、'0.5'）",
+                        "description": "概念定义（是什么/含义/单位），禁止出现具体数值（如 '10'、'0.5'）",
+                    },
+                    "design_intent": {
+                        "type": "string",
+                        "description": "设计意图/限制/调参方向（如'后续可上调至0.8'/'与crit_rate共享上限'），可选",
                     },
                     "scope_table": {"type": "string"},
                     "tags": {
@@ -888,7 +899,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "const_set",
-            "description": "更新已存在常量的 value 或 formula（不存在则报 error）。value 与 formula 二选一。",
+            "description": "更新已存在常量的 value 或 formula（不存在则报 error）。value 与 formula 二选一。可选择更新 brief/design_intent。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -900,6 +911,14 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                     "formula": {
                         "type": "string",
                         "description": "新公式字符串（与 value 二选一），如 '${base_hp} * 2'",
+                    },
+                    "brief": {
+                        "type": "string",
+                        "description": "更新概念定义（可选）",
+                    },
+                    "design_intent": {
+                        "type": "string",
+                        "description": "更新设计意图（可选）",
                     },
                 },
                 "required": ["name_en"],
@@ -930,6 +949,30 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                     "limit": {"type": "integer", "description": "每页条数，默认 500，0=不限"},
                     "offset": {"type": "integer", "description": "分页偏移，默认 0"},
                 },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "const_detail",
+            "description": (
+                "查询指定常量的全部信息（包括 brief 概念定义和 design_intent 设计意图）。"
+                "传入 name_en 列表，返回每项常量的完整字段。"
+                "适用场景：const_list 返回较多时自行简省了 brief/design_intent，用本工具补齐详情。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "description": "需要查询详情的常量 name_en 列表，如 ['crit_rate_base', 'max_level']",
+                    },
+                },
+                "required": ["names"],
                 "additionalProperties": False,
             },
         },
@@ -1223,21 +1266,24 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "function": {
             "name": "request_table_revision",
             "description": (
-                "对已完成的玩法表发起二次修订请求。\n"
-                "调用后目标表状态重置为 '待修订'，修订请求入队，下一轮 gameplay_table agent 循环时会自动看到并酌情处理。\n"
-                "适用场景：本步骤完成时发现另一个已完成的玩法表的数值需要调整（如依赖参数变化、数值平衡偏差等）。\n"
-                "注意：仅能对已注册的玩法表发起修订（先用 get_gameplay_table_list 确认 table_id）。"
+                "对已完成的任务发起二次修订请求。\n"
+                "调用后目标任务状态重置为 '待修订'，修订请求入队，下一轮 agent 循环时会自动看到并酌情处理。\n"
+                "适用场景：\n"
+                "- 依赖参数变化：当前任务完成后发现上游或下游已完成任务的数值需相应调整\n"
+                "- 数值平衡偏差：验收时发现另一已完成任务的数值有偏差\n"
+                "注意：仅能对已注册的任务发起修订（先用 get_gameplay_table_list 确认 table_id）。"
+                "若发现缺少的任务（不存在于任务池），请用 register_gameplay_table 新建而非修订。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "table_id": {
                         "type": "string",
-                        "description": "需要修订的玩法表 table_id（从 get_gameplay_table_list 获取）",
+                        "description": "需要修订的任务标识符（从 get_gameplay_table_list 获取）",
                     },
                     "reason": {
                         "type": "string",
-                        "description": "修订原因，说明为什么已完成的表需要修改（需具体，如：equip_enhance 基础值调整后旧装备属性上限需重新计算）",
+                        "description": "修订原因，说明为什么已完成的任务需要修改（需具体）",
                     },
                     "requested_by_step": {
                         "type": "string",
@@ -1420,29 +1466,31 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
             },
         },
     },
-    # ─── 玩法规划：玩法表注册工具 ────────────────────────────────────────
+    # ─── 任务池：注册/读取/状态管理 ────────────────────────────────────────
     {
         "type": "function",
         "function": {
             "name": "register_gameplay_table",
             "description": (
-                "在'玩法规划'步骤中注册一个玩法落地表到规划清单。\n"
-                "每个表仅注册一次（同名 upsert），注册后状态自动为'未开始'。\n"
-                "table_id 必须是英文 snake_case；display_name 必须是中文。\n"
-                "readme 需说明该表的玩法设计目标、关键列、与其他表的依赖关系。\n"
-                "order_num 决定执行顺序（越小越优先），dependencies 列出需要先完成的其他 table_id。"
+                "注册一个 AGENT 任务到任务池。任何阶段均可调用。\n"
+                "任务注册后状态自动为'未开始'，后续 agent 循环会从任务池中自主拉取处理。\n"
+                "同名 upsert：重复注册同一 task_id 会更新 readme/order_num/dependencies，不改变当前执行状态。\n"
+                "适用场景：\n"
+                "- 玩法规划阶段：批量注册所有已知的玩法落地表任务\n"
+                "- 执行阶段发现新需求：执行 agent 发现缺少某子系统/验证表/对照表时，动态注册为后续任务\n"
+                "- 依赖链补全：当前任务完成后发现有衍生工作，注册为新的下游任务"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "table_id": {"type": "string", "description": "英文 snake_case 标识符，如 equip_enhance"},
-                    "display_name": {"type": "string", "description": "中文展示名，如 「装备强化落地表」"},
-                    "readme": {"type": "string", "description": "该玩法表的设计说明（玩法目标/关键列/依赖关系/验收标准），至少 50 字"},
+                    "table_id": {"type": "string", "description": "任务标识符，英文 snake_case，如 equip_enhance"},
+                    "display_name": {"type": "string", "description": "任务中文名，如「装备强化系统设计」"},
+                    "readme": {"type": "string", "description": "任务说明（设计目标/关键产物/依赖关系/验收标准），至少 50 字"},
                     "order_num": {"type": "integer", "description": "推荐执行顺序编号（1开始，越小越优先）"},
                     "dependencies": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "依赖的其他 table_id 列表（需在本表之前完成），如 ['equip_base']",
+                        "description": "依赖的其他 task_id 列表（需在本任务之前完成），如 ['equip_base']",
                         "default": [],
                     },
                 },
@@ -1455,7 +1503,10 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_gameplay_table_list",
-            "description": "读取所有已注册的玩法落地表及其当前状态（未开始/进行中/已完成）、设计说明和依赖关系。",
+            "description": (
+                "读取任务池中所有已注册任务及其当前状态（未开始/进行中/已完成/待修订）、"
+                "任务说明、依赖关系和建议执行顺序。Agent 应据此自主选择下一个要处理的任务。"
+            ),
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     },
@@ -1464,17 +1515,17 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "function": {
             "name": "set_gameplay_table_status",
             "description": (
-                "更新玩法落地表的执行状态。\n"
-                "在开始设计某个玩法表前调用（状态=进行中），完成后调用（状态=已完成）。\n"
-                "适用场景：\n"
-                "- 正常处理：未开始 → 进行中 → 已完成\n"
-                "- 修订处理：待修订 → 进行中 → 已完成（完成时自动将对应修订请求标记为 done）"
+                "更新任务池中任务的执行状态。\n"
+                "在开始处理某个任务前调用（状态=进行中），完成后调用（状态=已完成）。\n"
+                "生命周期：\n"
+                "- 首次处理：未开始 → 进行中 → 已完成\n"
+                "- 修订处理：待修订 → 进行中 → 已完成（完成时自动关闭对应修订请求）"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "table_id": {"type": "string", "description": "玩法表的英文标识符"},
-                    "status": {"type": "string", "enum": ["进行中", "已完成"], "description": "新状态"},
+                    "table_id": {"type": "string", "description": "任务标识符"},
+                    "status": {"type": "string", "enum": ["进行中", "已完成"], "description": "新状态（不能直接设为'待修订'，必须通过 request_table_revision）"},
                 },
                 "required": ["table_id", "status"],
                 "additionalProperties": False,
@@ -1594,6 +1645,7 @@ _TOOL_TITLE_ZH: Dict[str, str] = {
     "const_tag_list": "列出常量标签",
     "const_set": "修改常量值/公式",
     "const_list": "列出常量",
+    "const_detail": "查询常量详情",
     "const_delete": "删除常量",
     "list_directories": "查看目录树",
     "set_table_directory": "设置表目录",
@@ -1607,9 +1659,9 @@ _TOOL_TITLE_ZH: Dict[str, str] = {
     "list_exposed_params": "列出已暴露参数",
     "sparse_sample": "均匀采样表数据",
     "create_3d_table": "创建三维数据表",
-    "register_gameplay_table": "注册玩法落地表",
-    "get_gameplay_table_list": "读取玩法表清单",
-    "set_gameplay_table_status": "更新玩法表状态",
+    "register_gameplay_table": "注册新任务",
+    "get_gameplay_table_list": "任务池清单",
+    "set_gameplay_table_status": "更新任务状态",
     "submit_feedback": "提交工具反馈",
 }
 
@@ -1655,6 +1707,7 @@ _TOOL_GROUP_BY_NAME: Dict[str, str] = {
     "const_tag_list": "meta_dictionary",
     "const_set": "meta_dictionary",
     "const_list": "meta_dictionary",
+    "const_detail": "meta_dictionary",
     "const_delete": "meta_dictionary",
     "list_directories": "meta_dictionary",
     "set_table_directory": "meta_dictionary",
@@ -1721,6 +1774,7 @@ _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "const_tag_list": "列出所有已定义的常量分类标签（cols+rows 紧凑格式）。",
     "const_set": "修改已登记常量的数值或公式（提供 formula 可设为公式型；提供 value 可切回纯数值）。",
     "const_list": "列出所有已登记的常量（cols+rows 紧凑格式，含 formula 字段；支持 tags_filter 过滤和 limit/offset 分页）。",
+    "const_detail": "按 name_en 列表查询指定常量的全部信息（含 brief 与 design_intent），用于 const_list 省略时补齐详情。",
     "const_delete": "删除一个已登记的常量条目（若有公式常量依赖则报错）。",
     "list_directories": "查看项目业务表的目录树结构。",
     "set_table_directory": "将指定表归入某个目录分类节点。",
@@ -1734,9 +1788,9 @@ _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "list_exposed_params": "列出当前已暴露给子系统的参数清单。",
     "sparse_sample": "对大型表进行均匀采样，获取代表性数据子集；适合 read_table 超限后的替代方案。",
     "create_3d_table": "新建一个支持多维度切片的三维数据表。",
-    "register_gameplay_table": "在玩法规划步骤中将一个玩法落地表注册到规划清单。",
-    "get_gameplay_table_list": "列出所有已注册的玩法落地表及其执行状态。",
-    "set_gameplay_table_status": "将玩法落地表的状态更新为进行中或已完成。",
+    "register_gameplay_table": "注册一个 AGENT 任务到任务池（任何阶段均可调用），任务注册后 agent 循环会自主从任务池中拉取处理。",
+    "get_gameplay_table_list": "读取任务池中所有已注册任务及其状态、说明和依赖关系。",
+    "set_gameplay_table_status": "更新任务池中任务的状态为进行中或已完成。",
     "submit_feedback": "当工具缺少、存在缺陷、描述不符或其他工具层面问题时提交反馈给开发团队。",
 }
 
@@ -2861,6 +2915,8 @@ def _setup_level_table(
     columns: List[Dict[str, Any]],
     readme: str = "",
     purpose: str = "",
+    directory: str = "",
+    tags: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     if not table_name:
         return {"error": "缺少 table_name"}
@@ -2900,6 +2956,8 @@ def _setup_level_table(
             readme=readme,
             purpose=purpose,
             column_meta=col_meta_list,
+            directory=directory,
+            tags=tags,
         )
     except ValueError as e:
         msg = str(e)
@@ -3449,6 +3507,8 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                 columns=args.get("columns") or [],
                 readme=str(args.get("readme", "")),
                 purpose=str(args.get("purpose", "")),
+                directory=str(args.get("directory") or ""),
+                tags=args.get("tags") if isinstance(args.get("tags"), list) else None,
             )
     elif name == "get_default_system_rules":
         row = conn.execute(
@@ -3469,10 +3529,17 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
         out = _glossary_list(conn, args)
     elif name == "const_register":
         out = _const_register(conn, args, p.can_write)
+        p.const_register_count += 1
+        if p.const_register_count == 7:
+            tip = "本次注册的常量较多，请注意是否遵循了以下规范：对于多维度常量，必须新建伪三维表或者三维表来定义和使用，禁止在常量中构建一堆实质上是行列结构的常量。"
+            if isinstance(out, dict) and out.get("ok"):
+                out["_notice"] = tip
     elif name == "const_set":
         out = _const_set(conn, args, p.can_write)
     elif name == "const_list":
         out = _const_list(conn, args)
+    elif name == "const_detail":
+        out = _const_detail(conn, args)
     elif name == "const_delete":
         out = _const_delete(conn, args, p.can_write)
     elif name == "const_tag_register":
@@ -3636,7 +3703,7 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                     "fix": "create_3d_table 用于三维数据表：dim1/dim2 是可手填的轴值集合，但属性列只能存数值。若变化本质上来自维度展开，优先把变化写进 cols[].formula，而不是手填展开后的整表常量。",
                 }
     elif name == "submit_feedback":
-        out = _submit_feedback(conn, args, p.project_slug)
+        out = _submit_feedback(conn, args, str(p.row["slug"]))
     else:
         out = {"error": f"未知工具 {name}"}
     return json.dumps(wrap_tool_payload(out), ensure_ascii=False)
@@ -3921,6 +3988,57 @@ def _coerce_value_json(v: Any) -> str:
     return json.dumps(v)
 
 
+def _count_effective_digits(value: float) -> int:
+    """计算有效数字位数。
+    若 |value| < 1（纯小数），移除紧挨着小数点的连续 0 后计数字符；
+    若 |value| >= 1，移除尾部的连续 0 后计数字符。
+    """
+    v = abs(value)
+    if v == 0:
+        return 0
+    s = str(v)
+    if v < 1:
+        if '.' in s:
+            _, frac = s.split('.')
+            frac = frac.lstrip('0')
+            return sum(1 for c in frac if c.isdigit())
+        return 0
+    else:
+        cleaned = s.rstrip('0').rstrip('.')
+        return sum(1 for c in cleaned if c.isdigit())
+
+
+def _check_value_formula_suspicion(value, brief: str) -> Optional[str]:
+    """检查 value 常量是否疑似应为 formula 常量。"""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    warnings_list = []
+
+    # 检查 1-2：有效数字多 或 brief 含运算符 → 疑是 formula
+    formula_reasons = []
+    eff = _count_effective_digits(v)
+    if eff >= 3:
+        formula_reasons.append(f"有效数字={eff}位")
+    formula_syms = '+−*/=×÷^'
+    if any(c in brief for c in formula_syms):
+        hits = [c for c in formula_syms if c in brief]
+        formula_reasons.append(f"brief含运算符{'/'.join(hits)}")
+    if formula_reasons:
+        warnings_list.append(f"疑是 formula 常量被填写为 value 常量，请考虑改为 formula（{'；'.join(formula_reasons)}）")
+
+    # 检查 3：brief 中固化了 value 的数字
+    brief_digits = set(c for c in brief if c.isdigit())
+    val_digits = set(c for c in str(value) if c.isdigit())
+    if brief_digits & val_digits:
+        warnings_list.append("疑是brief中固化了value，请注意规范：brief应该是概念描述")
+
+    if warnings_list:
+        return '\n'.join(warnings_list)
+    return None
+
+
 # ─── 公式常量辅助 ─────────────────────────────────────────────────────────────
 
 
@@ -4073,6 +4191,7 @@ def _const_register(conn: sqlite3.Connection, args: Dict[str, Any], can_write: b
         return {"error": f"name_en 不合法：{name_en}"}
     name_zh = str(args.get("name_zh", ""))
     brief = str(args.get("brief", ""))
+    design_intent = str(args.get("design_intent", "")).strip()
     brief_err = _validate_brief_no_value(brief)
     if brief_err:
         return {"error": brief_err}
@@ -4096,6 +4215,7 @@ def _const_register(conn: sqlite3.Connection, args: Dict[str, Any], can_write: b
         return {"error": "value 或 formula 必填其一"}
 
     now = _now_iso()
+    warning = None
 
     if formula_raw:
         formula_str = str(formula_raw).strip()
@@ -4115,6 +4235,7 @@ def _const_register(conn: sqlite3.Connection, args: Dict[str, Any], can_write: b
     else:
         value_json = _coerce_value_json(args["value"])
         formula_to_store = None
+        warning = _check_value_formula_suspicion(json.loads(value_json), brief)
 
     # 自动建标签
     for t in tags:
@@ -4125,23 +4246,29 @@ def _const_register(conn: sqlite3.Connection, args: Dict[str, Any], can_write: b
     tags_json = json.dumps(tags, ensure_ascii=False)
     conn.execute(
         """
-        INSERT INTO _constants (name_en, name_zh, value_json, formula, brief, scope_table, tags, created_at, updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?)
+        INSERT INTO _constants (name_en, name_zh, value_json, formula, brief, design_intent, scope_table, tags, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(name_en) DO UPDATE SET
             name_zh = excluded.name_zh,
             value_json = excluded.value_json,
             formula = excluded.formula,
             brief = excluded.brief,
+            design_intent = excluded.design_intent,
             scope_table = excluded.scope_table,
             tags = excluded.tags,
             updated_at = excluded.updated_at
         """,
-        (name_en, name_zh, value_json, formula_to_store, brief, scope_table, tags_json, now, now),
+        (name_en, name_zh, value_json, formula_to_store, brief, design_intent, scope_table, tags_json, now, now),
     )
     conn.commit()
     # 级联更新依赖此常量的公式常量
     _cascade_update_formula_consts(conn)
-    return {"ok": True, "name_en": name_en, "value": json.loads(value_json), "formula": formula_to_store, "tags": tags}
+    result = {"ok": True, "name_en": name_en, "value": json.loads(value_json), "formula": formula_to_store, "tags": tags}
+    if design_intent:
+        result["design_intent"] = design_intent
+    if warning:
+        result["warning"] = warning
+    return result
 
 
 def _const_set(conn: sqlite3.Connection, args: Dict[str, Any], can_write: bool) -> Dict[str, Any]:
@@ -4158,10 +4285,23 @@ def _const_set(conn: sqlite3.Connection, args: Dict[str, Any], can_write: bool) 
 
     if formula_raw and has_value:
         return {"error": "value 与 formula 不能同时提供，请二选一"}
-    if not formula_raw and not has_value:
-        return {"error": "value 或 formula 必填其一"}
+    has_brief = args.get("brief") is not None
+    has_design_intent = args.get("design_intent") is not None
+    if not formula_raw and not has_value and not has_brief and not has_design_intent:
+        return {"error": "value、formula、brief 或 design_intent 必填其一"}
 
     now = _now_iso()
+
+    brief = args.get("brief")
+    design_intent = args.get("design_intent")
+    extra_sets = []
+    extra_vals = []
+    if brief is not None:
+        extra_sets.append("brief = ?")
+        extra_vals.append(str(brief))
+    if design_intent is not None:
+        extra_sets.append("design_intent = ?")
+        extra_vals.append(str(design_intent).strip())
 
     if formula_raw:
         formula_str = str(formula_raw).strip()
@@ -4175,18 +4315,39 @@ def _const_set(conn: sqlite3.Connection, args: Dict[str, Any], can_write: bool) 
         if err_msg:
             return {"error": err_msg}
         value_json = json.dumps(float(value) if isinstance(value, (int, float)) else value)
+        sets = "value_json = ?, formula = ?, updated_at = ?"
+        vals = [value_json, formula_str, now]
+        if extra_sets:
+            sets += ", " + ", ".join(extra_sets)
+            vals = [value_json, formula_str] + extra_vals + [now]
         conn.execute(
-            "UPDATE _constants SET value_json = ?, formula = ?, updated_at = ? WHERE name_en = ?",
-            (value_json, formula_str, now, name_en),
+            f"UPDATE _constants SET {sets} WHERE name_en = ?",
+            tuple(vals) + (name_en,),
         )
         formula_to_return: Optional[str] = formula_str
-    else:
+    elif has_value:
         value_json = _coerce_value_json(args["value"])
+        sets = "value_json = ?, formula = NULL, updated_at = ?"
+        vals = [value_json, now]
+        if extra_sets:
+            sets += ", " + ", ".join(extra_sets)
+            vals = [value_json] + extra_vals + [now]
         conn.execute(
-            "UPDATE _constants SET value_json = ?, formula = NULL, updated_at = ? WHERE name_en = ?",
-            (value_json, now, name_en),
+            f"UPDATE _constants SET {sets} WHERE name_en = ?",
+            tuple(vals) + (name_en,),
         )
         formula_to_return = None
+    else:
+        # 仅更新 brief / design_intent
+        sets = ", ".join(extra_sets)
+        conn.execute(
+            f"UPDATE _constants SET {sets}, updated_at = ? WHERE name_en = ?",
+            tuple(extra_vals) + (now, name_en),
+        )
+        cur = conn.execute("SELECT value_json, formula FROM _constants WHERE name_en = ?", (name_en,))
+        row = cur.fetchone()
+        value_json = row[0] if row else "null"
+        formula_to_return = row[1] if row else None
 
     conn.commit()
     _cascade_update_formula_consts(conn)
@@ -4226,7 +4387,7 @@ def _const_list(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     base_sql = (
-        f"SELECT name_en, name_zh, value_json, formula, brief, scope_table, tags "
+        f"SELECT name_en, name_zh, value_json, formula, brief, design_intent, scope_table, tags "
         f"FROM _constants {where} ORDER BY name_en"
     )
 
@@ -4236,16 +4397,18 @@ def _const_list(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any
         except Exception:  # noqa: BLE001
             value = None
         formula = r[3]  # nullable string
-        raw_tags = r[6]
+        brief = r[4] or ""
+        design_intent = r[5] or ""
+        raw_tags = r[7]
         try:
             item_tags: List[str] = json.loads(raw_tags) if isinstance(raw_tags, str) and raw_tags else []
         except Exception:  # noqa: BLE001
             item_tags = []
-        return [r[0], r[1], value, formula, r[4], r[5], item_tags]
+        return [r[0], r[1], value, formula, brief, design_intent, r[6], item_tags]
 
     result: Dict[str, Any] = {
         "ok": True,
-        "cols": ["name_en", "name_zh", "value", "formula", "brief", "scope_table", "tags"],
+        "cols": ["name_en", "name_zh", "value", "formula", "brief", "design_intent", "scope_table", "tags"],
     }
 
     if tags_filter:
@@ -4253,7 +4416,7 @@ def _const_list(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any
         all_rows = [
             _parse_row(r)
             for r in conn.execute(base_sql, params).fetchall()
-            if any(t in (json.loads(r[6]) if isinstance(r[6], str) and r[6] else []) for t in tags_filter)
+            if any(t in (json.loads(r[7]) if isinstance(r[7], str) and r[7] else []) for t in tags_filter)
         ]
         total_filtered = len(all_rows)
         if offset:
@@ -4279,6 +4442,74 @@ def _const_list(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any
             result["has_more"] = True
             result["next_offset"] = offset + len(rows)
 
+    # 按返回数量控制详尽程度：量大时节省 token
+    row_count = len(result.get("rows", []))
+    cols = result["cols"]
+    brief_idx = cols.index("brief") if "brief" in cols else -1
+    intent_idx = cols.index("design_intent") if "design_intent" in cols else -1
+
+    if row_count >= 40:
+        new_cols, drop_indices = [], set()
+        for i, c in enumerate(cols):
+            if c in ("brief", "design_intent"):
+                drop_indices.add(i)
+            else:
+                new_cols.append(c)
+        result["cols"] = new_cols
+        result["rows"] = [[v for i, v in enumerate(row) if i not in drop_indices] for row in result["rows"]]
+        result["hint"] = "本次返回较多，已省略 brief 与 design_intent。可使用 const_detail(names=[...]) 查询指定常量的完整信息。"
+    elif row_count >= 20:
+        new_cols, drop_indices = [], set()
+        for i, c in enumerate(cols):
+            if c == "design_intent":
+                drop_indices.add(i)
+            else:
+                new_cols.append(c)
+        result["cols"] = new_cols
+        result["rows"] = [[v for i, v in enumerate(row) if i not in drop_indices] for row in result["rows"]]
+        result["hint"] = "本次返回较多，已省略 design_intent。可使用 const_detail(names=[...]) 查询指定常量的设计意图。"
+
+    return result
+
+
+def _const_detail(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any]:
+    """查询指定常量的全部信息，包括 brief 和 design_intent。"""
+    names = args.get("names") or []
+    if not isinstance(names, list) or not names:
+        return {"ok": True, "items": [], "hint": "请提供 names 列表"}
+    names = [str(n).strip() for n in names if str(n).strip()]
+    if not names:
+        return {"ok": True, "items": [], "hint": "names 为空"}
+    placeholders = ",".join(["?"] * len(names))
+    rows = conn.execute(
+        f"SELECT name_en, name_zh, value_json, formula, brief, design_intent, scope_table, tags "
+        f"FROM _constants WHERE name_en IN ({placeholders}) ORDER BY name_en",
+        names,
+    ).fetchall()
+    items = []
+    for r in rows:
+        try:
+            value = json.loads(r[2])
+        except Exception:
+            value = None
+        try:
+            tags = json.loads(r[7]) if isinstance(r[7], str) and r[7] else []
+        except Exception:
+            tags = []
+        items.append({
+            "name_en": r[0],
+            "name_zh": r[1],
+            "value": value,
+            "formula": r[3],
+            "brief": r[4] or "",
+            "design_intent": r[5] or "",
+            "scope_table": r[6],
+            "tags": tags,
+        })
+    not_found = [n for n in names if n not in {it["name_en"] for it in items}]
+    result: Dict[str, Any] = {"ok": True, "items": items}
+    if not_found:
+        result["not_found"] = not_found
     return result
 
 

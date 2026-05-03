@@ -352,14 +352,17 @@ function HistorySidebar({
           <li key={s.id} className={`am-history-item${s.id === currentId ? ' active' : ''}`}
             onClick={() => onSelect(s)}>
             <div className="am-history-item-title" title={s.userMessage}>
-              #{s.projectId} {s.userMessage.slice(0, 28)}{s.userMessage.length > 28 ? '…' : ''}
+              {(() => {
+                const m = s.userMessage.match(/【(.+?)】/)
+                return m ? m[1] : s.userMessage
+              })()}
             </div>
             <div className="am-history-item-meta">
               {s.mode} · {s.metrics.startedAt.slice(0, 16).replace('T', ' ')}
+              <span className={`am-history-item-status ${s.metrics.status === 'error' ? 'err' : s.metrics.status === 'running' ? 'running' : 'ok'}`}>
+                {s.metrics.status === 'error' ? '失败' : s.metrics.status === 'running' ? '运行中' : '完成'}
+              </span>
             </div>
-            <span className={`am-history-item-status ${s.metrics.status === 'error' ? 'err' : s.metrics.status === 'running' ? 'running' : 'ok'}`}>
-              {s.metrics.status === 'error' ? '失败' : s.metrics.status === 'running' ? '运行中' : '完成'}
-            </span>
           </li>
         ))}
       </ul>
@@ -634,6 +637,7 @@ export default function AgentTest() {
   const [message, setMessage] = useState('请说明本项目的表结构与下一步建议。')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  const [formCollapsed, setFormCollapsed] = useState(true)
 
   // 错误浮层 6 秒后自动消失（用户也可点 × 关闭）
   useEffect(() => {
@@ -1095,7 +1099,11 @@ export default function AgentTest() {
         <div className="am-body">
           {/* 调用表单 */}
           <div className="am-form-card">
-            <h2>调用参数</h2>
+            <h2 onClick={() => setFormCollapsed(!formCollapsed)} style={{ cursor: 'pointer', userSelect: 'none' }}>
+              {formCollapsed ? '▸' : '▾'} 调用参数
+            </h2>
+            {!formCollapsed && (
+            <>
             <form onSubmit={runAgent}>
               <div className="am-form-row">
                 <label>
@@ -1182,6 +1190,8 @@ export default function AgentTest() {
               <p className="muted small" style={{ marginTop: '0.4rem' }}>
                 📋 正在查看历史会话：{viewSession!.userMessage.slice(0, 60)} ({viewSession!.metrics.startedAt.slice(0, 16).replace('T', ' ')})
               </p>
+            )}
+            </>
             )}
           </div>
 

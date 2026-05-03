@@ -104,6 +104,7 @@ class ProjectDB:
     conn: sqlite3.Connection
     can_write: bool
     server_conn: Optional[sqlite3.Connection] = None
+    const_register_count: int = 0
 
 
 def get_project_read(

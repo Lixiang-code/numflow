@@ -31,10 +31,11 @@ type AxisKey = 'dim1' | 'dim2' | 'metric'
 
 type ConstantItem = {
   name_en: string
-  name_zh?: string
-  value?: unknown
+  name_zh: string
+  value: unknown
   formula?: string | null
   brief?: string
+  design_intent?: string
 }
 
 const REF_COLORS = [

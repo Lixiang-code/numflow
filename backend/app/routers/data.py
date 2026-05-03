@@ -127,7 +127,7 @@ def describe_table(table_name: str, p: ProjectDB = Depends(get_project_read)):
             table_tags = []
 
         cur_c = conn.execute(
-            "SELECT name_en, name_zh, value_json, formula, brief, scope_table, COALESCE(tags, '[]') AS tags FROM _constants ORDER BY name_en",
+            "SELECT name_en, name_zh, value_json, formula, brief, design_intent, scope_table, COALESCE(tags, '[]') AS tags FROM _constants ORDER BY name_en",
         )
         for r in cur_c.fetchall():
             scope = r["scope_table"]
@@ -159,6 +159,7 @@ def describe_table(table_name: str, p: ProjectDB = Depends(get_project_read)):
                     "value": v,
                     "formula": r["formula"],
                     "brief": r["brief"],
+                    "design_intent": r["design_intent"] or "",
                     "scope_table": r["scope_table"],
                 }
             )

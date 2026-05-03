@@ -254,12 +254,11 @@ def test_const_list_returns_cols_rows_format():
     assert "cols" in data, "应包含 cols 字段"
     assert "rows" in data, "应包含 rows 字段"
     assert "items" not in data, "不应再出现旧版 items 字段"
-    assert data["cols"] == ["name_en", "name_zh", "value", "formula", "brief", "scope_table", "tags"]
+    assert data["cols"] == ["name_en", "name_zh", "value", "formula", "brief", "design_intent", "scope_table", "tags"]
     assert data["total"] == 5
     assert len(data["rows"]) == 5
-    # 验证行结构：每行应有 7 个元素（新增 formula 字段）
     for row in data["rows"]:
-        assert len(row) == 7
+        assert len(row) == 8
 
 
 def test_glossary_list_returns_cols_rows_format():

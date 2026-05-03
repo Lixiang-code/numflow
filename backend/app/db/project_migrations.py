@@ -96,6 +96,8 @@ def ensure_project_migrations(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "_constants", "tags", "TEXT NOT NULL DEFAULT '[]'")
     # 公式常量支持：存储公式字符串，value_json 存计算结果
     _add_column_if_missing(conn, "_constants", "formula", "TEXT")
+    # 第三轮优化：常量设计意图（AI 编写意图/限制说明，与 brief 的概念定义分离）
+    _add_column_if_missing(conn, "_constants", "design_intent", "TEXT NOT NULL DEFAULT ''")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS _const_tags (

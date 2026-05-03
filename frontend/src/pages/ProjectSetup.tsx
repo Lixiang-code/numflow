@@ -285,7 +285,7 @@ function PhaseProgress({ current, status }: { current: string; status: string })
 const STEP_INIT_MESSAGES: Record<string, string> = {
   // ── 固定流水线步骤（顺序与 PIPELINE_STEPS_BASE 一致）──
   environment_global_readme: '请初始化本项目：阅读项目配置，用 set_project_setting 写入 max_level/currencies/stat_keys/resource_keys，用 glossary_register 登记核心术语，用 const_register 写入项目级常数，最后用 update_global_readme 写出全局 README。',
-  gameplay_planning: '请分析游戏配置，规划所有需要单独出落地表的玩法系统，使用 register_gameplay_table 工具注册每张表（含设计目标 README、推荐顺序、依赖关系）。注意：本步仅注册规划，严禁调用任何建表/写数工具。',
+  gameplay_planning: '请分析游戏配置，规划所有需要单独执行的任务，使用 register_gameplay_table 工具注册每个任务（含目标说明、推荐顺序、依赖关系）。注意：本步仅注册规划，严禁调用任何建表/写数工具。',
   base_attribute_framework: '请构建基础属性框架表 num_base_framework：读取已配置的 stat_keys 和 max_level，用 setup_level_table 建立 1..max_level 行的等级-属性表（hp 列建好留空，由下一步反推），所有成长系数先 const_register 再以 ${name} 引用。',
   hp_formula_derivation: '请推导 HP 反推公式：基于 num_base_framework 中的 atk/def 曲线和战斗节奏假设（survive_seconds / attacks_per_second），通过 update_formula 登记 hp_formula，然后用 update_rows 将 hp 列回填到 num_base_framework，最后更新表 README 写出验证数据。',
   gameplay_allocation: '请构建玩法属性分配 matrix 表 gameplay_attr_alloc（行=玩法子系统，列=属性，值=投放占比 0~1），并注册 calculator gameplay_attr_alloc_lookup，供后续玩法落地表查询每个子系统的属性投放比例。',
@@ -298,7 +298,7 @@ const STEP_INIT_MESSAGES: Record<string, string> = {
 function buildInitMessage(stepId: string, projectInfo: ProjectInfo, completedSteps: string[]): string {
   let custom: string | undefined
   if (stepId.startsWith('gameplay_table.')) {
-    custom = `请调用 get_gameplay_table_list 读取任务队列，从中选择一张最合适的玩法表（优先 status='未开始' 且依赖已完成、order_num 最小者；或 status='待修订' 且依赖已完成者），完成该表的完整数值设计后将其标记为「已完成」。每次只完成一张表。`
+    custom = `请调用 get_gameplay_table_list 读取任务池，从中选择最合适的任务（优先 status='未开始' 且依赖已完成、order_num 最小者；或 status='待修订' 且依赖已完成者），完成该任务的完整设计后将其标记为「已完成」。执行过程中若发现缺失任务，可用 register_gameplay_table 动态注册。每次只完成一个任务。`
   } else {
     custom = STEP_INIT_MESSAGES[stepId]
   }

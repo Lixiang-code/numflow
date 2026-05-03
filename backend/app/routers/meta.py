@@ -37,7 +37,7 @@ def get_constants(p: ProjectDB = Depends(get_project_read)):
 
     输出结构：
         {
-            "constants": [ {name_en,name_zh,value,formula,brief,scope_table,tags[]} ... ],
+            "constants": [ {name_en,name_zh,value,formula,brief,design_intent,scope_table,tags[]} ... ],
             "tags": [ {name,parent,brief} ... ]
         }
     """
@@ -45,7 +45,7 @@ def get_constants(p: ProjectDB = Depends(get_project_read)):
     constants: List[Dict[str, Any]] = []
     try:
         cur = conn.execute(
-            "SELECT name_en, name_zh, value_json, formula, brief, scope_table, "
+            "SELECT name_en, name_zh, value_json, formula, brief, design_intent, scope_table, "
             "COALESCE(tags, '[]') AS tags FROM _constants ORDER BY name_en"
         )
         for r in cur.fetchall():
@@ -66,6 +66,7 @@ def get_constants(p: ProjectDB = Depends(get_project_read)):
                     "value": v,
                     "formula": r["formula"],
                     "brief": r["brief"],
+                    "design_intent": r["design_intent"] or "",
                     "scope_table": r["scope_table"],
                     "tags": tags,
                 }
@@ -91,6 +92,8 @@ def get_constants(p: ProjectDB = Depends(get_project_read)):
 class PatchConstantBody(BaseModel):
     value: Any = Field(default=None, description="新值（与 formula 二选一；提供 value 会清除公式）")
     formula: Optional[str] = Field(default=None, description="新公式字符串（与 value 二选一）")
+    brief: Optional[str] = Field(default=None, description="更新概念定义（可选）")
+    design_intent: Optional[str] = Field(default=None, description="更新设计意图（可选）")
 
 
 @router.patch("/constants/{name_en}")
@@ -118,6 +121,15 @@ def patch_constant(
 
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
+    extra_sets = []
+    extra_vals = []
+    if body.brief is not None:
+        extra_sets.append("brief = ?")
+        extra_vals.append(body.brief)
+    if body.design_intent is not None:
+        extra_sets.append("design_intent = ?")
+        extra_vals.append(body.design_intent)
+
     if formula_given:
         formula_str = body.formula.strip()  # type: ignore[union-attr]
         if not formula_str:
@@ -130,15 +142,25 @@ def patch_constant(
         if err_msg:
             raise HTTPException(status_code=400, detail=err_msg)
         value_json = json.dumps(float(value) if isinstance(value, (int, float)) else value)
+        sets = "value_json = ?, formula = ?, updated_at = ?"
+        vals = [value_json, formula_str, now]
+        if extra_sets:
+            sets += ", " + ", ".join(extra_sets)
+            vals = [value_json, formula_str] + extra_vals + [now]
         conn.execute(
-            "UPDATE _constants SET value_json = ?, formula = ?, updated_at = ? WHERE name_en = ?",
-            (value_json, formula_str, now, name_en),
+            f"UPDATE _constants SET {sets} WHERE name_en = ?",
+            tuple(vals) + (name_en,),
         )
     else:
         value_json = json.dumps(body.value, ensure_ascii=False)
+        sets = "value_json = ?, formula = NULL, updated_at = ?"
+        vals = [value_json, now]
+        if extra_sets:
+            sets += ", " + ", ".join(extra_sets)
+            vals = [value_json] + extra_vals + [now]
         conn.execute(
-            "UPDATE _constants SET value_json = ?, formula = NULL, updated_at = ? WHERE name_en = ?",
-            (value_json, now, name_en),
+            f"UPDATE _constants SET {sets} WHERE name_en = ?",
+            tuple(vals) + (name_en,),
         )
 
     conn.commit()
