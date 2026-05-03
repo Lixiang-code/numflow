@@ -194,6 +194,7 @@ READ_TOOLS = {
     "glossary_list",
     "const_list",
     "const_detail",
+    "get_gameplay_table_detail",
     "const_tag_list",
     "sparse_sample",
     "list_directories",
@@ -241,6 +242,7 @@ _TOOL_LABELS: Dict[str, str] = {
     "suggest_action": "获取 Agent 建议",
     "register_gameplay_table": "注册任务",
     "get_gameplay_table_list": "任务池清单",
+    "get_gameplay_table_detail": "查询任务详情",
     "set_gameplay_table_status": "更新任务状态",
     "expose_param_to_subsystems": "暴露参数给下游",
     "list_exposed_params": "读取上游暴露参数",
@@ -762,8 +764,10 @@ _EXECUTE_SYSTEM_TAIL = (
 
     "═══ ★ 常数标签 / brief 规范 ★ ═══\n"
     "const_register 必填 tags（数组，至少 1 个）：常数会按 tags 分组在前端常量页中展示。\n"
-    "  - 标签通常是『主系统名』(如 combat / economy / mount / wing) 或语义类别 (如 level_curve / drop_rate)。\n"
-    "  - 若标签未注册可直接传，系统会自动登记；建议先用 const_tag_register 显式定义层级。\n"
+    "  - 标签是互斥的分类维度：用中文表示系统归属（如 '战斗'/'经济'/'养成'/'关卡'）或属性类（如 '基础属性'/'对抗属性'）。\n"
+    "  - 禁止用具体材料名/物品名（强化石、金丹）作标签，材料应归入 '消耗材料' 或 '养成材料'。\n"
+    "  - 若标签未注册可直接传，系统会自动登记；建议先用 const_tag_register 显式定义层级（parent 参数）。\n"
+    "  - 查询时先用 const_tag_list 了解标签结构，再叠加 tags_filter 精准筛选，避免返回数百条无关常量。\n"
     "brief 字段是对常数的**描述性介绍**（含义、单位、用途），应以自然语言说明，不应出现具体数值；\n"
     "  数值已由 value 字段承载，brief 里写数值属于信息冗余且降低可读性。\n"
     "  ✓ 'HP 基础值，单位：生命点' / '暴击伤害放大倍率，小数表示' / '防御减伤公式中的平衡系数'\n"

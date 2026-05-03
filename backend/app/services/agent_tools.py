@@ -346,7 +346,8 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "  columns[].name：英文 snake_case 标识符，用于公式引用/存储，**只能含英文+数字+下划线**\n"
                 "  columns[].display_name：中文列名，用于表头展示，必填，如「攻击力」\n"
                 "columns 每项含：name / sql_type(TEXT|REAL|INTEGER) / display_name / dtype / number_format\n"
-                "number_format 格式说明见下方参数描述。"
+                "number_format 格式说明见下方参数描述。\n"
+                "★ row_id 是系统自动列（TEXT 主键），无需在 columns 中声明，重复声明会报错。"
             ),
             "parameters": {
                 "type": "object",
@@ -454,8 +455,9 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "★ 系列填充：用模板生成连续 row_id（如 lv_1..lv_50）的写入，避免一次性贴数百行 JSON。"
                 "row_id_template 必须包含 {i} 占位符；start..end 闭区间生成索引；"
                 "value_list 与索引一一对应（长度需 = end-start+1），"
-                "或用 value_template（含 {i}）+ 表达式 expr 计算（expr 可用 i 变量，如 'i*100+50'）。"
-                "value_list 与 expr 二选一。column 是目标列名。适用于：等级表数值列、批量配置项。"
+                "或用 expr 计算数值（expr 可用 i 变量，如 'i*100+50'），"
+                "或用 text_template 生成文本值（如 'stage_{i}' 或 '备注_{i}号'）。"
+                "value_list / expr / text_template 三选一。"
             ),
             "parameters": {
                 "type": "object",
@@ -476,6 +478,10 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                     "expr": {
                         "type": "string",
                         "description": "受限算术表达式（变量 i 表示当前索引），如 'i*100+50'、'2**i'",
+                    },
+                    "text_template": {
+                        "type": "string",
+                        "description": "文本模板（{i} 替换为当前索引），如 'stage_{i}'、'备注第{i}条'",
                     },
                     "source_tag": {
                         "type": "string",
@@ -683,6 +689,8 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "  比较：< <= > >= == !=（支持 @@col 与标量/@@col2 逐元素广播，返回 bool 列表）\n"
                 "  查找：VLOOKUP(val,@@lkup,@@ret,[exact]) / XLOOKUP(val,@@lkup,@@ret,[ifna]) / "
                 "INDEX(@@col,row) / MATCH(val,@@col) / LOOKUP(val,@@lkup,@@ret)\n"
+                "  插值：interp(x, x1,y1, x2,y2, ...) 分段线性插值。★ y 值禁止裸数字，须用 ${name} 常量引用。"
+                "x 超出范围时夹持到最近端点。\n"
                 "  聚合：SUM(@@col) / AVERAGE(@@col) / COUNT(@@col)\n"
                 "  条件聚合：SUM(IF(@@col < @表[col], @@val, 0))（典型：累计经验 / 前缀和）\n"
                 "  累计求和：CUMSUM_TO_HERE(@@col)（含本行）/ CUMSUM_PREV(@@col)（截至上一行）\n"
@@ -872,8 +880,12 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "function": {
             "name": "const_tag_register",
             "description": (
-                "注册常量分类标签（如主系统名 combat / economy / level_curve），"
-                "用于 const_register.tags 取值与前端常量页聚合。同名 upsert。"
+                "注册常量分类标签，用于 const_register.tags 取值与前端常量页聚合。同名 upsert。\n"
+                "★ 标签是'互斥的分类维度'，不是自由标注——每个标签代表一种分类方式。\n"
+                "★ 要求：用中文命名，代表系统归属（如'战斗'/'经济'/'养成'）或属性类型（如'基础属性'/'对抗属性'）。\n"
+                "★ 禁止：用具体材料名/物品名作标签（如'强化石' 应为 '消耗材料' 下设；'金丹' 应为 '药品'）。\n"
+                "★ 反模式举例：'属性' 和 'attribute' 同时存在 → 合并为 '战斗属性'；'装备' 和 'equip' → 统一中文。\n"
+                "★ 用 parent 构建层级：如 parent='经济' 下设 name='抽卡'、name='商店'、name='资源'。"
             ),
             "parameters": {
                 "type": "object",
@@ -1444,6 +1456,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                                         "description": (
                                             "可选，同行公式（支持 @列名 引用本表其他列，含维度列）。\n"
                                             "示例：@level * ${gem_base_atk} * 0.01\n"
+                                            "★ IF 条件支持字符串比较：IF(@dim2_key=='saddle', a, b) 可按维度值分支。\n"
                                             "若 ${常量} 已注册会立即计算；未注册则保留为运行时模板，后续可重算。"
                                         ),
                                     },
@@ -1508,6 +1521,29 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "任务说明、依赖关系和建议执行顺序。Agent 应据此自主选择下一个要处理的任务。"
             ),
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_gameplay_table_detail",
+            "description": (
+                "查询指定任务的完整详情（含 display_name、readme 说明文档、修订原因等）。"
+                "适用场景：get_gameplay_table_list 返回较多而省略了说明信息时，用本工具补齐关键任务的完整详情。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "description": "需要查询详情的任务 table_id 列表，如 ['equip_enhance', 'attr_allocation']",
+                    },
+                },
+                "required": ["table_ids"],
+                "additionalProperties": False,
+            },
         },
     },
     {
@@ -1661,6 +1697,7 @@ _TOOL_TITLE_ZH: Dict[str, str] = {
     "create_3d_table": "创建三维数据表",
     "register_gameplay_table": "注册新任务",
     "get_gameplay_table_list": "任务池清单",
+    "get_gameplay_table_detail": "查询任务详情",
     "set_gameplay_table_status": "更新任务状态",
     "submit_feedback": "提交工具反馈",
 }
@@ -1725,6 +1762,7 @@ _TOOL_GROUP_BY_NAME: Dict[str, str] = {
     "create_3d_table": "advanced_modeling",
     "register_gameplay_table": "advanced_modeling",
     "get_gameplay_table_list": "advanced_modeling",
+    "get_gameplay_table_detail": "advanced_modeling",
     "set_gameplay_table_status": "advanced_modeling",
     "submit_feedback": "read_core",
 }
@@ -1790,6 +1828,7 @@ _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "create_3d_table": "新建一个支持多维度切片的三维数据表。",
     "register_gameplay_table": "注册一个 AGENT 任务到任务池（任何阶段均可调用），任务注册后 agent 循环会自主从任务池中拉取处理。",
     "get_gameplay_table_list": "读取任务池中所有已注册任务及其状态、说明和依赖关系。",
+    "get_gameplay_table_detail": "按 table_id 列表查询指定任务的完整详情（含 readme/display_name/修订原因等）。",
     "set_gameplay_table_status": "更新任务池中任务的状态为进行中或已完成。",
     "submit_feedback": "当工具缺少、存在缺陷、描述不符或其他工具层面问题时提交反馈给开发团队。",
 }
@@ -2990,13 +3029,17 @@ def _setup_level_table(
         "registered_count": 0,
         "executed_count": 0,
     }
-    return {
+    result = {
         "table_name": table_name,
         "rows_inserted": now_rows,
         "level_column": level_column,
         "max_level": max_level,
         "bulk": bulk,
     }
+    dim_warn = _detect_dim_encoded_columns([c["name"] for c in col_meta_list if c["name"] != level_column])
+    if dim_warn:
+        result["_notice"] = dim_warn
+    return result
 
 
 def _register_gameplay_table(
@@ -3047,12 +3090,37 @@ def _register_gameplay_table(
 
 
 def _get_gameplay_table_list(conn) -> Dict[str, Any]:
-    """读取所有已注册的玩法落地表。待修订表附带最新修订原因。"""
+    """读取所有已注册的玩法落地表。≥10 个时省略 display_name/readme，返回摘要。"""
     try:
         items = list_registered_gameplay_tables(conn, readme_limit=500)
-        return {"status": "success", "data": {"tables": items, "total": len(items)}, "warnings": [], "blocked_cells": []}
+        total = len(items)
+        result: Dict[str, Any] = {"status": "success", "data": {"tables": items, "total": total}, "warnings": [], "blocked_cells": []}
+        if total >= 10:
+            for it in items:
+                it.pop("display_name", None)
+                it.pop("readme", None)
+            result["hint"] = "本次返回较多，已省略 display_name 与 readme。可使用 get_gameplay_table_detail(table_ids=[...]) 查询指定任务的完整详情。"
+        return result
     except Exception as e:  # noqa: BLE001
         return {"status": "error", "data": None, "warnings": [str(e)], "blocked_cells": []}
+
+
+def _get_gameplay_table_detail(conn, args: Dict[str, Any]) -> Dict[str, Any]:
+    """按 table_id 列表查询任务完整详情。"""
+    table_ids_raw = args.get("table_ids") or []
+    if not isinstance(table_ids_raw, list) or not table_ids_raw:
+        return {"status": "error", "data": None, "warnings": ["table_ids 必填且至少 1 项"], "blocked_cells": []}
+    table_ids = [str(t).strip() for t in table_ids_raw if str(t).strip()]
+    if not table_ids:
+        return {"status": "error", "data": None, "warnings": ["table_ids 不能为空"], "blocked_cells": []}
+    from app.services.gameplay_table_registry import get_gameplay_table_detail as _detail
+    items = _detail(conn, table_ids)
+    found_ids = {it["table_id"] for it in items}
+    not_found = [tid for tid in table_ids if tid not in found_ids]
+    result: Dict[str, Any] = {"status": "success", "data": {"tables": items, "total": len(items)}, "warnings": [], "blocked_cells": []}
+    if not_found:
+        result["warnings"] = [f"以下 table_id 未找到：{', '.join(not_found)}"]
+    return result
 
 
 def _set_gameplay_table_status(conn, table_id: str, status: str) -> Dict[str, Any]:
@@ -3333,6 +3401,10 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                     directory=str(args.get("directory", "")),
                     tags=args.get("tags") or [],
                 )
+                # 检测列名中是否编码了维度值（应建模为三维表的反模式）
+                dim_warn = _detect_dim_encoded_columns([c["name"] for c in col_meta if c["name"] != "row_id"])
+                if dim_warn and isinstance(out, dict) and out.get("ok"):
+                    out["_notice"] = dim_warn
             except ValueError as e:
                 tname = str(args.get("table_name", ""))
                 known = _list_known_tables(conn)
@@ -3358,6 +3430,10 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                         updates=list(args.get("updates") or []),
                         source_tag=tag,
                     )
+                    rids = [str(u.get("row_id", "")) for u in (args.get("updates") or [])]
+                    dim_warn = _detect_dim_encoded_rows(rids)
+                    if dim_warn and isinstance(out, dict) and out.get("applied"):
+                        out["_notice"] = dim_warn
                 except ValueError as e:
                     out = {"error": str(e)}
     elif name == "write_cells_series":
@@ -3649,6 +3725,10 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
             out = _expose_param(conn, args)
     elif name == "list_exposed_params":
         out = _list_exposed_params(conn, str(args.get("target_step", "")))
+        # 参数较多时用分组格式，去掉冗余 items 列表
+        if isinstance(out, dict) and out.get("total", 0) >= 30:
+            out.pop("items", None)
+            out["_format"] = "grouped（按 owner_step 分组，每组含 key/value/brief）"
     elif name == "register_gameplay_table":
         out = _register_gameplay_table(
             conn,
@@ -3660,6 +3740,8 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
         )
     elif name == "get_gameplay_table_list":
         out = _get_gameplay_table_list(conn)
+    elif name == "get_gameplay_table_detail":
+        out = _get_gameplay_table_detail(conn, args)
     elif name == "set_gameplay_table_status":
         out = _set_gameplay_table_status(
             conn,
@@ -3740,7 +3822,6 @@ def _expose_param(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, A
 def _list_exposed_params(conn: sqlite3.Connection, target_step: str) -> Dict[str, Any]:
     if not target_step:
         return {"items": []}
-    # 直接命中 + 通配（subsystems:<namespace>，如 subsystems:gameplay_table）
     broadcast_key = "subsystems:" + target_step.split(".")[0]
     cur = conn.execute(
         "SELECT owner_step, target_step, key, value_json, brief, status, read_at, created_at "
@@ -3750,8 +3831,7 @@ def _list_exposed_params(conn: sqlite3.Connection, target_step: str) -> Dict[str
     )
     rows = cur.fetchall()
     if not rows:
-        return {"items": []}
-    # 标记未读的条目为 acknowledged，记录 read_at 时间
+        return {"items": [], "groups": {}, "total": 0, "owners": 0}
     import time as _time
     now = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
     pending_keys = [
@@ -3765,25 +3845,39 @@ def _list_exposed_params(conn: sqlite3.Connection, target_step: str) -> Dict[str
         )
     if pending_keys:
         conn.commit()
+
+    def _trim_value(v: Any) -> Any:
+        s = json.dumps(v, ensure_ascii=False)
+        if len(s) > 200:
+            return json.loads(s[:200] + '..."')
+        return v
+
     items: List[Dict[str, Any]] = []
+    groups: Dict[str, List[Dict[str, Any]]] = {}
     for r in rows:
         try:
             val = json.loads(r[3])
-        except Exception:  # noqa: BLE001
+        except Exception:
             val = r[3]
-        # 如果刚被 acknowledged，反映最新状态
+        val = _trim_value(val)
+        owner = r[0]
         status = "acknowledged" if (r[0], r[1], r[2]) in pending_keys else r[5]
-        items.append({
-            "owner_step": r[0],
-            "target_step": r[1],
+        item = {
+            "owner_step": owner,
             "key": r[2],
             "value": val,
             "brief": r[4],
             "status": status,
-            "read_at": now if (r[0], r[1], r[2]) in pending_keys else r[6],
-            "created_at": r[7],
-        })
-    return {"items": items}
+        }
+        items.append(item)
+        group_item = {"key": r[2], "value": val, "brief": r[4]}
+        groups.setdefault(owner, []).append(group_item)
+
+    total = len(items)
+    result: Dict[str, Any] = {"items": items, "groups": groups, "total": total, "owners": len(groups)}
+    if total >= 30:
+        result["hint"] = f"参数较多（来自 {len(groups)} 个上游步骤），可按 owner_step 分类查看 groups 字段获取分组摘要。"
+    return result
 
 
 # ─── 术语 / 常数：实现 ───────────────────────────────────────────────
@@ -3849,8 +3943,8 @@ def _submit_feedback(conn: sqlite3.Connection, args: Dict[str, Any], project_slu
     conn.execute(
         """
         INSERT INTO _tool_feedback
-            (project_slug, pipeline_step, category, title, description, tool_names, context, created_at)
-        VALUES (?,?,?,?,?,?,?,?)
+            (project_slug, pipeline_step, category, title, description, tool_names, context, status, created_at)
+        VALUES (?,?,?,?,?,?,?,'打开',?)
         """,
         (project_slug, pipeline_step, category, title, description, tool_names, context, now),
     )
@@ -3986,6 +4080,82 @@ def _coerce_value_json(v: Any) -> str:
         except (TypeError, ValueError):
             return json.dumps(s)
     return json.dumps(v)
+
+
+def _detect_dim_encoded_columns(col_names: List[str]) -> Optional[str]:
+    """检测列名是否编码了维度值（应建模为三维表的反模式）。
+
+    启发式规则：若 ≥2 组列共享后缀，且每组 ≥2 个不同前缀，
+    则判定为维度编码，建议改用三维表。
+    例：fire_atk, fire_def, ice_atk, ice_def → 2组后缀(atk,def) × 2个前缀(fire,ice) → 触发。
+    """
+    if len(col_names) < 4:
+        return None
+    suffix_groups: Dict[str, List[str]] = {}
+    for name in col_names:
+        if "_" not in name:
+            continue
+        prefix, suffix = name.rsplit("_", 1)
+        if not prefix or not suffix:
+            continue
+        if len(prefix) < 2 or len(suffix) < 2:
+            continue
+        suffix_groups.setdefault(suffix, []).append(prefix)
+    multi = {s: ps for s, ps in suffix_groups.items() if len(ps) >= 2}
+    if len(multi) < 2:
+        return None
+    all_prefixes = sorted(set(p for ps in multi.values() for p in ps))
+    suffixes = sorted(multi.keys())
+    return (
+        f"疑是二维表内编码了维度值——{len(all_prefixes)} 个类别（{', '.join(all_prefixes[:6])}...）"
+        f"× {len(suffixes)} 个属性（{', '.join(suffixes[:6])}...）。"
+        f"你必须认真考虑将本表改为三维表建模：dim1=类别列（{len(all_prefixes)}个维度值），"
+        f"cols={len(suffixes)}个属性列，避免列爆炸和后续分组累计需求。"
+    ) if len(multi) >= 2 else None
+
+
+def _detect_dim_encoded_rows(row_ids: List[str]) -> Optional[str]:
+    """检测 row_id 是否编码了维度值（应建模为三维表的反模式）。
+
+    提取每行**最后一段连续数字**，将其之前和之后的文本合并为分组键。
+    若 ≥2 个数字分组拥有相同的前后缀集合（等量重复），判定触发。
+    例：atk_power_1,atk_power_2, crit_rate_1,crit_rate_2 → 2组×2数字 → 触发。
+    skill_1_atk, skill_1_def, skill_2_atk, skill_2_def → 2组×2数字 → 触发。
+    """
+    if len(row_ids) < 4:
+        return None
+    re_digits = __import__("re").compile(r"\d+")
+    parsed: List[Tuple[str, int, str]] = []
+    for rid in row_ids:
+        s = str(rid)
+        last_end = -1
+        last_match = None
+        for m in re_digits.finditer(s):
+            last_match = m
+        if last_match is None:
+            continue
+        prefix = s[:last_match.start()]
+        num = int(last_match.group())
+        tail = s[last_match.end():]
+        parsed.append((prefix, num, tail))
+    if not parsed:
+        return None
+    # 按数字分组，每组收集 (prefix, tail) 键
+    by_num: Dict[int, List[Tuple[str, str]]] = {}
+    for pfx, n, tail in parsed:
+        by_num.setdefault(n, []).append((pfx, tail))
+    uniform = {n: set(keys) for n, keys in by_num.items() if len(keys) >= 2}
+    if len(uniform) < 2:
+        return None
+    first_keys = sorted(list(uniform.values())[0])
+    for keys in uniform.values():
+        if sorted(keys) != first_keys:
+            return None
+    unique_metrics = len(first_keys)
+    return (
+        f"疑是行ID编码了维度值——{unique_metrics} 个指标类别 × {len(uniform)} 个数值等分。"
+        f"你必须认真考虑将本表改为三维表建模：dim1=指标类型（{unique_metrics}个），dim2=数值列，避免行列结构混合。"
+    )
 
 
 def _count_effective_digits(value: float) -> int:
@@ -4457,7 +4627,7 @@ def _const_list(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any
                 new_cols.append(c)
         result["cols"] = new_cols
         result["rows"] = [[v for i, v in enumerate(row) if i not in drop_indices] for row in result["rows"]]
-        result["hint"] = "本次返回较多，已省略 brief 与 design_intent。可使用 const_detail(names=[...]) 查询指定常量的完整信息。"
+        result["hint"] = "本次返回较多，已省略 brief 与 design_intent。使用 const_detail(names=[...]) 查询详情，或先调用 const_tag_list 了解标签再叠加 tags_filter 精准筛选。"
     elif row_count >= 20:
         new_cols, drop_indices = [], set()
         for i, c in enumerate(cols):
@@ -4467,7 +4637,7 @@ def _const_list(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any
                 new_cols.append(c)
         result["cols"] = new_cols
         result["rows"] = [[v for i, v in enumerate(row) if i not in drop_indices] for row in result["rows"]]
-        result["hint"] = "本次返回较多，已省略 design_intent。可使用 const_detail(names=[...]) 查询指定常量的设计意图。"
+        result["hint"] = "本次返回较多，已省略 design_intent。使用 const_detail(names=[...]) 查询详情，或先调用 const_tag_list 了解标签再叠加 tags_filter 精准筛选。"
 
     return result
 
@@ -4535,15 +4705,50 @@ def _const_tag_register(conn: sqlite3.Connection, args: Dict[str, Any], can_writ
 
 
 def _const_tag_list(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any]:
+    """列出所有常量标签，含层级结构和每个标签下的常量计数。"""
     try:
-        cur = conn.execute("SELECT name, parent, brief FROM _const_tags ORDER BY name")
-        rows_dicts = [dict(r) for r in cur.fetchall()]
-    except Exception:  # noqa: BLE001
-        rows_dicts = []
-    if rows_dicts:
-        cols = list(rows_dicts[0].keys())
-        return {"ok": True, "cols": cols, "rows": [[r[c] for c in cols] for r in rows_dicts], "total": len(rows_dicts)}
-    return {"ok": True, "cols": [], "rows": [], "total": 0}
+        cur = conn.execute("SELECT name, parent, brief FROM _const_tags ORDER BY COALESCE(parent, ''), name")
+        tags = [dict(r) for r in cur.fetchall()]
+        # 统计每个标签下的常量数
+        count_by_tag: Dict[str, int] = {}
+        crows = conn.execute("SELECT tags FROM _constants").fetchall()
+        for r in crows:
+            try:
+                tlist = json.loads(r[0]) if isinstance(r[0], str) and r[0] else []
+            except Exception:
+                tlist = []
+            for t in tlist:
+                count_by_tag[str(t)] = count_by_tag.get(str(t), 0) + 1
+        # 为每个标签附加常量数
+        for t in tags:
+            t["const_count"] = count_by_tag.get(t["name"], 0)
+        # 按 parent 分组：父标签 + 其子标签
+        parent_order: List[Dict[str, Any]] = []
+        child_map: Dict[str, List[Dict[str, Any]]] = {}
+        for t in tags:
+            p = (t.get("parent") or "").strip()
+            if p:
+                child_map.setdefault(p, []).append(t)
+            else:
+                parent_order.append(t)
+        # 构建层级行
+        result_rows: List[List[Any]] = []
+        cols = ["name", "parent", "const_count", "brief"]
+        for parent in parent_order:
+            result_rows.append([parent["name"], "", parent["const_count"], parent.get("brief", "")])
+            for child in child_map.get(parent["name"], []):
+                result_rows.append([f"  └ {child['name']}", parent["name"], child["const_count"], child.get("brief", "")])
+        # 孤立子标签（parent 指向不存在的标签）
+        accounted = {t["name"] for t in parent_order} | {c["name"] for children in child_map.values() for c in children}
+        orphans = [t for t in tags if t["name"] not in accounted]
+        if orphans:
+            if result_rows:
+                result_rows.append(["── 无父标签 ──", "", "", ""])
+            for t in orphans:
+                result_rows.append([t["name"], t.get("parent", ""), t["const_count"], t.get("brief", "")])
+        return {"ok": True, "cols": cols, "rows": result_rows, "total": len(tags)}
+    except Exception:
+        return {"ok": True, "cols": [], "rows": [], "total": 0}
 
 
 # ─── 系列填充：实现 ───────────────────────────────────────────────
@@ -4586,8 +4791,9 @@ def _write_cells_series(
         return {"error": f"单次系列填充上限 2000 行，当前 {n}"}
     value_list = args.get("value_list")
     expr = args.get("expr")
-    if (value_list is None) == (expr is None):
-        return {"error": "value_list 与 expr 必须二选一"}
+    text_template = args.get("text_template")
+    if sum(1 for v in (value_list, expr, text_template) if v is not None) != 1:
+        return {"error": "value_list / expr / text_template 必须三选一"}
     if value_list is not None:
         if not isinstance(value_list, list) or len(value_list) != n:
             return {"error": f"value_list 长度需等于 {n}（end-start+1）"}
@@ -4598,6 +4804,8 @@ def _write_cells_series(
     for offset, idx in enumerate(range(start, end + 1)):
         if value_list is not None:
             v = value_list[offset]
+        elif text_template is not None:
+            v = str(text_template).replace("{i}", str(idx))
         else:
             try:
                 v = _eval_series_expr(str(expr), idx)

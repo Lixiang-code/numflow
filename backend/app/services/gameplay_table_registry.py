@@ -128,6 +128,47 @@ def list_registered_gameplay_tables(
     return items
 
 
+def get_gameplay_table_detail(
+    conn: sqlite3.Connection,
+    table_ids: List[str],
+) -> List[Dict[str, Any]]:
+    """按 table_id 列表查询任务完整详情（含完整 readme）。"""
+    if not table_ids:
+        return []
+    placeholders = ",".join(["?"] * len(table_ids))
+    pending_revisions = _latest_pending_revisions(conn)
+    rows = conn.execute(
+        f"""SELECT table_id, display_name, readme, status, order_num, dependencies, started_at
+        FROM _gameplay_table_registry
+        WHERE table_id IN ({placeholders})
+        ORDER BY order_num, table_id""",
+        table_ids,
+    ).fetchall()
+    items: List[Dict[str, Any]] = []
+    found = set()
+    for row in rows:
+        item: Dict[str, Any] = {
+            "table_id": row[0],
+            "display_name": row[1],
+            "readme": row[2] or "",
+            "status": row[3] or "未开始",
+            "order_num": row[4] or 0,
+            "dependencies": json.loads(row[5] or "[]"),
+        }
+        revision = pending_revisions.get(row[0])
+        if item["status"] == "待修订" and revision:
+            item["revision_reason"] = revision["reason"]
+            item["revision_requested_by"] = revision["requested_by_step"]
+            item["revision_created_at"] = revision["created_at"]
+        items.append(item)
+        found.add(row[0])
+    not_found = [tid for tid in table_ids if tid not in found]
+    if not_found:
+        # 将结果包装在 dict 中以区分返回格式
+        pass  # handled by caller
+    return items
+
+
 def reset_gameplay_table_to_available(
     conn: sqlite3.Connection,
     table_id: str,

@@ -16,6 +16,7 @@ from app.services.formula_engine import (
     parse_constant_refs,
     parse_formula_refs,
     parse_row_refs,
+    preprocess_formula,
     substitute_constants,
 )
 
@@ -168,6 +169,7 @@ def execute_formula_on_column(
         if rt not in frames:
             frames[rt] = load_table_df(conn, rt)
     try:
+        formula = preprocess_formula(formula)
         series = eval_series(formula, frames)
     except Exception as e:  # noqa: BLE001
         raise ValueError(str(e)) from e
@@ -186,14 +188,25 @@ def execute_formula_on_column(
         lv = pd.to_numeric(df[lc], errors="coerce")
         mask = (lv >= float(level_min)) & (lv <= float(level_max))
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    # 检查列类型，TEXT 列不强制 float 转换
+    col_sql_type = "REAL"
+    try:
+        for r in conn.execute(f'PRAGMA table_info("{table_name}")'):
+            if r["name"] == col:
+                col_sql_type = str(r["type"] or "REAL").upper()
+                break
+    except Exception:
+        pass
+    is_text_col = col_sql_type == "TEXT"
     updated = 0
     for i, rid in enumerate(df["row_id"].tolist()):
         if mask is not None and not bool(mask.iloc[i]):
             continue
         val = series.iloc[i]
+        db_val = str(val) if is_text_col else float(val)
         conn.execute(
             f'UPDATE "{table_name}" SET "{col}" = ? WHERE row_id = ?',
-            (float(val), rid),
+            (db_val, rid),
         )
         _upsert_formula_provenance(conn, table_name=table_name, row_id=str(rid), column_name=col, now=now)
         updated += 1
@@ -441,6 +454,15 @@ def execute_row_formula(
         conn.commit()
 
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    col_sql_type = "REAL"
+    try:
+        for r in conn.execute(f'PRAGMA table_info("{table_name}")'):
+            if r["name"] == column_name:
+                col_sql_type = str(r["type"] or "REAL").upper()
+                break
+    except Exception:
+        pass
+    is_text_col = col_sql_type == "TEXT"
     updated = 0
     errors: List[str] = []
 
@@ -451,7 +473,7 @@ def execute_row_formula(
             errors.append(f"行 {row_dict.get('row_id')}: 缺少参数 {missing}")
             continue
         try:
-            val = round(float(val), 6) if val is not None else None
+            val = str(val) if is_text_col else round(float(val), 6) if val is not None else None
         except (TypeError, ValueError):
             pass
         conn.execute(

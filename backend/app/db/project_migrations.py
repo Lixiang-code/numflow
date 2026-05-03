@@ -98,6 +98,10 @@ def ensure_project_migrations(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "_constants", "formula", "TEXT")
     # 第三轮优化：常量设计意图（AI 编写意图/限制说明，与 brief 的概念定义分离）
     _add_column_if_missing(conn, "_constants", "design_intent", "TEXT NOT NULL DEFAULT ''")
+    # AI 工具反馈状态（open/closed）
+    _add_column_if_missing(conn, "_tool_feedback", "status", "TEXT NOT NULL DEFAULT 'open'")
+    # AI 工具反馈处理备注（拒绝/搁置时必填说明）
+    _add_column_if_missing(conn, "_tool_feedback", "resolution_note", "TEXT NOT NULL DEFAULT ''")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS _const_tags (
