@@ -273,7 +273,7 @@ DEFAULT_STEP_PROMPTS: Dict[str, str] = {
         "  立即 `register_gameplay_table(...)` 注册为新任务，设置合理的 order_num 和 dependencies，\n"
         "  然后再继续当前任务。不要用 '先凑合做、以后再说' 的态度跳过。\n\n"
         "【步骤一：选择任务（必须执行）】\n"
-        "  1. `get_gameplay_table_list()` → 获取完整任务池（含每个任务的 status、order_num、dependencies、revision_reason）；\n"
+        "  1. `get_gameplay_table_list()` → 获取任务池摘要（≥10个任务时省略 display_name/readme，用 `get_gameplay_table_detail` 补详情）；\n"
         "  2. 从列表中选择**一个**最合适的任务，选择规则（按优先级）：\n"
         "     a. 优先选 status='未开始'、依赖均已完成（dependencies 中各任务均为 '已完成'）、order_num 最小者；\n"
         "     b. 若无符合条件的「未开始」任务，再考虑 status='待修订'、依赖均已完成的表；\n"

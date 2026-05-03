@@ -76,14 +76,14 @@ def _safe_log(x: float, base: float | None = None) -> float:
 
 
 def _piecewise(*args: Any) -> Any:
-    """piecewise(cond1, val1, cond2, val2, ..., default)
+    """IFS/PIECEWISE(cond1, val1, cond2, val2, ..., default)
     依次取第一个为真的 cond 对应 val；末位为默认值。"""
     if len(args) < 1:
-        raise ValueError("piecewise 至少需要 1 个参数")
+        raise ValueError("IFS/PIECEWISE 至少需要 1 个参数（cond1,val1,...,default）")
     default = args[-1]
     pairs = args[:-1]
     if len(pairs) % 2 != 0:
-        raise ValueError("piecewise 需要 cond/val 配对加默认值，参数个数应为奇数")
+        raise ValueError("IFS/PIECEWISE 需要 cond/val 配对加默认值，参数个数应为奇数（cond1,val1,...,default）")
     for i in range(0, len(pairs), 2):
         if _to_bool(pairs[i]):
             return pairs[i + 1]
@@ -338,6 +338,48 @@ def _cumsum_prev(arr: Any) -> float:
     return float(sum(vals[:i]))
 
 
+def _concat(*args: Any) -> str:
+    """concat(s1, s2, ...)：将所有参数转为字符串后拼接。"""
+    return "".join(str(a) for a in args)
+
+
+def _text(val: Any) -> str:
+    """text(val)：将数值转为字符串文本。"""
+    return str(val)
+
+
+def _num(val: Any) -> float:
+    """num(val)：将字符串转为数值。"""
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        raise ValueError(f"num() 无法将 {val!r} 转为数值") from None
+
+
+def _interp(x: float, *points: Any) -> float:
+    """interp(x, x1, y1, x2, y2, ...)：分段线性插值。
+    定位 x 在点对序列中的区间，线性插值计算 y。
+    超出范围时夹持到首/末点对的 y 值。
+    x1..xn 必须单调递增，否则报错。
+    """
+    if len(points) < 4 or len(points) % 2 != 0:
+        raise ValueError("interp 需要至少 2 组点对（x1,y1,x2,y2）")
+    pairs = [(float(points[i]), float(points[i + 1])) for i in range(0, len(points), 2)]
+    for i in range(1, len(pairs)):
+        if pairs[i][0] < pairs[i - 1][0]:
+            raise ValueError(f"interp 的 x 点必须单调递增，但 x{i}={pairs[i][0]} < x{i-1}={pairs[i-1][0]}")
+    if x <= pairs[0][0]:
+        return pairs[0][1]
+    if x >= pairs[-1][0]:
+        return pairs[-1][1]
+    for i in range(len(pairs) - 1):
+        x1, y1 = pairs[i]
+        x2, y2 = pairs[i + 1]
+        if x1 <= x <= x2:
+            return y1 + (y2 - y1) * (x - x1) / (x2 - x1)
+    return pairs[-1][1]  # 兜底
+
+
 # 函数表（key 全部小写）
 _FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "round": _round,
@@ -385,6 +427,12 @@ _FUNCTIONS: Dict[str, Callable[..., Any]] = {
     # 累计求和（用于副本/养成累计门票/累计消耗等场景）
     "cumsum_to_here": _cumsum_to_here,
     "cumsum_prev": _cumsum_prev,
+    # 字符串操作
+    "concat": _concat,
+    "text": _text,
+    "num": _num,
+    # 插值
+    "interp": _interp,
 }
 
 
@@ -474,6 +522,15 @@ def _eval_ast(node: ast.AST, names: Dict[str, Any]) -> Any:
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
         fname = node.func.id.lower()
         fn = _FUNCTIONS.get(fname)
+        # interp 端点 y 值必须是公式或常量引用，禁止裸数字硬编码
+        if fname == "interp":
+            for i, a in enumerate(node.args):
+                if i >= 2 and i % 2 == 0:  # y 值：args[2], args[4], args[6]...
+                    if isinstance(a, ast.Constant) and isinstance(a.value, (int, float)):
+                        raise ValueError(
+                            f"interp 端点值 {a.value!r} 禁止裸数字，"
+                            f"请改为对常量的引用（先 const_register 再 ${{name}}）或公式表达式"
+                        )
         if fn is None:
             raise ValueError(f"不支持的函数 {node.func.id}")
         args = [_eval_ast(a, names) for a in node.args]
@@ -541,6 +598,7 @@ def substitute_refs(
 
 
 def eval_series(formula: str, frames: Dict[str, pd.DataFrame]) -> pd.Series:
+    formula = preprocess_formula(formula)
     expr, scalar_map, array_map = substitute_refs(formula, frames=frames)
     if not scalar_map and not array_map:
         v = safe_eval_scalar(expr, {})
@@ -607,7 +665,7 @@ def normalize_self_table_refs(formula: str, table_name: str) -> str:
 
 
 def preprocess_formula(formula: str) -> str:
-    """将 Excel 风格运算符（大写 AND/OR/NOT/TRUE/FALSE、^ 幂）转为 Python 兼容写法。"""
+    """将 Excel 风格运算符（大写 AND/OR/NOT/TRUE/FALSE、^ 幂、|| 拼接、=比较）转为 Python 兼容写法。"""
     # ^ 在 Python AST 中是按位异或；公式里几乎都意为"幂"，统一改为 **
     formula = _POW_CARET.sub("**", formula)
     formula = re.sub(r"\bAND\b", "and", formula)
@@ -615,6 +673,12 @@ def preprocess_formula(formula: str) -> str:
     formula = re.sub(r"\bNOT\b", "not", formula)
     formula = re.sub(r"\bTRUE\b", "True", formula)
     formula = re.sub(r"\bFALSE\b", "False", formula)
+    # = 转为 ==（仅转换比较运算符，保留 !=、<=、>=、==）
+    formula = re.sub(r"(?<![!<>=])=(?!=)", "==", formula)
+    # || 字符串拼接 → concat() 函数调用（支持链式如 'a' || 'b' || 'c'）
+    if "||" in formula:
+        parts = [p.strip() for p in formula.split("||")]
+        formula = "concat(" + ", ".join(parts) + ")"
     return formula
 
 

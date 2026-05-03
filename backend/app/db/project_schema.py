@@ -224,6 +224,8 @@ def init_project_db(conn: sqlite3.Connection, *, seed_readme: bool = True) -> No
             description TEXT NOT NULL DEFAULT '',
             tool_names TEXT NOT NULL DEFAULT '[]',
             context TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '打开',
+            resolution_note TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL
         );
         """

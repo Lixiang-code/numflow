@@ -25,8 +25,10 @@ def _is_id_like(col_name: str) -> bool:
 def _is_percent_like(col_name: str, number_format: str = "") -> bool:
     if number_format == "0.00%":
         return True
+    # 显式非百分比格式（如 '#,##0'、'0.00'、'0'）→ 绝不当作百分比
+    if number_format and number_format != "0.00%":
+        return False
     n = col_name.lower()
-    # Damage/multiplier columns can be > 1 — never treat as 0-1 percent
     if any(tok in n for tok in ("_dmg", "dmg_", "multiplier", "_factor", "_coef", "_bonus", "_amp", "_boost", "_power")):
         return False
     return any(tok in n for tok in ("ratio", "rate", "percent", "_pct", "pct_", "share"))
