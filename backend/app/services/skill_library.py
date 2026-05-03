@@ -1005,6 +1005,18 @@ DEFAULT_SKILLS: List[Dict[str, Any]] = [
                 ),
             },
             {
+                "module_key": "project_2_v",
+                "title": "怪物模型验证表",
+                "required": True,
+                "enabled": True,
+                "content": (
+                    "- 必须创建一个怪物模型验证表\n"
+                    "  - 计算同级别怪物标准模型跟玩家标准模型对抗时，双方对彼此达成击杀的标准周期和周期比值\n"
+                    "  - 然后判断两个周期的比值是否符合预期\n"
+                    "    - 若存在疑问，必须思考模型计算是否存在问题，修正计算或者调参，直到比值符合预期"
+                ),
+            },
+            {
                 "module_key": "project_3",
                 "title": "前置与产出表",
                 "required": True,
