@@ -417,6 +417,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "批量写入单元格值；跳过 user_manual 保护单元格。"
                 "适用场景：① 分类/标签/描述等非规律内容（系统名、道具名、备注等）"
                 "② 少量手工配置值（≤30行/次）。"
+                "单次 payload 过长时模型可能截断 JSON，建议控制 updates 总长度，过大就拆批。"
                 "禁止场景：等级序列/规律数值 → 用 setup_level_table；"
                 "整列计算值 → 用 register_formula+execute_formula。"
                 "updates 每项含 row_id、column、value；source_tag 默认 ai_generated。"
@@ -1315,6 +1316,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "从表中均匀采样 N 行，用于在不读取全表的情况下直观检查曲线形态（如减伤曲线、属性膨胀曲线）。"
                 "当 read_table 因结果 >200 行被拒绝时，优先考虑使用本工具。"
                 "按 level 列（或 row_id）升序排列后，等间距抽取 N 行，返回指定列的值（cols+rows 紧凑格式）。"
+                "返回的是请求列的原始单元格值：TEXT 列会返回字符串，数值列才会返回数值。"
                 "典型用途：设计防御 K 值后采样减伤曲线验证，或检查 HP/ATK 膨胀趋势。"
             ),
             "parameters": {
@@ -3420,6 +3422,7 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
             out = {"error": "无写权限"}
         else:
             tag = args.get("source_tag") or "ai_generated"
+            updates = list(args.get("updates") or [])
             if tag not in ("ai_generated", "algorithm_derived", "formula_computed"):
                 out = {
                     "error": f"非法 source_tag: '{tag}'",
@@ -3430,10 +3433,15 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                     out = apply_write_cells(
                         conn,
                         table_name=str(args.get("table_name", "")),
-                        updates=list(args.get("updates") or []),
+                        updates=updates,
                         source_tag=tag,
                     )
-                    rids = [str(u.get("row_id", "")) for u in (args.get("updates") or [])]
+                    updates_json = json.dumps(updates, ensure_ascii=False)
+                    if len(updates_json) > 800:
+                        out.setdefault("warnings", []).append(
+                            "本次 write_cells payload 较长；若后续出现 JSON 解析错误或参数被截断，请拆成更小批次提交。"
+                        )
+                    rids = [str(u.get("row_id", "")) for u in updates]
                     dim_warn = _detect_dim_encoded_rows(rids)
                     if dim_warn and isinstance(out, dict) and out.get("applied"):
                         out["_notice"] = dim_warn
@@ -4170,14 +4178,18 @@ def _count_effective_digits(value: float) -> int:
     v = abs(value)
     if v == 0:
         return 0
-    s = str(v)
     if v < 1:
+        s = str(v)
         if '.' in s:
             _, frac = s.split('.')
             frac = frac.lstrip('0')
             return sum(1 for c in frac if c.isdigit())
         return 0
     else:
+        if float(v).is_integer():
+            s = str(int(v))
+        else:
+            s = str(v)
         cleaned = s.rstrip('0').rstrip('.')
         return sum(1 for c in cleaned if c.isdigit())
 

@@ -155,6 +155,9 @@ def wrap_tool_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
         warns: List[str] = []
         if skipped:
             warns.append(f"已跳过 {len(skipped)} 个受保护单元格（user_manual）")
+        extra_warns = raw.get("warnings") or []
+        if isinstance(extra_warns, list):
+            warns.extend(str(w) for w in extra_warns)
         return _finalize_payload({
             "status": st,
             "data": {"applied": applied, "skipped": skipped},
@@ -192,7 +195,7 @@ def wrap_tool_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     return _finalize_payload({
         "status": "success",
         "data": _strip_timestamps(raw),
-        "warnings": [],
+        "warnings": [str(w) for w in raw.get("warnings", [])] if isinstance(raw.get("warnings"), list) else [],
         "blocked_cells": [],
     })
 

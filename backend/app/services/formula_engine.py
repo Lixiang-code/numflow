@@ -15,6 +15,10 @@ import pandas as pd
 _CURRENT_ROW_INDEX: "contextvars.ContextVar[int]" = contextvars.ContextVar(
     "_current_row_index", default=0
 )
+_CALL_CALCULATOR: "contextvars.ContextVar[Optional[Callable[..., Any]]]" = contextvars.ContextVar(
+    "_call_calculator",
+    default=None,
+)
 
 # 逐行引用：@T[col]（注意先匹配 @@ 再匹配 @，避免混淆）
 _REF = re.compile(
@@ -51,6 +55,7 @@ _ALLOWED_NODES = (
     ast.FloorDiv,
     ast.Pow,
     ast.Mod,
+    ast.BitAnd,
     ast.USub,
     ast.UAdd,
     ast.Not,
@@ -69,6 +74,41 @@ _ALLOWED_NODES = (
 
 def _to_bool(v: Any) -> bool:
     return bool(v)
+
+
+def inject_call_calculator(fn: Optional[Callable[..., Any]]) -> contextvars.Token:
+    return _CALL_CALCULATOR.set(fn)
+
+
+def reset_call_calculator(token: contextvars.Token) -> None:
+    _CALL_CALCULATOR.reset(token)
+
+
+def _is_null_like(v: Any) -> bool:
+    if v is None:
+        return True
+    try:
+        return bool(pd.isna(v))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _array_like(v: Any) -> Optional[List[Any]]:
+    if isinstance(v, (list, pd.Series)):
+        return list(v)
+    return None
+
+
+def _elementwise_mul(a: Any, b: Any) -> Any:
+    av = _array_like(a)
+    bv = _array_like(b)
+    if av is not None and bv is not None:
+        return [x * y for x, y in zip(av, bv)]
+    if av is not None:
+        return [x * b for x in av]
+    if bv is not None:
+        return [a * y for y in bv]
+    return operator.mul(a, b)
 
 
 def _safe_log(x: float, base: float | None = None) -> float:
@@ -128,6 +168,28 @@ def _round(x: float, n: int = 0) -> float:
 
 def _mod(a: float, b: float) -> float:
     return a % b
+
+
+def _coalesce(*args: Any) -> Any:
+    for arg in args:
+        if not _is_null_like(arg):
+            return arg
+    return None
+
+
+def _ifnull(val: Any, default: Any) -> Any:
+    return _coalesce(val, default)
+
+
+def _call_calculator_formula(name: Any, *args: Any) -> Any:
+    fn = _CALL_CALCULATOR.get()
+    if fn is None:
+        raise ValueError("call_calculator 仅在带数据库上下文的公式执行中可用")
+    return fn(name, *args)
+
+
+def _const_value(value: Any) -> Any:
+    return value
 
 
 # ---------- 查找与引用函数 ----------
@@ -343,6 +405,10 @@ def _concat(*args: Any) -> str:
     return "".join(str(a) for a in args)
 
 
+def _bitand_concat(a: Any, b: Any) -> str:
+    return _concat(a, b)
+
+
 def _text(val: Any) -> str:
     """text(val)：将数值转为字符串文本。"""
     return str(val)
@@ -427,6 +493,11 @@ _FUNCTIONS: Dict[str, Callable[..., Any]] = {
     # 累计求和（用于副本/养成累计门票/累计消耗等场景）
     "cumsum_to_here": _cumsum_to_here,
     "cumsum_prev": _cumsum_prev,
+    # null 处理
+    "coalesce": _coalesce,
+    "ifnull": _ifnull,
+    "call_calculator": _call_calculator_formula,
+    "const_value": _const_value,
     # 字符串操作
     "concat": _concat,
     "text": _text,
@@ -474,11 +545,12 @@ def _eval_ast(node: ast.AST, names: Dict[str, Any]) -> Any:
         ops = {
             ast.Add: operator.add,
             ast.Sub: operator.sub,
-            ast.Mult: operator.mul,
+            ast.Mult: _elementwise_mul,
             ast.Div: operator.truediv,
             ast.FloorDiv: operator.floordiv,
             ast.Pow: operator.pow,
             ast.Mod: operator.mod,
+            ast.BitAnd: _bitand_concat,
         }
         fn = ops.get(type(node.op))
         if fn is not None:
@@ -701,20 +773,18 @@ def substitute_constants(formula: str, constants: Dict[str, Any]) -> Tuple[str, 
             missing.append(nm)
             return m.group(0)
         v = constants[nm]
-        # 尝试数值，失败则尝试字符串字面量
         try:
-            return repr(float(v))
+            literal = repr(v) if isinstance(v, str) else repr(float(v))
         except (TypeError, ValueError):
             try:
-                return repr(int(v))
+                literal = repr(int(v))
             except (TypeError, ValueError):
                 try:
-                    if isinstance(v, str):
-                        return repr(v)
-                    return repr(float(v))
-                except (TypeError, ValueError):
+                    literal = repr(v)
+                except Exception:  # noqa: BLE001
                     missing.append(nm)
                     return m.group(0)
+        return f"const_value({literal})"
 
     out = _CONST_REF.sub(_rep, formula)
     return out, missing

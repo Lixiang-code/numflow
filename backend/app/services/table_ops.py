@@ -346,15 +346,23 @@ def create_3d_table(
 
     # 注册公式（有 formula 字段的属性列）
     formula_errors: List[str] = []
-    from app.services.formula_exec import register_row_formula  # lazy import
+    from app.services.formula_exec import execute_formula_on_column, register_row_formula  # lazy import
+    formula_cols: List[str] = []
     for c in cols:
         formula_str = str(c.get("formula") or "").strip()
         if not formula_str:
             continue
         try:
             register_row_formula(conn, t, c["key"], formula_str)
+            formula_cols.append(str(c["key"]))
         except Exception as fe:  # noqa: BLE001
             formula_errors.append(f"{c['key']}: {fe}")
+
+    for col_name in formula_cols:
+        try:
+            execute_formula_on_column(conn, t, col_name)
+        except Exception as fe:  # noqa: BLE001
+            formula_errors.append(f"{col_name}: {fe}")
 
     return {
         "ok": True,
