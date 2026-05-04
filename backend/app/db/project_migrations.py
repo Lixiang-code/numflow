@@ -325,4 +325,143 @@ def ensure_project_migrations(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "_agent_sessions", "completed_phases", "TEXT NOT NULL DEFAULT '[]'")
     _add_column_if_missing(conn, "_agent_sessions", "gather_context_json", "TEXT NOT NULL DEFAULT ''")
 
+    # 性能优化（A1）：高频元数据索引 + 性能日志表 + 业务表 lookup 复合索引
+    _ensure_perf_indexes(conn)
+    _ensure_perf_log_table(conn)
+    try:
+        ensure_calculator_indexes(conn)
+    except Exception:  # noqa: BLE001
+        # 索引补建不应阻断启动；详细错误由调用方按需排查
+        pass
+
     conn.commit()
+
+
+# ───────────────────────── 性能优化：索引与日志 ─────────────────────────
+
+# 高频元数据/系统表索引：仅在缺失时创建。
+_PERF_META_INDEXES: tuple = (
+    ("idx_dep_graph_to", "_dependency_graph", "(to_table, to_column)"),
+    ("idx_dep_graph_from", "_dependency_graph", "(from_table, from_column)"),
+    ("idx_formula_registry_tc", "_formula_registry", "(table_name, column_name)"),
+    ("idx_cell_provenance_tc", "_cell_provenance", "(table_name, column_name)"),
+    ("idx_calculators_table", "_calculators", "(table_name)"),
+    ("idx_constants_name", "_constants", "(name_en)"),
+)
+
+
+def _ensure_perf_indexes(conn) -> None:
+    for idx_name, table, cols in _PERF_META_INDEXES:
+        try:
+            conn.execute(
+                f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON "{table}" {cols}'
+            )
+        except Exception:  # noqa: BLE001
+            # 任一目标表缺失时跳过（旧库迁移容错）
+            continue
+
+
+def _ensure_perf_log_table(conn) -> None:
+    """性能计时日志表：记录关键计算入口耗时。"""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS _perf_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            op TEXT NOT NULL,
+            table_name TEXT NOT NULL DEFAULT '',
+            column_name TEXT NOT NULL DEFAULT '',
+            n_rows INTEGER NOT NULL DEFAULT 0,
+            elapsed_ms REAL NOT NULL DEFAULT 0,
+            extra_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    try:
+        conn.execute(
+            'CREATE INDEX IF NOT EXISTS "idx_perf_log_op_time" ON "_perf_log" (op, created_at)'
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def ensure_calculator_indexes(conn) -> int:
+    """根据 _calculators.axes_json 给业务表自动建复合索引。
+
+    每个 calculator 至少建一个索引：(axis.source..., level[, grain])。
+    索引名采用 idx_calc__<short_hash> 防止超长。
+    """
+    import hashlib
+    import json as _json
+
+    cur = conn.execute("SELECT name, table_name, axes_json FROM _calculators")
+    rows = cur.fetchall()
+    created = 0
+    for r in rows:
+        name = r[0] if not isinstance(r, dict) else r["name"]
+        table_name = r[1] if not isinstance(r, dict) else r["table_name"]
+        axes_json = r[2] if not isinstance(r, dict) else r["axes_json"]
+        if not table_name:
+            continue
+        try:
+            axes = _json.loads(axes_json or "[]")
+        except Exception:  # noqa: BLE001
+            continue
+        # 检查目标表存在且非视图
+        try:
+            exist = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+                (table_name,),
+            ).fetchone()
+        except Exception:  # noqa: BLE001
+            exist = None
+        if not exist:
+            continue
+        try:
+            cols_in_table = {row[1] for row in conn.execute(f'PRAGMA table_info("{table_name}")')}
+        except Exception:  # noqa: BLE001
+            continue
+        # 收集 source 列；level/grain 末尾追加
+        sources: list = []
+        level_col = ""
+        grain_col = ""
+        for a in axes:
+            if not isinstance(a, dict):
+                continue
+            nm = str(a.get("name") or "").strip()
+            src = str(a.get("source") or "").strip()
+            if nm == "level":
+                if src and src in cols_in_table:
+                    level_col = src
+                elif "level" in cols_in_table:
+                    level_col = "level"
+                continue
+            if nm == "grain":
+                if src and src in cols_in_table:
+                    grain_col = src
+                elif "grain" in cols_in_table:
+                    grain_col = "grain"
+                continue
+            if not src or src not in cols_in_table:
+                continue
+            if src not in sources:
+                sources.append(src)
+        order: list = list(sources)
+        if level_col and level_col not in order:
+            order.append(level_col)
+        if grain_col and grain_col not in order:
+            order.append(grain_col)
+        if not order:
+            continue
+        sig = f"{table_name}|{','.join(order)}"
+        short = hashlib.sha1(sig.encode("utf-8")).hexdigest()[:10]
+        idx_name = f"idx_calc__{short}"
+        col_sql = ", ".join(f'"{c}"' for c in order)
+        try:
+            conn.execute(
+                f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON "{table_name}" ({col_sql})'
+            )
+            created += 1
+        except Exception:  # noqa: BLE001
+            continue
+    return created

@@ -62,6 +62,13 @@ def register_calculator(
          value_column, brief.strip(), now, now),
     )
     conn.commit()
+    # 自动给业务表补复合索引（基于本次注册的 axes）。失败不影响注册结果。
+    try:
+        from app.db.project_migrations import ensure_calculator_indexes
+        ensure_calculator_indexes(conn)
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        pass
     return {"ok": True, "name": name, "axes": payload_axes}
 
 
@@ -83,34 +90,62 @@ def list_calculators(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     return out
 
 
-def call_calculator(
-    conn: sqlite3.Connection,
-    *,
-    name: str,
-    kwargs: Dict[str, Any],
-) -> Dict[str, Any]:
+def get_calculator_meta(conn: sqlite3.Connection, name: str) -> Optional[Dict[str, Any]]:
     cur = conn.execute(
         "SELECT kind, table_name, axes_json, value_column FROM _calculators WHERE name = ?",
         (name,),
     )
     r = cur.fetchone()
     if not r:
-        return {"ok": False, "error": f"未知 calculator {name!r}"}
+        return None
     kind, table_name, axes_json, value_column = r
     axes = json.loads(axes_json or "[]")
 
-    # 查出 matrix 的 scale_mode（若是 matrix 表）
     scale_mode = "static"
     mm: Dict[str, Any] = {}
     try:
         mm_row = conn.execute(
-            "SELECT matrix_meta_json FROM _table_registry WHERE table_name = ?", (table_name,)
+            "SELECT matrix_meta_json FROM _table_registry WHERE table_name = ?",
+            (table_name,),
         ).fetchone()
         if mm_row and mm_row[0]:
             mm = json.loads(mm_row[0])
             scale_mode = mm.get("scale_mode") or "static"
     except Exception:  # noqa: BLE001
         pass
+
+    return {
+        "name": name,
+        "kind": kind,
+        "table_name": table_name,
+        "axes": axes,
+        "value_column": value_column,
+        "matrix_meta": mm,
+        "scale_mode": scale_mode,
+    }
+
+
+def call_calculator(
+    conn: sqlite3.Connection,
+    *,
+    name: str,
+    kwargs: Dict[str, Any],
+    meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    meta_info = dict(meta or {})
+    if not meta_info:
+        loaded = get_calculator_meta(conn, name)
+        if loaded is None:
+            return {"ok": False, "error": f"未知 calculator {name!r}"}
+        meta_info = loaded
+    if not meta_info:
+        return {"ok": False, "error": f"未知 calculator {name!r}"}
+    kind = meta_info["kind"]
+    table_name = meta_info["table_name"]
+    axes = list(meta_info.get("axes") or [])
+    value_column = meta_info["value_column"]
+    scale_mode = str(meta_info.get("scale_mode") or "static")
+    mm = dict(meta_info.get("matrix_meta") or {})
 
     where: List[str] = []
     params: List[Any] = []

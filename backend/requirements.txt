@@ -4,3 +4,7 @@ openai>=1.40.0,<2
 python-dotenv>=1.0.0,<2
 bcrypt>=4.0.0,<5
 pandas>=2.0.0,<3
+
+# 性能优化（B 阶段）可选依赖：仅在启用 perf.use_duckdb_compute = true 时才需要安装。
+# 未安装时 DuckDB 路径会自动 fallback 到 Pandas，业务无影响。
+# duckdb>=0.10
