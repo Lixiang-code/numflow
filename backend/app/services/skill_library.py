@@ -827,7 +827,7 @@ DEFAULT_SKILLS: List[Dict[str, Any]] = [
         "title": "玩法属性分配",
         "step_id": "gameplay_allocation",
         "summary": "应该如何设计玩法属性分配",
-        "description": "在需要对玩法属性分配时使用",
+        "description": "在需要对玩法属性分配时或玩法需要了解自己被分到什么属性时使用",
         "default_exposed": False,
         "modules": [
             {
@@ -874,6 +874,18 @@ DEFAULT_SKILLS: List[Dict[str, Any]] = [
                 "content": (
                     "- 若你在玩法落地过程中，发现自己的玩法设计有改变或者属性分配有遗漏，必须先修改玩法属性分配\n"
                     "- 玩法的属性来源必须是数值框架与属性分配表共同计算得来，不允许私自创建脱离框架的分配方法"
+                ),
+            },
+            {
+                "module_key": "project_4",
+                "title": "分配后置要求",
+                "required": True,
+                "enabled": True,
+                "content": (
+                    "- 在玩法属性分配完成后，检查本玩法创建的所有落地表\n"
+                    "- 在每个落地表的 README 中增加以下描述\n"
+                    "  - 声明：\"本玩法已完成了属性投放量的预分配\"\n"
+                    "  - 然后附上属性分配表和属性总表的表格名称，方便制作者在制作时随时查询引用"
                 ),
             },
         ],
