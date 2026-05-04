@@ -12,10 +12,11 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from app.deps import ProjectDB
 from app.db.project_migrations import ensure_project_migrations
 from app.db.project_schema import init_project_db
+from app.routers.meta import PatchConstantBody, patch_constant
 from app.services.agent_tools import _const_register, dispatch_tool
 from app.services.calculator_ops import register_calculator
 from app.services.formula_engine import eval_row_formula, safe_eval_scalar
-from app.services.formula_exec import register_formula
+from app.services.formula_exec import register_formula, register_row_formula
 from app.services.table_ops import create_3d_table, create_dynamic_table, read_3d_table
 
 
@@ -54,6 +55,32 @@ def test_row_formula_supports_ampersand_string_concat():
     )
     assert missing == set()
     assert value == "stage_1_elite"
+
+
+def test_register_row_formula_normalizes_same_table_explicit_refs_to_same_row_refs():
+    conn = _new_conn()
+    create_dynamic_table(
+        conn,
+        table_name="row_ref_target",
+        display_name="同行引用目标表",
+        columns=[("base_value", "REAL"), ("derived_value", "REAL")],
+    )
+    conn.execute(
+        'INSERT INTO "row_ref_target" (row_id, "base_value", "derived_value") VALUES (?, ?, ?)',
+        ("r1", 2.0, 0.0),
+    )
+    conn.commit()
+
+    result = register_row_formula(conn, "row_ref_target", "derived_value", "@row_ref_target[base_value] + 1")
+
+    assert result["ok"] is True
+    assert result["formula_type"] == "row"
+    stored = conn.execute(
+        "SELECT formula FROM _formula_registry WHERE table_name = ? AND column_name = ?",
+        ("row_ref_target", "derived_value"),
+    ).fetchone()[0]
+    assert stored == "@base_value + 1"
+    assert conn.execute('SELECT "derived_value" FROM "row_ref_target" WHERE row_id = ?', ("r1",)).fetchone()[0] == 3.0
 
 
 def test_const_register_does_not_warn_for_round_integer_values():
@@ -302,3 +329,36 @@ def test_write_cells_returns_large_payload_warning():
     )
     assert result["status"] == "success"
     assert any("payload 较长" in warning for warning in result.get("warnings", []))
+
+
+def test_patch_constant_surfaces_recalc_warning(monkeypatch):
+    conn = _new_conn()
+    _const_register(
+        conn,
+        {"name_en": "growth_base", "name_zh": "成长基数", "value": 2, "brief": "成长基数", "tags": ["combat"]},
+        True,
+    )
+    create_dynamic_table(
+        conn,
+        table_name="const_warning_target",
+        display_name="常量预警目标表",
+        columns=[("input", "REAL"), ("output", "REAL")],
+    )
+    conn.execute(
+        'INSERT INTO "const_warning_target" (row_id, "input", "output") VALUES (?, ?, ?)',
+        ("r1", 1.0, 0.0),
+    )
+    conn.commit()
+    register_formula(conn, "const_warning_target", "output", "@const_warning_target[input] + ${growth_base}", defer=True)
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("recalc failed")
+
+    monkeypatch.setattr("app.services.formula_exec.recalculate_downstream_dag", _boom)
+
+    result = patch_constant("growth_base", PatchConstantBody(value=3), _project_db(conn))
+
+    assert result["ok"] is True
+    assert result["value"] == 3
+    assert "warning" in result
+    assert "recalc failed" in result["warning"]

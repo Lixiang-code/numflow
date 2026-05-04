@@ -353,8 +353,9 @@ def create_3d_table(
         if not formula_str:
             continue
         try:
-            register_row_formula(conn, t, c["key"], formula_str)
-            formula_cols.append(str(c["key"]))
+            reg_result = register_row_formula(conn, t, c["key"], formula_str)
+            if reg_result.get("formula_type") != "row":
+                formula_cols.append(str(c["key"]))
         except Exception as fe:  # noqa: BLE001
             formula_errors.append(f"{c['key']}: {fe}")
 

@@ -16,6 +16,7 @@ from app.services.formula_engine import (
     eval_row_formula,
     eval_series,
     inject_call_calculator,
+    normalize_self_row_refs,
     normalize_self_table_refs,
     parse_constant_refs,
     parse_formula_refs,
@@ -684,6 +685,8 @@ def _execute_node(conn: sqlite3.Connection, table: str, column: str) -> None:
 def recalculate_downstream_dag(
     conn: sqlite3.Connection,
     seeds: Sequence[Tuple[str, str]],
+    *,
+    execute_seeds: bool = False,
 ) -> Dict[str, Any]:
     """DAG 批量重算：
 
@@ -723,11 +726,12 @@ def recalculate_downstream_dag(
             affected.add(node)
             queue.append(node)
 
-    if not affected and not seed_set:
-        return {"executed": [], "errors": [], "skipped": []}
+    nodes = set(affected)
+    if execute_seeds:
+        nodes |= seed_set
 
-    # 将 seeds 加入执行节点集合
-    nodes = set(affected) | seed_set
+    if not nodes:
+        return {"executed": [], "errors": [], "skipped": []}
     indeg: Dict[Node, int] = {n: 0 for n in nodes}
     forward: Dict[Node, List[Node]] = defaultdict(list)
     deps: Dict[Node, Set[Node]] = defaultdict(set)
@@ -781,6 +785,7 @@ def recalculate_downstream_dag(
         op="recalculate_downstream_dag",
         extra={
             "seeds": [f"{t}.{c}" for t, c in sorted(seed_set)],
+            "execute_seeds": execute_seeds,
             "n_affected": len(nodes),
             "cycle_skipped": len(skipped_cycle),
         },
@@ -836,7 +841,7 @@ def register_row_formula(
     if not cur.fetchone():
         raise ValueError(f"表 {table_name} 不存在")
     raw_formula = _rewrite_3d_dim_aliases(conn, table_name, raw_formula)
-    raw_formula = normalize_self_table_refs(raw_formula, table_name)
+    raw_formula = normalize_self_row_refs(raw_formula, table_name)
 
     use_min_cols = perf_flag(conn, "use_min_column_load")
     use_batch_write = perf_flag(conn, "use_batch_writeback")
@@ -857,7 +862,7 @@ def register_row_formula(
         available_cols = set(df.columns) - {"row_id"}
         refs = parse_row_refs(raw_formula)
     external_refs = refs - available_cols
-    cross_refs = {(t, c) for t, c in parse_formula_refs(raw_formula) if t != table_name}
+    structured_refs = parse_formula_refs(raw_formula)
     internal_refs: Set[Tuple[str, str]] = {
         (table_name, ref)
         for ref in refs
@@ -869,7 +874,7 @@ def register_row_formula(
     if const_names and not missing_consts:
         formula_for_compute, missing_after_substitute = substitute_constants(raw_formula, constants)
         missing_consts = list(set(missing_consts) | set(missing_after_substitute))
-    is_computable = len(external_refs) == 0 and len(missing_consts) == 0 and len(cross_refs) == 0
+    is_computable = len(external_refs) == 0 and len(missing_consts) == 0 and len(structured_refs) == 0
     formula_type = "row" if is_computable else "row_template"
     assert_formula_dependency_acyclic(conn, table_name, column_name, internal_refs)
 
@@ -937,6 +942,10 @@ def register_row_formula(
         conn.commit()
     else:
         warnings = [f"外部参数 {r} 不在表内（运行时模板，需外部系统计算）" for r in sorted(external_refs)]
+        warnings.extend(
+            f"仅支持同行引用 @col，检测到显式/整列引用：{t}.{c}"
+            for t, c in sorted(structured_refs)
+        )
         warnings.extend(f"公式引用未注册常量：{r}" for r in sorted(set(missing_consts)))
         conn.commit()
 
@@ -967,7 +976,7 @@ def execute_row_formula(
     raw_formula = row[0]
     formula_type = row[1] if row[1] else "sql"
     raw_formula = _rewrite_3d_dim_aliases(conn, table_name, raw_formula)
-    raw_formula = normalize_self_table_refs(raw_formula, table_name)
+    raw_formula = normalize_self_row_refs(raw_formula, table_name)
 
     if formula_type == "sql":
         return execute_formula_on_column(conn, table_name, column_name)
@@ -990,7 +999,7 @@ def execute_row_formula(
         available_cols = set(df.columns) - {"row_id"}
         refs = parse_row_refs(raw_formula)
     external_refs = refs - available_cols
-    cross_refs = {(t, c) for t, c in parse_formula_refs(raw_formula) if t != table_name}
+    structured_refs = parse_formula_refs(raw_formula)
     const_names = parse_constant_refs(raw_formula)
     constants, missing_consts = _load_constants(conn, const_names)
     formula_for_compute = raw_formula
@@ -998,7 +1007,7 @@ def execute_row_formula(
         formula_for_compute, missing_after_substitute = substitute_constants(raw_formula, constants)
         missing_consts = list(set(missing_consts) | set(missing_after_substitute))
 
-    if external_refs or missing_consts or cross_refs:
+    if external_refs or missing_consts or structured_refs:
         conn.execute(
             """
             UPDATE _formula_registry
@@ -1011,8 +1020,11 @@ def execute_row_formula(
         errors: List[str] = []
         if external_refs:
             errors.extend(f"缺少同行列引用：{r}" for r in sorted(external_refs))
-        if cross_refs:
-            errors.extend(f"交叉表引用：{t}.{c}" for t, c in sorted(cross_refs))
+        if structured_refs:
+            errors.extend(
+                f"仅支持同行引用 @col，检测到显式/整列引用：{t}.{c}"
+                for t, c in sorted(structured_refs)
+            )
         if missing_consts:
             errors.extend(f"缺少常量：{r}" for r in sorted(set(missing_consts)))
         return {"ok": False, "rows_updated": 0, "rows_total": len(df), "errors": errors}

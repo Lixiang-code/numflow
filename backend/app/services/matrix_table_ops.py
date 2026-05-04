@@ -64,22 +64,31 @@ def _load_matrix_formulas(
 def _classify_matrix_formula(
     conn: sqlite3.Connection,
     *,
+    table_name: str,
     row_axis: str,
     col_axis: str,
     raw_formula: str,
 ) -> str:
-    from app.services.formula_engine import parse_constant_refs, parse_row_refs, substitute_constants
+    from app.services.formula_engine import (
+        normalize_self_row_refs,
+        parse_constant_refs,
+        parse_formula_refs,
+        parse_row_refs,
+        substitute_constants,
+    )
     from app.services.formula_exec import _load_constants
 
+    raw_formula = normalize_self_row_refs(raw_formula, table_name)
     refs = parse_row_refs(raw_formula)
     allowed_refs = {"level", row_axis, col_axis}
     external_refs = refs - allowed_refs
+    structured_refs = parse_formula_refs(raw_formula)
     const_names = parse_constant_refs(raw_formula)
     constants, missing_consts = _load_constants(conn, const_names)
     if const_names and not missing_consts:
         _, missing_after_substitute = substitute_constants(raw_formula, constants)
         missing_consts = list(set(missing_consts) | set(missing_after_substitute))
-    return "row" if not external_refs and not missing_consts else "row_template"
+    return "row" if not external_refs and not missing_consts and not structured_refs else "row_template"
 
 
 def _upsert_matrix_formula(
@@ -95,6 +104,7 @@ def _upsert_matrix_formula(
     ensure_matrix_formula_registry(conn)
     formula_type = _classify_matrix_formula(
         conn,
+        table_name=table_name,
         row_axis=row_axis,
         col_axis=col_axis,
         raw_formula=formula,
@@ -172,15 +182,31 @@ def evaluate_matrix_formula_value(
     level: Optional[int],
     extra_env: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    from app.services.formula_engine import eval_row_formula, parse_constant_refs, substitute_constants
+    from app.services.formula_engine import (
+        eval_row_formula,
+        normalize_self_row_refs,
+        parse_constant_refs,
+        parse_formula_refs,
+        substitute_constants,
+    )
     from app.services.formula_exec import _load_constants
 
     formula_entry = _load_matrix_formulas(conn, table_name=table_name).get((row_key, col_key))
     if not formula_entry:
         return {"ok": False, "found": False}
 
-    formula = formula_entry["formula"]
+    formula = normalize_self_row_refs(formula_entry["formula"], table_name)
     formula_type = formula_entry["type"]
+    structured_refs = parse_formula_refs(formula)
+    if structured_refs:
+        return {
+            "ok": False,
+            "found": True,
+            "formula": formula_entry["formula"],
+            "type": "row_template",
+            "error": "仅支持同行引用 @col，检测到显式/整列引用："
+            + ", ".join(f"{t}.{c}" for t, c in sorted(structured_refs)),
+        }
     const_names = parse_constant_refs(formula)
     constants, missing_consts = _load_constants(conn, const_names)
     compiled = formula

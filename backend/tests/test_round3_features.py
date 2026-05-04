@@ -305,6 +305,38 @@ def test_matrix_resource_formula_third_axis_accepts_runtime_params():
     assert res["value"] == 6.0
 
 
+def test_matrix_resource_formula_accepts_same_table_explicit_refs():
+    conn = _new_conn()
+    create_matrix_table(
+        conn,
+        table_name="res_formula_self_ref",
+        display_name="资源显式同行引用表",
+        kind="matrix_resource",
+        rows=[{"key": "equip_base", "display_name": "装备·基础", "brief": ""}],
+        cols=[{"key": "gold", "display_name": "金币", "brief": ""}],
+        directory="分配/资源",
+        scale_mode="fallback",
+        register_calc=True,
+    )
+    write_matrix_cells(
+        conn,
+        table_name="res_formula_self_ref",
+        cells=[{
+            "row": "equip_base",
+            "col": "gold",
+            "formula": "@res_formula_self_ref[level] * @vip_mult",
+        }],
+    )
+    res = call_calculator(
+        conn,
+        name="res_formula_self_ref_lookup",
+        kwargs={"gameplay": "equip_base", "res_id": "gold", "level": 3, "vip_mult": 2},
+    )
+    assert res["found"] is True
+    assert res["formula_type"] == "row_template"
+    assert res["value"] == 6.0
+
+
 def test_matrix_resource_allows_single_literal_slice():
     conn = _new_conn()
     create_matrix_table(

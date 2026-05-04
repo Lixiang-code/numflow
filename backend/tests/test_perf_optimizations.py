@@ -27,6 +27,7 @@ from app.services.formula_exec import (
     register_row_formula,
 )
 from app.services.perf_flags import perf_flag, perf_status
+from app.services.recalc_lock import try_acquire_recalc_lock
 
 
 def _new_conn() -> sqlite3.Connection:
@@ -272,6 +273,31 @@ def test_a5_row_formula_participates_in_dag():
     executed = {(r["table"], r["column"]) for r in out["executed"]}
     assert executed == {("T", "y")}
     assert conn.execute("SELECT y FROM T WHERE row_id='r1'").fetchone()[0] == 3.0
+
+
+def test_a5_dag_can_execute_seed_formulas_when_requested():
+    conn = _new_conn()
+    _make_table(conn, "A", "x")
+    _make_table(conn, "B", "y")
+    _insert_rows(conn, "A", [{"row_id": "r1", "x": 0.0}])
+    _insert_rows(conn, "B", [{"row_id": "r1", "y": 0.0}])
+    register_formula(conn, "A", "x", "const_value(5)", defer=True)
+    register_formula(conn, "B", "y", "@A[x] + 1", defer=True)
+
+    out = recalculate_downstream_dag(conn, [("A", "x")], execute_seeds=True)
+
+    executed = [(r["table"], r["column"]) for r in out["executed"]]
+    assert executed == [("A", "x"), ("B", "y")]
+    assert conn.execute("SELECT x FROM A WHERE row_id='r1'").fetchone()[0] == 5.0
+    assert conn.execute("SELECT y FROM B WHERE row_id='r1'").fetchone()[0] == 6.0
+
+
+def test_a5_recalc_lock_is_single_statement_and_respects_cooldown():
+    conn = _new_conn()
+
+    assert try_acquire_recalc_lock(conn, table_name="T", now_ms=10_000) is True
+    assert try_acquire_recalc_lock(conn, table_name="T", now_ms=12_999) is False
+    assert try_acquire_recalc_lock(conn, table_name="T", now_ms=13_000) is True
 
 
 # ───────────────────── B1: DuckDB 路径 ─────────────────────

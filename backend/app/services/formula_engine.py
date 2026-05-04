@@ -740,6 +740,23 @@ def normalize_self_table_refs(formula: str, table_name: str) -> str:
     return formula
 
 
+def normalize_self_row_refs(formula: str, table_name: str) -> str:
+    """将同表显式引用改写为 row 公式可识别的裸 `@col` 形式。
+
+    row 公式执行器只理解同行引用 `@col`，不理解 `@table[col]` / `@this[col]`。
+    这里仅把“同表”的单值引用折叠成裸引用；`@@table[col]` 这类整列引用保留原样，
+    由上层将其判定为 row_template / 非自动执行路径。
+    """
+    if not table_name:
+        return formula
+    table_pat = re.escape(table_name)
+    return re.sub(
+        rf"(?<!@)@(?:T|this|{table_pat})\[([\u4e00-\u9fffA-Za-z_][\u4e00-\u9fffA-Za-z0-9_]*)\]",
+        lambda m: f"@{m.group(1)}",
+        formula,
+    )
+
+
 def preprocess_formula(formula: str) -> str:
     """将 Excel 风格运算符（大写 AND/OR/NOT/TRUE/FALSE、^ 幂、|| 拼接、=比较）转为 Python 兼容写法。"""
     # ^ 在 Python AST 中是按位异或；公式里几乎都意为"幂"，统一改为 **
@@ -840,7 +857,7 @@ def eval_row_formula(
     """对单行求值同行列公式（@col_name 语法）。
     返回 (值, 外部参数集合)。若外部参数集合非空，表示公式无法自动计算（运行时模板）。
 
-    可传入 precompiled=(tree, ref_to_key, base_expr, name_map_template) 跳过逐行 ast.parse。
+    可传入 precompiled=(tree, ref_to_key, base_expr) 跳过逐行 ast.parse。
     """
     refs = set(_SAME_ROW_REF.findall(formula))
     external_refs = {r for r in refs if r not in available_cols}
@@ -848,7 +865,7 @@ def eval_row_formula(
         return None, external_refs
 
     if precompiled is not None and precompiled[0] is not None:
-        tree, ref_to_key, base_expr, name_map_template = precompiled
+        tree, ref_to_key, _base_expr = precompiled
         name_map: Dict[str, Any] = {}
         for ref, key in ref_to_key.items():
             val = row_dict.get(ref)

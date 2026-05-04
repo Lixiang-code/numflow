@@ -13,6 +13,7 @@ from app.data.default_rules_02 import get_default_rules_payload
 from app.deps import ProjectDB, get_project_read, get_project_write
 from app.services.snapshot_ops import compare_snapshot, create_snapshot, list_snapshots
 from app.services.matrix_table_ops import read_matrix as _read_matrix, list_matrix_tables as _list_matrix_tables
+from app.services.recalc_lock import set_recalc_lock
 from app.services.table_ops import read_3d_table as _read_3d_table
 
 router = APIRouter(prefix="/meta", tags=["meta"])
@@ -167,6 +168,8 @@ def patch_constant(
     _cascade_update_formula_consts(conn)
 
     # 常量值变更后自动触发 DAG 重算
+    recalc_result: Optional[Dict[str, Any]] = None
+    recalc_warning: Optional[str] = None
     try:
         from app.services.formula_engine import parse_constant_refs
         from app.services.formula_exec import recalculate_downstream_dag
@@ -177,21 +180,22 @@ def patch_constant(
             if name_en in parse_constant_refs(r[2]):
                 seeds.append((r[0], r[1]))
         if seeds:
-            recalculate_downstream_dag(conn, seeds)
-            conn.commit()
+            recalc_result = recalculate_downstream_dag(conn, seeds, execute_seeds=True)
             # 对涉及的每个表设置 3 秒去重锁，避免前端重复请求
             now_ms = int(time.time() * 1000)
             for tbl in sorted({s[0] for s in seeds}):
-                conn.execute(
-                    "INSERT INTO project_settings (key, value_json, updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at",
-                    (f"_recalc_lock:{tbl}", json.dumps(now_ms), time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())),
-                )
+                set_recalc_lock(conn, table_name=tbl, now_ms=now_ms, commit=False)
             conn.commit()
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        recalc_warning = f"常量已更新，但自动重算失败：{exc}"
 
     result_value = json.loads(value_json)
-    return {"ok": True, "name_en": name_en, "value": result_value, "formula": body.formula if formula_given else None}
+    out = {"ok": True, "name_en": name_en, "value": result_value, "formula": body.formula if formula_given else None}
+    if recalc_result is not None:
+        out["recalculate"] = recalc_result
+    if recalc_warning is not None:
+        out["warning"] = recalc_warning
+    return out
 
 
 @router.get("/tables")

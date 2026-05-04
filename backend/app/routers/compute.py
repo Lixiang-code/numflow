@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import time
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from app.deps import ProjectDB, get_project_read, get_project_write
 from app.services import algorithms
+from app.services.recalc_lock import try_acquire_recalc_lock
 from app.services.formula_exec import (
     delete_column_formula as delete_column_formula_svc,
     execute_formula_on_column,
@@ -99,22 +98,8 @@ def recalculate_downstream(
 ):
     from app.services.formula_exec import recalculate_downstream_dag
 
-    lock_key = f"_recalc_lock:{table_name}"
-    try:
-        last_ms = int(json.loads(
-            p.conn.execute("SELECT value_json FROM project_settings WHERE key=?", (lock_key,)).fetchone()[0]
-        ) or "0")
-    except Exception:
-        last_ms = 0
-    now_ms = int(time.time() * 1000)
-    if now_ms - last_ms < 3000:
+    if not try_acquire_recalc_lock(p.conn, table_name=table_name):
         return {"executed": [], "skipped": [], "message": f"该表 3 秒内已有重算，跳过重复请求"}
-
-    p.conn.execute(
-        "INSERT INTO project_settings (key, value_json, updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at",
-        (lock_key, json.dumps(now_ms), time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())),
-    )
-    p.conn.commit()
 
     return recalculate_downstream_dag(p.conn, [(table_name, column_name)])
 
@@ -181,18 +166,6 @@ def recalculate_table_row_formulas(
     p: ProjectDB = Depends(get_project_write),
 ):
     """重新计算指定表所有 row 类型公式列。"""
-    lock_key = f"_recalc_lock:{table_name}"
-    try:
-        last_ms = int(json.loads(
-            p.conn.execute("SELECT value_json FROM project_settings WHERE key=?", (lock_key,)).fetchone()[0]
-        ) or "0")
-    except Exception:
-        last_ms = 0
-    if int(time.time() * 1000) - last_ms < 3000:
+    if not try_acquire_recalc_lock(p.conn, table_name=table_name):
         return {"recalculated": [], "errors": [], "message": f"该表 3 秒内已有重算，跳过"}
-    p.conn.execute(
-        "INSERT INTO project_settings (key, value_json, updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at",
-        (lock_key, json.dumps(int(time.time() * 1000)), time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())),
-    )
-    p.conn.commit()
     return recalc_row_svc(p.conn, table_name)
