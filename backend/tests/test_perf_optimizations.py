@@ -343,7 +343,7 @@ def test_b1_whitelist_check_rejects_cross_table():
 
 
 def test_b1_whitelist_accepts_simple_arithmetic():
-    used, sql = duckdb_compute._check_whitelist(
+    used, sql, aref = duckdb_compute._check_whitelist(
         "@t[a] + @t[b] * 2 - 1", "t", {"row_id", "a", "b"}
     )
     assert used == {"a", "b"}
