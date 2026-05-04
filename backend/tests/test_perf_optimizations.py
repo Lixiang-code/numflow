@@ -350,6 +350,125 @@ def test_b1_whitelist_accepts_simple_arithmetic():
     assert "\"a\"" in sql and "\"b\"" in sql
 
 
+def test_b2_whitelist_translates_index_match_if_and_minmax():
+    used, sql, aref = duckdb_compute._check_whitelist(
+        "IF(@t[k] > 1, MIN(10, INDEX(@@src[value], MATCH(@t[k], @@src[key], 0))), MAX(0, 1))",
+        "t",
+        {"row_id", "k", "out"},
+    )
+    assert used == {"k"}
+    assert aref == {("src", "value"): 0, ("src", "key"): 1}
+    assert "CASE WHEN" in sql
+    assert "LEAST(" in sql
+    assert "GREATEST(" in sql
+    assert "list_position(__a1, \"k\")" in sql
+    assert "list_element(__a0, CAST(list_position(__a1, \"k\") AS BIGINT))" in sql
+
+
+def test_b2_whitelist_rejects_unclosed_if_quote():
+    conn = _new_conn()
+    _make_table(conn, "t", "a", "out")
+    _insert_rows(conn, "t", [{"row_id": "r1", "a": 1.0, "out": 0.0}])
+    try:
+        duckdb_compute._check_whitelist(
+            "IF(@t[a] > 0, 'oops, 1)",
+            "t",
+            {"row_id", "a", "out"},
+        )
+    except duckdb_compute.NotSupported as exc:
+        assert "引号未闭合" in str(exc)
+        return
+    raise AssertionError("应拒绝未闭合引号")
+
+
+def test_b2_execute_formula_supports_index_match_via_duckdb():
+    conn = _new_conn()
+    _make_table(conn, "src", "key", "value")
+    conn.executemany(
+        'INSERT INTO "src" (row_id, "key", "value") VALUES (?, ?, ?)',
+        [("r1", 1.0, 10.0), ("r2", 2.0, 20.0), ("r3", 3.0, 30.0)],
+    )
+    _make_table(conn, "t", "k", "out")
+    _insert_rows(
+        conn,
+        "t",
+        [
+            {"row_id": "r1", "k": 2.0, "out": 0.0},
+            {"row_id": "r2", "k": 1.0, "out": 0.0},
+            {"row_id": "r3", "k": 3.0, "out": 0.0},
+        ],
+    )
+    register_formula(conn, "t", "out", "INDEX(@@src[value], MATCH(@t[k], @@src[key], 0))", defer=True)
+    _set_perf(conn, use_duckdb_compute=True)
+
+    out = execute_formula_on_column(conn, "t", "out")
+
+    assert out["ok"] is True
+    assert out["engine"] == "duckdb"
+    assert dict(conn.execute('SELECT row_id, out FROM t ORDER BY row_id').fetchall()) == {
+        "r1": 20.0,
+        "r2": 10.0,
+        "r3": 30.0,
+    }
+
+
+def test_b2_execute_formula_orders_suffix_numeric_row_ids():
+    conn = _new_conn()
+    _make_table(conn, "src", "value")
+    conn.executemany(
+        'INSERT INTO "src" (row_id, "value") VALUES (?, ?)',
+        [("r10", 100.0), ("r2", 20.0), ("r1", 10.0)],
+    )
+    _make_table(conn, "t", "idx", "out")
+    _insert_rows(
+        conn,
+        "t",
+        [
+            {"row_id": "row_1", "idx": 1.0, "out": 0.0},
+            {"row_id": "row_2", "idx": 2.0, "out": 0.0},
+            {"row_id": "row_3", "idx": 3.0, "out": 0.0},
+        ],
+    )
+    register_formula(conn, "t", "out", "INDEX(@@src[value], @t[idx])", defer=True)
+    _set_perf(conn, use_duckdb_compute=True)
+
+    out = execute_formula_on_column(conn, "t", "out")
+
+    assert out["ok"] is True
+    assert out["engine"] == "duckdb"
+    assert dict(conn.execute('SELECT row_id, out FROM t ORDER BY row_id').fetchall()) == {
+        "row_1": 10.0,
+        "row_2": 20.0,
+        "row_3": 100.0,
+    }
+
+
+def test_b2_execute_formula_supports_if_and_minmax_via_duckdb():
+    conn = _new_conn()
+    _make_table(conn, "t", "a", "out")
+    _insert_rows(
+        conn,
+        "t",
+        [
+            {"row_id": "r1", "a": 0.0, "out": 0.0},
+            {"row_id": "r2", "a": 4.0, "out": 0.0},
+            {"row_id": "r3", "a": 7.0, "out": 0.0},
+        ],
+    )
+    register_formula(conn, "t", "out", "IF(@t[a] > 3, MIN(@t[a], 5), MAX(@t[a], 1))", defer=True)
+    _set_perf(conn, use_duckdb_compute=True)
+
+    out = execute_formula_on_column(conn, "t", "out")
+
+    assert out["ok"] is True
+    assert out["engine"] == "duckdb"
+    assert dict(conn.execute('SELECT row_id, out FROM t ORDER BY row_id').fetchall()) == {
+        "r1": 1.0,
+        "r2": 4.0,
+        "r3": 5.0,
+    }
+
+
 def test_a4_batch_lookup_reuses_calculator_metadata_query():
     conn = _new_conn()
     _make_table(conn, "lk", "k", "value")

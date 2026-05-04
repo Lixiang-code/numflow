@@ -20,8 +20,10 @@ B2 白名单扩展
 =============
 - 支持 `@@table[col]` 整列引用（跨表加载为 DuckDB list）
 - 支持 `INDEX(arr, idx)` → `list_element(arr, idx)`（1-indexed 对齐）
+- 支持 `MATCH(lookup, arr, 0)` → `list_position(arr, lookup)`（精确匹配）
+- 支持 `IF(cond, a, b)` → `CASE WHEN cond THEN a ELSE b END`
 - 支持同表 `@table[col]` 和常量四则运算 + min/max/abs/round/sqrt/const_value
-- 禁用：IF/PIECEWISE/call_calculator/cumsum_*/vlookup/xlookup 等
+- 禁用：PIECEWISE/call_calculator/cumsum_*/vlookup/xlookup 等
 """
 
 from __future__ import annotations
@@ -51,18 +53,21 @@ def is_enabled(conn: sqlite3.Connection) -> bool:
 
 _REF_PATTERN = re.compile(r"(?<!@)@(?!@)(\w+)\[(\w+)\]")
 _AAREF_PATTERN = re.compile(r"@@(\w+)\[(\w+)\]")
-_INDEX_PATTERN = re.compile(r"\bINDEX\(@@(\w+)\[(\w+)\]\s*,\s*(.+?)\)", re.IGNORECASE)
-
 _DISALLOWED_TOKENS = re.compile(
     r"\b(call_calculator|cumsum_to_here|cumsum_prev|vlookup|xlookup|"
     r"piecewise|interp|coalesce|ifnull|sum_arr|average_arr|count_arr|"
-    r"counta_arr|match|lookup|text|num|bitand_concat)\b",
+    r"counta_arr|lookup|text|num|bitand_concat)\b",
     re.IGNORECASE,
 )
-_ALLOWED_FUNCS = {"min", "max", "abs", "round", "sqrt", "const_value", "floor", "ceil", "list_element", "if", "least", "greatest"}
+_ALLOWED_FUNCS = {
+    "min", "max", "abs", "round", "sqrt", "const_value", "floor", "ceil",
+    "list_element", "list_position", "if", "least", "greatest",
+}
 _SQL_KEYWORDS = {"case", "when", "then", "else", "end", "is", "not", "null", "and", "or", "true", "false", "in", "cast", "as", "integer", "double", "varchar", "between", "like", "bigint", "int"}
 _NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _CONST_VALUE_PATTERN = re.compile(r"const_value\(([\-\d\.]+)\)")
+_NUMERIC_ROW_ID = re.compile(r"^-?\d+$")
+_SUFFIX_NUMERIC_ROW_ID = re.compile(r"^(.*?)(-?\d+)$")
 
 
 def _split_if_args(inner: str) -> List[str]:
@@ -92,9 +97,67 @@ def _split_if_args(inner: str) -> List[str]:
             current = []
         else:
             current.append(c)
+    if in_quote:
+        raise NotSupported("引号未闭合")
+    if depth != 0:
+        raise NotSupported("括号不匹配")
     if current:
         args.append("".join(current).strip())
     return args
+
+
+def _find_matching_paren(expr: str, open_idx: int) -> int:
+    depth = 0
+    in_quote = False
+    quote_char = ""
+    i = open_idx
+    while i < len(expr):
+        c = expr[i]
+        if in_quote:
+            if c == quote_char:
+                in_quote = False
+        else:
+            if c in ("'", '"'):
+                in_quote = True
+                quote_char = c
+            elif c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+                if depth == 0:
+                    return i
+        i += 1
+    if in_quote:
+        raise NotSupported("引号未闭合")
+    raise NotSupported("括号不匹配")
+
+
+def _replace_function_calls(
+    expr: str,
+    func_name: str,
+    replacer,
+) -> str:
+    pattern = re.compile(rf"\b{re.escape(func_name)}\s*\(", re.IGNORECASE)
+    out = expr
+    while True:
+        match = pattern.search(out)
+        if not match:
+            return out
+        open_idx = out.find("(", match.start())
+        close_idx = _find_matching_paren(out, open_idx)
+        inner = out[open_idx + 1:close_idx]
+        replacement = replacer(inner)
+        out = out[:match.start()] + replacement + out[close_idx + 1:]
+
+
+def _row_sort_key(row_id: Any, rownum: int) -> Tuple[Any, ...]:
+    raw = "" if row_id is None else str(row_id)
+    if _NUMERIC_ROW_ID.fullmatch(raw):
+        return (0, int(raw), rownum)
+    suffix = _SUFFIX_NUMERIC_ROW_ID.fullmatch(raw)
+    if suffix:
+        return (1, suffix.group(1), int(suffix.group(2)), rownum)
+    return (2, raw, rownum)
 
 
 def _check_whitelist(
@@ -142,61 +205,37 @@ def _check_whitelist(
 
     rewritten = rewritten.replace("^", "**")
 
-    # 翻译 IF(cond, a, b) → CASE WHEN cond THEN a ELSE b END（递归处理嵌套）
-    _IF_PATTERN = re.compile(r"\bIF\s*\(", re.IGNORECASE)
-    while _IF_PATTERN.search(rewritten):
-        pos = _IF_PATTERN.search(rewritten).start()
-        depth = 0
-        start_pos = pos + 2  # skip "IF"
-        for i, c in enumerate(rewritten[start_pos:]):
-            if c == '(':
-                depth += 1
-            elif c == ')':
-                depth -= 1
-                if depth == 0:
-                    full_end = start_pos + i + 1
-                    break
-        else:
-            raise NotSupported("IF 括号不匹配")
-        if_call = rewritten[pos:full_end]
-        inner = if_call[len("IF("):-1]  # strip IF( and )
-
-        # 分割三个参数（需处理嵌套括号和字符串）
+    # 翻译 IF(cond, a, b) → CASE WHEN cond THEN a ELSE b END
+    def _replace_if(inner: str) -> str:
         params = _split_if_args(inner)
         if len(params) != 3:
             raise NotSupported(f"IF 参数数量错误：{len(params)}")
         cond, true_val, false_val = params
-        rewritten = rewritten[:pos] + f"(CASE WHEN {cond} THEN {true_val} ELSE {false_val} END)" + rewritten[full_end:]
+        return f"(CASE WHEN {cond} THEN {true_val} ELSE {false_val} END)"
 
-    # 翻译 INDEX(arr, expr) → list_element(arr, expr)
-    # 需要处理嵌套 INDEX，使用递归替换
-    while "INDEX(" in rewritten.upper():
-        m = re.search(r"\bINDEX\((\w+)\s*,\s*(.+?)\)", rewritten, re.IGNORECASE)
-        if not m:
-            break
-        arr_name, index_expr = m.group(1), m.group(2)
-        # 匹配完整的 INDEX(...) 调用（处理嵌套括号）
-        start = m.start()
-        end = start + len(m.group(0))
-        # 检查是否有嵌套括号
-        depth = 0
-        for i, c in enumerate(rewritten[start:]):
-            if c == '(':
-                depth += 1
-            elif c == ')':
-                depth -= 1
-                if depth == 0:
-                    end = start + i + 1
-                    break
-        full_match = rewritten[start:end]
-        inner = full_match[len("INDEX("):-1]  # 去掉 INDEX( 和 )
-        # 重新分割 arr_name 和 index_expr
-        inner_m = re.match(r"^(\w+)\s*,\s*(.+)$", inner)
-        if not inner_m:
-            raise NotSupported(f"INDEX 语法错误：{full_match[:40]}")
-        arr_name = inner_m.group(1)
-        index_expr = inner_m.group(2).strip()
-        rewritten = rewritten[:start] + f"list_element({arr_name}, CAST({index_expr} AS BIGINT))" + rewritten[end:]
+    rewritten = _replace_function_calls(rewritten, "IF", _replace_if)
+
+    def _replace_match(inner: str) -> str:
+        params = _split_if_args(inner)
+        if len(params) not in (2, 3):
+            raise NotSupported(f"MATCH 参数数量错误：{len(params)}")
+        lookup_expr, arr_expr = params[0], params[1]
+        if len(params) == 3:
+            match_type = params[2].strip()
+            if match_type not in {"0", "0.0", "+0", "+0.0"}:
+                raise NotSupported("DuckDB 路径仅支持 MATCH(..., ..., 0) 精确匹配")
+        return f"list_position({arr_expr}, {lookup_expr})"
+
+    rewritten = _replace_function_calls(rewritten, "MATCH", _replace_match)
+
+    def _replace_index(inner: str) -> str:
+        params = _split_if_args(inner)
+        if len(params) != 2:
+            raise NotSupported(f"INDEX 参数数量错误：{len(params)}")
+        arr_expr, index_expr = params
+        return f"list_element({arr_expr}, CAST({index_expr} AS BIGINT))"
+
+    rewritten = _replace_function_calls(rewritten, "INDEX", _replace_index)
 
     # 安全检查
     scan = re.sub(r'\'[^\']*\'', '', rewritten)  # 单引号字符串
@@ -262,13 +301,14 @@ def compute_column_via_duckdb(
     for (src_tbl, src_col), idx in sorted(aref_map.items(), key=lambda x: x[1]):
         try:
             rows = conn.execute(
-                f'SELECT "{src_col}" FROM "{src_tbl}" ORDER BY CAST(row_id AS INTEGER)'
+                f'SELECT rowid, row_id, "{src_col}" FROM "{src_tbl}" ORDER BY rowid'
             ).fetchall()
         except Exception as exc:
             raise NotSupported(f"加载 @@{src_tbl}[{src_col}] 失败：{exc}") from exc
+        sorted_rows = sorted(rows, key=lambda r: _row_sort_key(r[1], int(r[0])))
         vals: List[Any] = []
-        for r in rows:
-            v = r[0]
+        for r in sorted_rows:
+            v = r[2]
             try:
                 v = float(v) if v is not None else 0.0
             except (TypeError, ValueError):
