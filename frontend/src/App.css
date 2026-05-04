@@ -2488,12 +2488,11 @@ pre {
 .matrix-topbar h3 { margin: 0; font-size: .95rem; }
 .matrix-meta-chip { display: inline-flex; align-items: center; gap: .25rem; background: #e8f5e9; border: 1px solid #c8e6c9; border-radius: 4px; padding: .1rem .4rem; font-size: .78rem; color: #2e7d32; }
 .matrix-kind-badge { background: #fff3e0; border: 1px solid #ffe0b2; border-radius: 4px; padding: .1rem .4rem; font-size: .75rem; color: #e65100; font-weight: 600; text-transform: uppercase; white-space: nowrap; }
-.matrix-axis-bar { padding: .4rem .5rem; background: #fafafa; border-bottom: 1px solid #e0e0e0; flex-shrink: 0; }
-.matrix-axis-row { display: flex; align-items: center; gap: .5rem; margin-bottom: .3rem; }
-.matrix-axis-row:last-child { margin-bottom: 0; }
-.matrix-axis-label { font-size: .75rem; color: #888; min-width: 42px; font-weight: 600; }
+.matrix-axis-bar { display: flex; align-items: center; gap: 1.2rem; padding: .35rem .5rem; background: #fafafa; border-bottom: 1px solid #e0e0e0; flex-shrink: 0; flex-wrap: wrap; }
+.matrix-axis-row { display: flex; align-items: center; gap: .35rem; }
+.matrix-axis-label { font-size: .75rem; color: #888; font-weight: 600; white-space: nowrap; }
 .matrix-axis-btns { display: flex; gap: .2rem; align-items: center; }
-.matrix-axis-select { font-size: .78rem; padding: .15rem .35rem; border: 1px solid #ccc; border-radius: 4px; background: #fff; min-width: 160px; }
+.matrix-axis-select { font-size: .78rem; padding: .15rem .35rem; border: 1px solid #ccc; border-radius: 4px; background: #fff; min-width: 140px; }
 .matrix-level-tabs { display: flex; gap: .25rem; padding: .3rem .5rem; background: #fafafa; border-bottom: 1px solid #e0e0e0; flex-shrink: 0; overflow-x: auto; }
 .matrix-level-tabs button { background: none; border: 1px solid transparent; border-radius: 4px; padding: .2rem .6rem; font-size: .8rem; cursor: pointer; color: #555; }
 .matrix-level-tabs button:hover { background: #e8f5e9; color: #2e7d32; }

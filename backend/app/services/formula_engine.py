@@ -687,11 +687,15 @@ def eval_series(formula: str, frames: Dict[str, pd.DataFrame]) -> pd.Series:
     if needs_rowwise:
         n = max(len(df) for df in frames.values())
         static_env: Dict[str, Any] = {k: v for k, v in array_map.items()}
+        tree = ast.parse(expr, mode="eval")
+        for node in ast.walk(tree):
+            if not isinstance(node, _ALLOWED_NODES):
+                raise ValueError(f"禁止的语法: {type(node).__name__}")
         out: List[Any] = []
         for i in range(n):
             token = _CURRENT_ROW_INDEX.set(i)
             try:
-                out.append(safe_eval_scalar(expr, static_env))
+                out.append(_eval_ast(tree, static_env))
             finally:
                 _CURRENT_ROW_INDEX.reset(token)
         return pd.Series(out)
@@ -795,36 +799,85 @@ def parse_row_refs(formula: str) -> Set[str]:
     return set(_SAME_ROW_REF.findall(formula))
 
 
+def precompile_row_formula(
+    formula: str,
+    available_cols: Set[str],
+) -> Tuple[Any, Dict[str, str], str]:
+    """预编译 row 公式的 AST。返回 (tree, ref_to_key, base_expr) 供批量求值复用。
+
+    返回 (None, {}, "") 表示无法预编译（含外部引用/未替换的 @ 引用），
+    调用方应 fallback 到逐行 eval_row_formula。
+    """
+    refs = set(_SAME_ROW_REF.findall(formula))
+    external_refs = {r for r in refs if r not in available_cols}
+    if external_refs:
+        return None, {}, ""
+
+    expr = preprocess_formula(formula)
+    ref_to_key: Dict[str, str] = {}
+    for i, ref in enumerate(sorted(refs)):
+        key = f"__r{i}__"
+        ref_to_key[ref] = key
+        expr = re.sub(r"@" + re.escape(ref) + r"(?!\[)", key, expr)
+
+    if "@" in expr:
+        return None, {}, ""
+
+    tree = ast.parse(expr, mode="eval")
+    for n in ast.walk(tree):
+        if not isinstance(n, _ALLOWED_NODES):
+            raise ValueError(f"禁止的语法: {type(n).__name__}")
+
+    return tree, ref_to_key, expr
+
+
 def eval_row_formula(
     formula: str,
     row_dict: Dict[str, Any],
     available_cols: Set[str],
+    precompiled: Optional[Any] = None,
 ) -> Tuple[Any, Set[str]]:
     """对单行求值同行列公式（@col_name 语法）。
     返回 (值, 外部参数集合)。若外部参数集合非空，表示公式无法自动计算（运行时模板）。
+
+    可传入 precompiled=(tree, ref_to_key, base_expr, name_map_template) 跳过逐行 ast.parse。
     """
     refs = set(_SAME_ROW_REF.findall(formula))
     external_refs = {r for r in refs if r not in available_cols}
     if external_refs:
         return None, external_refs
 
-    expr = preprocess_formula(formula)
-    name_map: Dict[str, Any] = {}
-    ref_to_key: Dict[str, str] = {}
-    for i, ref in enumerate(sorted(refs)):
-        key = f"__r{i}__"
-        ref_to_key[ref] = key
-        val = row_dict.get(ref)
-        name_map[key] = val if val is not None else 0.0
+    if precompiled is not None and precompiled[0] is not None:
+        tree, ref_to_key, base_expr, name_map_template = precompiled
+        name_map: Dict[str, Any] = {}
+        for ref, key in ref_to_key.items():
+            val = row_dict.get(ref)
+            name_map[key] = val if val is not None else 0.0
+        try:
+            return _eval_ast(tree, name_map), set()
+        except Exception:
+            return None, {"__eval_error__"}
+    else:
+        expr = preprocess_formula(formula)
+        name_map = {}
+        ref_to_key: Dict[str, str] = {}
+        for i, ref in enumerate(sorted(refs)):
+            key = f"__r{i}__"
+            ref_to_key[ref] = key
+            val = row_dict.get(ref)
+            name_map[key] = val if val is not None else 0.0
 
-    for ref, key in ref_to_key.items():
-        expr = re.sub(r"@" + re.escape(ref) + r"(?!\[)", key, expr)
+        for ref, key in ref_to_key.items():
+            expr = re.sub(r"@" + re.escape(ref) + r"(?!\[)", key, expr)
 
-    try:
-        result = safe_eval_scalar(expr, name_map)
-        return result, set()
-    except Exception as e:  # noqa: BLE001
-        return None, {f"__eval_error__: {e}"}
+        try:
+            result = safe_eval_scalar(expr, name_map)
+            return result, set()
+        except Exception as e:  # noqa: BLE001
+            return None, {f"__eval_error__: {e}"}
+
+
+_NEEDS_CURRENT_ROW = re.compile(r"\bcumsum_(to_here|prev)\b", re.IGNORECASE)
 
 
 def safe_eval_vector(
@@ -832,19 +885,33 @@ def safe_eval_vector(
     scalar_map: Dict[str, pd.Series],
     array_map: Optional[Dict[str, list]] = None,
 ) -> list:
-    """逐行应用 safe_eval_scalar；array_map 中的整列引用每行保持不变。"""
+    """逐行应用 safe_eval_scalar；array_map 中的整列引用每行保持不变。
+
+    v2 优化：预编译 AST（仅解析+安全检查一次），消除逐行 ast.parse 开销。
+    """
     if not scalar_map:
         static_env: Dict[str, Any] = dict(array_map or {})
         return [safe_eval_scalar(expr, static_env)] * 1
     n = len(next(iter(scalar_map.values())))
     static: Dict[str, Any] = dict(array_map or {})
+
+    tree = ast.parse(expr, mode="eval")
+    for node in ast.walk(tree):
+        if not isinstance(node, _ALLOWED_NODES):
+            raise ValueError(f"禁止的语法: {type(node).__name__}")
+
+    need_ctx = bool(_NEEDS_CURRENT_ROW.search(expr))
+
     out = []
     for i in range(n):
         env: Dict[str, Any] = {k: v.iloc[i] for k, v in scalar_map.items()}
         env.update(static)
-        token = _CURRENT_ROW_INDEX.set(i)
-        try:
-            out.append(safe_eval_scalar(expr, env))
-        finally:
-            _CURRENT_ROW_INDEX.reset(token)
+        if need_ctx:
+            token = _CURRENT_ROW_INDEX.set(i)
+            try:
+                out.append(_eval_ast(tree, env))
+            finally:
+                _CURRENT_ROW_INDEX.reset(token)
+        else:
+            out.append(_eval_ast(tree, env))
     return out

@@ -140,8 +140,8 @@ export default function ThreeDimTableEditor({
   const [fixedValue, setFixedValue] = useState<string | null>(null)
   const [recalculating, setRecalculating] = useState(false)
   const [showFormulaPanel, setShowFormulaPanel] = useState(false)
+  const axisInitializedRef = useRef(false)
   const requestKey = tableName
-
   const [editingFormulaCol, setEditingFormulaCol] = useState<string | null>(null)
   const [editingFormulaText, setEditingFormulaText] = useState('')
   const [formulaSaving, setFormulaSaving] = useState(false)
@@ -149,7 +149,6 @@ export default function ThreeDimTableEditor({
   const [newFormulaCol, setNewFormulaCol] = useState('')
   const [newFormulaText, setNewFormulaText] = useState('')
   const [newFormulaType, setNewFormulaType] = useState('row')
-  const [showAxisSettings, setShowAxisSettings] = useState(false)
   const addFormulaColSelectRef = useRef<HTMLSelectElement>(null)
 
   const [editingConstName, setEditingConstName] = useState<string | null>(null)
@@ -169,6 +168,17 @@ export default function ThreeDimTableEditor({
         setSnapshot(res)
         setErr(null)
         setLoadedRequestKey(requestKey)
+        if (!axisInitializedRef.current) {
+          const counts: [AxisKey, number][] = [
+            ['dim1', (res.dim1.keys || []).length],
+            ['dim2', (res.dim2.keys || []).length],
+            ['metric', (res.cols || []).length],
+          ]
+          counts.sort((a, b) => b[1] - a[1])
+          setRowAxis(counts[0][0])
+          setColAxis(counts[1][0])
+          axisInitializedRef.current = true
+        }
       } catch (e) {
         if (cancelled) return
         setErr(String(e))
@@ -631,14 +641,6 @@ export default function ThreeDimTableEditor({
         <div style={{ flex: 1 }} />
         <button
           type="button"
-          className={`btn tiny${showAxisSettings ? ' primary' : ''}`}
-          onClick={() => setShowAxisSettings(!showAxisSettings)}
-          style={{ marginRight: 4 }}
-        >
-          {showAxisSettings ? '隐藏切片' : '切片设置'}
-        </button>
-        <button
-          type="button"
           className={`btn tiny${showFormulaPanel ? ' primary' : ''}`}
           onClick={() => { setShowFormulaPanel(!showFormulaPanel); setShowAddFormula(false); setEditingFormulaCol(null); setEditingConstName(null) }}
           style={{ marginRight: 4 }}
@@ -652,8 +654,7 @@ export default function ThreeDimTableEditor({
         )}
       </div>
 
-      {showAxisSettings && (
-        <div className="matrix-axis-bar">
+      <div className="matrix-axis-bar">
           <div className="matrix-axis-row">
             <span className="matrix-axis-label">行轴</span>
             <div className="matrix-axis-btns">
@@ -701,7 +702,6 @@ export default function ThreeDimTableEditor({
             </select>
           </div>
         </div>
-      )}
 
       <div className="matrix-scroll">
         <table className="matrix-table">

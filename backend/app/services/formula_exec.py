@@ -20,6 +20,7 @@ from app.services.formula_engine import (
     parse_constant_refs,
     parse_formula_refs,
     parse_row_refs,
+    precompile_row_formula,
     preprocess_formula,
     reset_call_calculator,
     substitute_constants,
@@ -722,11 +723,11 @@ def recalculate_downstream_dag(
             affected.add(node)
             queue.append(node)
 
-    if not affected:
+    if not affected and not seed_set:
         return {"executed": [], "errors": [], "skipped": []}
 
-    # Step 2: 在 affected 子图内构造依赖边
-    nodes = set(affected)
+    # 将 seeds 加入执行节点集合
+    nodes = set(affected) | seed_set
     indeg: Dict[Node, int] = {n: 0 for n in nodes}
     forward: Dict[Node, List[Node]] = defaultdict(list)
     deps: Dict[Node, Set[Node]] = defaultdict(set)
@@ -835,6 +836,7 @@ def register_row_formula(
     if not cur.fetchone():
         raise ValueError(f"表 {table_name} 不存在")
     raw_formula = _rewrite_3d_dim_aliases(conn, table_name, raw_formula)
+    raw_formula = normalize_self_table_refs(raw_formula, table_name)
 
     use_min_cols = perf_flag(conn, "use_min_column_load")
     use_batch_write = perf_flag(conn, "use_batch_writeback")
@@ -855,6 +857,7 @@ def register_row_formula(
         available_cols = set(df.columns) - {"row_id"}
         refs = parse_row_refs(raw_formula)
     external_refs = refs - available_cols
+    cross_refs = {(t, c) for t, c in parse_formula_refs(raw_formula) if t != table_name}
     internal_refs: Set[Tuple[str, str]] = {
         (table_name, ref)
         for ref in refs
@@ -866,7 +869,7 @@ def register_row_formula(
     if const_names and not missing_consts:
         formula_for_compute, missing_after_substitute = substitute_constants(raw_formula, constants)
         missing_consts = list(set(missing_consts) | set(missing_after_substitute))
-    is_computable = len(external_refs) == 0 and len(missing_consts) == 0
+    is_computable = len(external_refs) == 0 and len(missing_consts) == 0 and len(cross_refs) == 0
     formula_type = "row" if is_computable else "row_template"
     assert_formula_dependency_acyclic(conn, table_name, column_name, internal_refs)
 
@@ -899,10 +902,11 @@ def register_row_formula(
     if is_computable and len(df) > 0:
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         pending: List[Tuple[Any, Any]] = []
+        precomp = precompile_row_formula(formula_for_compute, available_cols)
         with _formula_call_calculator_context(conn):
             for _, row_data in df.iterrows():
                 row_dict: Dict[str, Any] = {c: row_data[c] for c in df.columns}
-                val, missing = eval_row_formula(formula_for_compute, row_dict, available_cols)
+                val, missing = eval_row_formula(formula_for_compute, row_dict, available_cols, precomp)
                 if missing:
                     warnings.append(f"行 {row_dict.get('row_id')}: 缺少 {missing}")
                     continue
@@ -963,6 +967,7 @@ def execute_row_formula(
     raw_formula = row[0]
     formula_type = row[1] if row[1] else "sql"
     raw_formula = _rewrite_3d_dim_aliases(conn, table_name, raw_formula)
+    raw_formula = normalize_self_table_refs(raw_formula, table_name)
 
     if formula_type == "sql":
         return execute_formula_on_column(conn, table_name, column_name)
@@ -985,6 +990,7 @@ def execute_row_formula(
         available_cols = set(df.columns) - {"row_id"}
         refs = parse_row_refs(raw_formula)
     external_refs = refs - available_cols
+    cross_refs = {(t, c) for t, c in parse_formula_refs(raw_formula) if t != table_name}
     const_names = parse_constant_refs(raw_formula)
     constants, missing_consts = _load_constants(conn, const_names)
     formula_for_compute = raw_formula
@@ -992,7 +998,7 @@ def execute_row_formula(
         formula_for_compute, missing_after_substitute = substitute_constants(raw_formula, constants)
         missing_consts = list(set(missing_consts) | set(missing_after_substitute))
 
-    if external_refs or missing_consts:
+    if external_refs or missing_consts or cross_refs:
         conn.execute(
             """
             UPDATE _formula_registry
@@ -1005,6 +1011,8 @@ def execute_row_formula(
         errors: List[str] = []
         if external_refs:
             errors.extend(f"缺少同行列引用：{r}" for r in sorted(external_refs))
+        if cross_refs:
+            errors.extend(f"交叉表引用：{t}.{c}" for t, c in sorted(cross_refs))
         if missing_consts:
             errors.extend(f"缺少常量：{r}" for r in sorted(set(missing_consts)))
         return {"ok": False, "rows_updated": 0, "rows_total": len(df), "errors": errors}
@@ -1036,10 +1044,11 @@ def execute_row_formula(
     errors: List[str] = []
 
     pending: List[Tuple[Any, Any]] = []
+    precomp = precompile_row_formula(formula_for_compute, available_cols)
     with _formula_call_calculator_context(conn):
         for _, row_data in df.iterrows():
             row_dict: Dict[str, Any] = {c: row_data[c] for c in df.columns}
-            val, missing = eval_row_formula(formula_for_compute, row_dict, available_cols)
+            val, missing = eval_row_formula(formula_for_compute, row_dict, available_cols, precomp)
             if missing:
                 errors.append(f"行 {row_dict.get('row_id')}: 缺少参数 {missing}")
                 continue

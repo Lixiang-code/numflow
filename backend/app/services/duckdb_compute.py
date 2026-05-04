@@ -50,9 +50,10 @@ _DISALLOWED_TOKENS = re.compile(
     r"counta_arr|match|index|lookup|text|num|bitand_concat)\b",
     re.IGNORECASE,
 )
-_ALLOWED_FUNCS = {"min", "max", "abs", "round", "sqrt"}
+_ALLOWED_FUNCS = {"min", "max", "abs", "round", "sqrt", "const_value"}
 _NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _LITERAL_OK = re.compile(r"^[\s\d\.\+\-\*\/\(\),%]+$")
+_CONST_VALUE_PATTERN = re.compile(r"const_value\(([\-\d\.]+)\)")
 
 
 def _check_whitelist(formula: str, table_name: str, columns_in_table: Set[str]) -> Tuple[Set[str], str]:
@@ -86,6 +87,9 @@ def _check_whitelist(formula: str, table_name: str, columns_in_table: Set[str]) 
         if name.lower() in _ALLOWED_FUNCS:
             continue
         raise NotSupported(f"不支持的标识符：{name}")
+
+    # 剥离 const_value() 包装，还原为纯字面量（DuckDB 不识别该函数）
+    rewritten = _CONST_VALUE_PATTERN.sub(r"\1", rewritten)
 
     return used_cols, rewritten
 

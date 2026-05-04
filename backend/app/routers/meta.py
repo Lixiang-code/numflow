@@ -166,6 +166,30 @@ def patch_constant(
     conn.commit()
     _cascade_update_formula_consts(conn)
 
+    # 常量值变更后自动触发 DAG 重算
+    try:
+        from app.services.formula_engine import parse_constant_refs
+        from app.services.formula_exec import recalculate_downstream_dag
+        seeds: List[tuple] = []
+        for r in conn.execute(
+            "SELECT table_name, column_name, formula FROM _formula_registry"
+        ).fetchall():
+            if name_en in parse_constant_refs(r[2]):
+                seeds.append((r[0], r[1]))
+        if seeds:
+            recalculate_downstream_dag(conn, seeds)
+            conn.commit()
+            # 对涉及的每个表设置 3 秒去重锁，避免前端重复请求
+            now_ms = int(time.time() * 1000)
+            for tbl in sorted({s[0] for s in seeds}):
+                conn.execute(
+                    "INSERT INTO project_settings (key, value_json, updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at",
+                    (f"_recalc_lock:{tbl}", json.dumps(now_ms), time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())),
+                )
+            conn.commit()
+    except Exception:
+        pass
+
     result_value = json.loads(value_json)
     return {"ok": True, "name_en": name_en, "value": result_value, "formula": body.formula if formula_given else None}
 
