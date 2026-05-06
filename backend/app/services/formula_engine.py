@@ -687,30 +687,71 @@ def substitute_refs(
     return out, scalar_map, array_map, scalar_ref_meta
 
 
-def _candidate_join_columns(target_df: pd.DataFrame, ref_df: pd.DataFrame) -> List[List[str]]:
-    common = [c for c in target_df.columns if c in ref_df.columns and c != "row_id"]
-    if not common:
+def _schema_display_map(df: pd.DataFrame) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for col in list(df.attrs.get("schema_columns") or []):
+        name = str((col or {}).get("name") or "").strip()
+        display_name = str((col or {}).get("display_name") or "").strip().lower()
+        if name and display_name and name in df.columns:
+            out.setdefault(display_name, name)
+    return out
+
+
+def _matrix_dim_pairs(target_df: pd.DataFrame, ref_df: pd.DataFrame) -> List[Tuple[str, str]]:
+    target_meta = target_df.attrs.get("matrix_meta") or {}
+    ref_meta = ref_df.attrs.get("matrix_meta") or {}
+    if target_meta.get("kind") != "3d_matrix" or ref_meta.get("kind") != "3d_matrix":
         return []
+    pairs: List[Tuple[str, str]] = []
+    for key in ("dim1", "dim2"):
+        left = str(((target_meta.get(key) or {}).get("col_name")) or "").strip()
+        right = str(((ref_meta.get(key) or {}).get("col_name")) or "").strip()
+        if left and right and left in target_df.columns and right in ref_df.columns:
+            pairs.append((left, right))
+    return pairs
+
+
+def _candidate_join_columns(target_df: pd.DataFrame, ref_df: pd.DataFrame) -> List[List[Tuple[str, str]]]:
+    common = [c for c in target_df.columns if c in ref_df.columns and c != "row_id"]
     preferred = [
         c for c in common
         if c.lower() in {"level", "stage", "tier", "rank"}
         or c.lower().endswith(("_id", "_key", "_type"))
     ]
-    candidates: List[List[str]] = []
-    seen: Set[Tuple[str, ...]] = set()
+    candidates: List[List[Tuple[str, str]]] = []
+    seen: Set[Tuple[Tuple[str, str], ...]] = set()
 
-    def _push(cols: List[str]) -> None:
-        key = tuple(cols)
-        if cols and key not in seen:
+    def _push(pairs: List[Tuple[str, str]]) -> None:
+        key = tuple(pairs)
+        if pairs and key not in seen:
             seen.add(key)
-            candidates.append(cols)
+            candidates.append(pairs)
 
     for col in preferred:
-        _push([col])
-    _push(preferred)
+        _push([(col, col)])
+    _push([(col, col) for col in preferred])
     for col in common:
-        _push([col])
-    _push(common)
+        _push([(col, col)])
+    _push([(col, col) for col in common])
+
+    matrix_pairs = _matrix_dim_pairs(target_df, ref_df)
+    if len(matrix_pairs) >= 2:
+        _push(matrix_pairs)
+    for pair in matrix_pairs:
+        _push([pair])
+
+    target_display = _schema_display_map(target_df)
+    ref_display = _schema_display_map(ref_df)
+    display_pairs = [
+        (left, ref_display[label])
+        for label, left in target_display.items()
+        if label in ref_display and left != "row_id" and ref_display[label] != "row_id"
+    ]
+    for pair in display_pairs:
+        if pair[0] != pair[1]:
+            _push([pair])
+    if len(display_pairs) >= 2:
+        _push(list(dict.fromkeys(display_pairs)))
     return candidates
 
 
@@ -721,12 +762,15 @@ def _align_scalar_series(
 ) -> Optional[pd.Series]:
     if ref_col not in ref_df.columns:
         return None
-    for join_cols in _candidate_join_columns(target_df, ref_df):
-        ref_cols = list(dict.fromkeys(join_cols + [ref_col]))
+    for join_pairs in _candidate_join_columns(target_df, ref_df):
+        left_cols = [left for left, _ in join_pairs]
+        rename_map = {right: left for left, right in join_pairs}
+        ref_cols = list(dict.fromkeys(list(rename_map) + [ref_col]))
         ref_view = ref_df[ref_cols].copy()
-        if ref_view.duplicated(join_cols).any():
+        ref_view = ref_view.rename(columns=rename_map)
+        if ref_view.duplicated(left_cols).any():
             continue
-        merged = target_df[join_cols].merge(ref_view, how="left", on=join_cols, sort=False)
+        merged = target_df[left_cols].merge(ref_view, how="left", on=left_cols, sort=False)
         if len(merged) != len(target_df):
             continue
         aligned = merged[ref_col]

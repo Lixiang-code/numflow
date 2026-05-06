@@ -36,7 +36,7 @@ def _rewrite_3d_dim_aliases(
     table_name: str,
     formula: str,
 ) -> str:
-    if "@dim1_key" not in formula and "@dim2_key" not in formula:
+    if not any(token in formula for token in ("@dim1_key", "@dim2_key", "@dim1", "@dim2", "@@dim1", "@@dim2")):
         return formula
     row = conn.execute(
         "SELECT matrix_meta_json FROM _table_registry WHERE table_name = ?",
@@ -52,10 +52,23 @@ def _rewrite_3d_dim_aliases(
         return formula
     dim1_col = str((meta.get("dim1") or {}).get("col_name") or "").strip()
     dim2_col = str((meta.get("dim2") or {}).get("col_name") or "").strip()
+
+    def _replace_single(alias: str, target_col: str) -> None:
+        nonlocal formula
+        formula = re.sub(rf"(?<!@)@{alias}(?![\[\w])", f"@{target_col}", formula)
+
+    def _replace_array(alias: str, target_col: str) -> None:
+        nonlocal formula
+        formula = re.sub(rf"@@{alias}(?![\[\w])", f"@@this[{target_col}]", formula)
+
     if dim1_col:
-        formula = re.sub(r"(?<!@)@dim1_key(?![\[\w])", f"@{dim1_col}", formula)
+        _replace_single("dim1_key", dim1_col)
+        _replace_single("dim1", dim1_col)
+        _replace_array("dim1", dim1_col)
     if dim2_col:
-        formula = re.sub(r"(?<!@)@dim2_key(?![\[\w])", f"@{dim2_col}", formula)
+        _replace_single("dim2_key", dim2_col)
+        _replace_single("dim2", dim2_col)
+        _replace_array("dim2", dim2_col)
     return formula
 
 
@@ -222,8 +235,29 @@ def load_table_df(
     )
     if not cur.fetchone():
         raise ValueError(f"未知表 {table}")
+    def _attach_meta(df: pd.DataFrame) -> pd.DataFrame:
+        try:
+            row = conn.execute(
+                "SELECT schema_json, COALESCE(matrix_meta_json, '') AS matrix_meta_json FROM _table_registry WHERE table_name = ?",
+                (table,),
+            ).fetchone()
+            if row:
+                schema_json = row["schema_json"] if isinstance(row, sqlite3.Row) else row[0]
+                matrix_meta_json = row["matrix_meta_json"] if isinstance(row, sqlite3.Row) else row[1]
+                try:
+                    df.attrs["schema_columns"] = list((json.loads(schema_json or "{}") or {}).get("columns") or [])
+                except Exception:
+                    df.attrs["schema_columns"] = []
+                try:
+                    df.attrs["matrix_meta"] = json.loads(matrix_meta_json or "{}") or {}
+                except Exception:
+                    df.attrs["matrix_meta"] = {}
+        except sqlite3.OperationalError:
+            pass
+        return df
+
     if columns is None:
-        return pd.read_sql_query(f'SELECT * FROM "{table}"', conn)
+        return _attach_meta(pd.read_sql_query(f'SELECT * FROM "{table}"', conn))
     try:
         existing = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
     except Exception:  # noqa: BLE001
@@ -241,9 +275,9 @@ def load_table_df(
             seen.add(c)
     if not wanted:
         # 没有任何已知列，回退全表加载以保留旧行为
-        return pd.read_sql_query(f'SELECT * FROM "{table}"', conn)
+        return _attach_meta(pd.read_sql_query(f'SELECT * FROM "{table}"', conn))
     cols_sql = ", ".join(f'"{c}"' for c in wanted)
-    return pd.read_sql_query(f'SELECT {cols_sql} FROM "{table}"', conn)
+    return _attach_meta(pd.read_sql_query(f'SELECT {cols_sql} FROM "{table}"', conn))
 
 
 def _columns_for_table(

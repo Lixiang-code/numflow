@@ -75,6 +75,7 @@ def test_tool_whitelists_expose_critical_existing_and_new_tools():
     must_write = {
         "write_cells_series",
         "add_column",
+        "add_columns",
         "glossary_register",
         "const_register",
         "const_tag_register",

@@ -147,6 +147,42 @@ def test_create_3d_table_rewrites_dim2_key_alias_and_executes_formula():
     assert snap["column_formulas"]["base_value"]["formula"] == "IF(@artifact_type == 'atk', 10, 20)"
 
 
+def test_create_3d_table_rewrites_dim_aliases_without_key_suffix():
+    conn = _new_conn()
+    result = create_3d_table(
+        conn,
+        table_name="artifact_alias_3d",
+        display_name="神器别名表",
+        dim1={
+            "col_name": "tier",
+            "display_name": "阶数",
+            "keys": [{"key": "1", "display_name": "1阶"}, {"key": "2", "display_name": "2阶"}],
+        },
+        dim2={
+            "col_name": "artifact_type",
+            "display_name": "神器类型",
+            "keys": [{"key": "atk", "display_name": "攻击"}, {"key": "def", "display_name": "防御"}],
+        },
+        cols=[
+            {
+                "key": "score",
+                "display_name": "评分",
+                "formula": "IF(@dim1 == 1, IF(@dim2 == 'atk', 10, 20), IF(@dim2 == 'atk', 30, 40))",
+            },
+        ],
+    )
+    assert result["formula_errors"] == []
+
+    snap = read_3d_table(conn, table_name="artifact_alias_3d")
+    assert snap["data"]["1"]["atk"]["score"] == 10.0
+    assert snap["data"]["1"]["def"]["score"] == 20.0
+    assert snap["data"]["2"]["atk"]["score"] == 30.0
+    assert snap["data"]["2"]["def"]["score"] == 40.0
+    assert snap["column_formulas"]["score"]["formula"] == (
+        "IF(@tier == 1, IF(@artifact_type == 'atk', 10, 20), IF(@artifact_type == 'atk', 30, 40))"
+    )
+
+
 def test_create_3d_table_auto_executes_index_formula_columns():
     conn = _new_conn()
     result = create_3d_table(
@@ -505,6 +541,52 @@ def test_register_formula_supports_cumsum_group_by_for_3d_partitions():
     ]
 
 
+def test_register_formula_supports_cumsum_group_by_with_dim_alias_arrays():
+    conn = _new_conn()
+    create_3d_table(
+        conn,
+        table_name="artifact_cost_alias_3d",
+        display_name="神器成本别名",
+        dim1={
+            "col_name": "artifact_id",
+            "display_name": "神器",
+            "keys": [{"key": "1", "display_name": "神器1"}, {"key": "2", "display_name": "神器2"}],
+        },
+        dim2={
+            "col_name": "tier",
+            "display_name": "阶数",
+            "keys": [{"key": "1", "display_name": "1阶"}, {"key": "2", "display_name": "2阶"}],
+        },
+        cols=[
+            {"key": "cost", "display_name": "单阶成本"},
+            {"key": "cumulative_cost", "display_name": "累计成本"},
+        ],
+    )
+    conn.executemany(
+        'UPDATE "artifact_cost_alias_3d" SET "cost" = ? WHERE row_id = ?',
+        [(10.0, "1_1"), (20.0, "1_2"), (5.0, "2_1"), (7.0, "2_2")],
+    )
+    conn.commit()
+
+    result = register_formula(
+        conn,
+        "artifact_cost_alias_3d",
+        "cumulative_cost",
+        "CUMSUM_GROUP_BY(@@dim1, @@this[cost])",
+    )
+
+    assert result["ok"] is True
+    rows = conn.execute(
+        'SELECT row_id, cumulative_cost FROM "artifact_cost_alias_3d" ORDER BY row_id'
+    ).fetchall()
+    assert [(row["row_id"], row["cumulative_cost"]) for row in rows] == [
+        ("1_1", 10.0),
+        ("1_2", 30.0),
+        ("2_1", 5.0),
+        ("2_2", 12.0),
+    ]
+
+
 def test_register_formula_aligns_cross_table_refs_by_common_dimension():
     conn = _new_conn()
     create_dynamic_table(
@@ -550,6 +632,60 @@ def test_register_formula_aligns_cross_table_refs_by_common_dimension():
     ]
 
 
+def test_register_formula_aligns_3d_refs_by_dimension_metadata_when_column_names_differ():
+    conn = _new_conn()
+    create_3d_table(
+        conn,
+        table_name="gem_cost_ref",
+        display_name="宝石成本参考",
+        dim1={
+            "col_name": "gem_level",
+            "display_name": "等级",
+            "keys": [{"key": "1", "display_name": "1级"}, {"key": "2", "display_name": "2级"}],
+        },
+        dim2={
+            "col_name": "gem_attr",
+            "display_name": "属性",
+            "keys": [{"key": "atk", "display_name": "攻击"}, {"key": "def", "display_name": "防御"}],
+        },
+        cols=[{"key": "base_cost", "display_name": "基础成本"}],
+    )
+    conn.executemany(
+        'UPDATE "gem_cost_ref" SET "base_cost" = ? WHERE row_id = ?',
+        [("10", "1_atk"), ("20", "1_def"), ("30", "2_atk"), ("40", "2_def")],
+    )
+    create_3d_table(
+        conn,
+        table_name="gem_cost_target",
+        display_name="宝石成本目标",
+        dim1={
+            "col_name": "level",
+            "display_name": "等级",
+            "keys": [{"key": "1", "display_name": "1级"}, {"key": "2", "display_name": "2级"}],
+        },
+        dim2={
+            "col_name": "attr_type",
+            "display_name": "属性",
+            "keys": [{"key": "atk", "display_name": "攻击"}, {"key": "def", "display_name": "防御"}],
+        },
+        cols=[{"key": "copied_cost", "display_name": "复制成本"}],
+    )
+    conn.commit()
+
+    result = register_formula(conn, "gem_cost_target", "copied_cost", "@gem_cost_ref[base_cost]")
+
+    assert result["ok"] is True
+    rows = conn.execute(
+        'SELECT row_id, copied_cost FROM "gem_cost_target" ORDER BY row_id'
+    ).fetchall()
+    assert [(row["row_id"], row["copied_cost"]) for row in rows] == [
+        ("1_atk", 10.0),
+        ("1_def", 20.0),
+        ("2_atk", 30.0),
+        ("2_def", 40.0),
+    ]
+
+
 def test_add_column_tool_updates_physical_table_and_schema():
     conn = _new_conn()
     create_dynamic_table(
@@ -584,6 +720,42 @@ def test_add_column_tool_updates_physical_table_and_schema():
     note_meta = next(col for col in schema["columns"] if col["name"] == "note")
     assert note_meta["display_name"] == "备注"
     assert note_meta["number_format"] == "@"
+
+
+def test_add_columns_tool_creates_multiple_columns_in_one_call():
+    conn = _new_conn()
+    create_dynamic_table(
+        conn,
+        table_name="resource_batch_alloc",
+        display_name="批量资源分配",
+        columns=[("level", "INTEGER")],
+    )
+
+    result = json.loads(
+        dispatch_tool(
+            "add_columns",
+            {
+                "table_name": "resource_batch_alloc",
+                "items": [
+                    {"column_name": "note", "sql_type": "TEXT", "display_name": "备注", "number_format": "@"},
+                    {"column_name": "ratio", "sql_type": "REAL", "display_name": "比例", "number_format": "0.00%"},
+                ],
+            },
+            _project_db(conn),
+        )
+    )
+
+    assert result["status"] == "success"
+    assert result["data"]["count"] == 2
+    cols = {row[1]: row[2] for row in conn.execute('PRAGMA table_info("resource_batch_alloc")').fetchall()}
+    assert cols["note"] == "TEXT"
+    assert cols["ratio"] == "REAL"
+    schema_json = conn.execute(
+        "SELECT schema_json FROM _table_registry WHERE table_name = ?",
+        ("resource_batch_alloc",),
+    ).fetchone()[0]
+    schema = json.loads(schema_json)
+    assert {col["name"] for col in schema["columns"]} >= {"level", "note", "ratio"}
 
 
 def test_write_cells_series_supports_text_columns():

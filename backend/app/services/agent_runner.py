@@ -140,6 +140,7 @@ WRITE_TOOLS = {
     "write_cells_series",
     "create_table",
     "add_column",
+    "add_columns",
     "create_matrix_table",
     "write_matrix_cells",
     "create_3d_table",
@@ -211,6 +212,8 @@ RECOVERY_CLEANUP_TOOLS = READ_TOOLS | {"delete_table", "update_table_readme", "u
 # 工具名称 → 中文标签（用于前端监控显示）
 _TOOL_LABELS: Dict[str, str] = {
     "create_table": "创建数值表",
+    "add_column": "新增单列",
+    "add_columns": "批量新增列",
     "read_table": "读取表数据",
     "write_cells": "写入单元格",
     "delete_table": "删除表",
@@ -287,6 +290,7 @@ _TOOL_LABELS: Dict[str, str] = {
     "create_3d_table": "创建 3D 表",
     "write_cells_series": "序列写入",
     "add_column": "追加列",
+    "add_columns": "批量追加列",
 }
 
 

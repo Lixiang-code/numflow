@@ -479,6 +479,39 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "add_columns",
+            "description": (
+                "批量向已有表追加多列；单次调用会按顺序创建多列并同步 schema 元数据。"
+                "适合一次补齐一组字段，避免重复多次调用 add_column。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string"},
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "column_name": {"type": "string", "description": "英文 snake_case 列名"},
+                                "sql_type": {"type": "string", "enum": ["TEXT", "REAL", "INTEGER"]},
+                                "display_name": {"type": "string"},
+                                "number_format": {"type": "string"},
+                                "display_lang": {"type": "string"},
+                            },
+                            "required": ["column_name", "sql_type"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["table_name", "items"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "write_cells_series",
             "description": (
                 "★ 系列填充：用模板生成连续 row_id（如 lv_1..lv_50）的写入，避免一次性贴数百行 JSON。"
@@ -527,7 +560,10 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "register_formula",
-            "description": "为指定列注册公式字符串（@表名[列名] 引用）；更新依赖图",
+            "description": (
+                "为指定列注册公式字符串（@表名[列名] / @@表名[列名] 引用）；更新依赖图。"
+                "若使用 CUMSUM_GROUP_BY，两个参数都必须传整列引用 @@...；同表可写 @@this[level]、@@this[value]。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1692,6 +1728,7 @@ _TOOL_TITLE_ZH: Dict[str, str] = {
     "set_project_setting": "设置项目参数",
     "create_table": "创建业务表",
     "add_column": "追加表列",
+    "add_columns": "批量追加表列",
     "write_cells": "批量写单元格",
     "write_cells_series": "按序列批量写入",
     "register_formula": "注册列公式",
@@ -1756,6 +1793,7 @@ _TOOL_GROUP_BY_NAME: Dict[str, str] = {
     "set_project_setting": "write_core",
     "create_table": "write_core",
     "add_column": "write_core",
+    "add_columns": "write_core",
     "write_cells": "write_core",
     "write_cells_series": "write_core",
     "delete_table": "write_core",
@@ -1825,6 +1863,7 @@ _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "set_project_setting": "修改项目的全局设置参数（如版本、规则等）。",
     "create_table": "在当前项目中新建一个业务数据表。",
     "add_column": "向已有业务表显式追加一个新列，并同步更新 schema 元数据。",
+    "add_columns": "向已有业务表一次性追加多个新列，并同步更新 schema 元数据。",
     "write_cells": "批量向指定行列位置写入单元格数据。",
     "write_cells_series": "按列序列规则批量写入一组单元格数据。",
     "register_formula": "为某列注册计算公式，供后续触发重算使用。",
@@ -3485,6 +3524,8 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                     out = {"error": str(e)}
     elif name == "add_column":
         out = _add_column(conn, args, p.can_write)
+    elif name == "add_columns":
+        out = _add_columns(conn, args, p.can_write)
     elif name == "write_cells_series":
         out = _write_cells_series(conn, args, p.can_write)
     elif name == "register_formula":
@@ -4882,20 +4923,17 @@ def _write_cells_series(
     return result
 
 
-def _add_column(
+def _add_column_impl(
     conn: sqlite3.Connection,
-    args: Dict[str, Any],
-    can_write: bool,
+    *,
+    table_name: str,
+    column_name: str,
+    sql_type: str,
+    display_name: str = "",
+    number_format: str = "",
+    display_lang: str = "",
+    commit: bool = True,
 ) -> Dict[str, Any]:
-    err = _require_write(can_write, "add_column")
-    if err:
-        return err
-    try:
-        table_name = assert_col_or_table(str(args.get("table_name", "")).strip())
-        column_name = assert_col_or_table(str(args.get("column_name", "")).strip())
-    except ValueError as e:
-        return {"error": str(e)}
-    sql_type = str(args.get("sql_type", "")).strip().upper()
     if sql_type not in {"TEXT", "REAL", "INTEGER"}:
         return {"error": f"sql_type 非法：{sql_type or '<empty>'}"}
 
@@ -4925,10 +4963,10 @@ def _add_column(
         {
             "name": column_name,
             "sql_type": sql_type,
-            "display_name": str(args.get("display_name") or ""),
+            "display_name": display_name,
             "dtype": dtype_map[sql_type],
-            "number_format": str(args.get("number_format") or ""),
-            "display_lang": str(args.get("display_lang") or ""),
+            "number_format": number_format,
+            "display_lang": display_lang,
         }
     )
     schema["columns"] = schema_cols
@@ -4962,8 +5000,82 @@ def _add_column(
     except sqlite3.OperationalError:
         pass
 
-    conn.commit()
+    if commit:
+        conn.commit()
     return {"ok": True, "table_name": table_name, "column_name": column_name, "sql_type": sql_type}
+
+
+def _add_column(
+    conn: sqlite3.Connection,
+    args: Dict[str, Any],
+    can_write: bool,
+) -> Dict[str, Any]:
+    err = _require_write(can_write, "add_column")
+    if err:
+        return err
+    try:
+        table_name = assert_col_or_table(str(args.get("table_name", "")).strip())
+        column_name = assert_col_or_table(str(args.get("column_name", "")).strip())
+    except ValueError as e:
+        return {"error": str(e)}
+    return _add_column_impl(
+        conn,
+        table_name=table_name,
+        column_name=column_name,
+        sql_type=str(args.get("sql_type", "")).strip().upper(),
+        display_name=str(args.get("display_name") or ""),
+        number_format=str(args.get("number_format") or ""),
+        display_lang=str(args.get("display_lang") or ""),
+    )
+
+
+def _add_columns(
+    conn: sqlite3.Connection,
+    args: Dict[str, Any],
+    can_write: bool,
+) -> Dict[str, Any]:
+    err = _require_write(can_write, "add_columns")
+    if err:
+        return err
+    try:
+        table_name = assert_col_or_table(str(args.get("table_name", "")).strip())
+    except ValueError as e:
+        return {"error": str(e)}
+    items = list(args.get("items") or [])
+    if not items:
+        return {"error": "items 必填，且至少包含一个列定义"}
+
+    try:
+        conn.execute("BEGIN")
+        created: List[Dict[str, Any]] = []
+        for idx, item in enumerate(items):
+            try:
+                column_name = assert_col_or_table(str((item or {}).get("column_name", "")).strip())
+            except ValueError as e:
+                raise ValueError(f"items[{idx}].column_name 非法: {e}") from e
+            result = _add_column_impl(
+                conn,
+                table_name=table_name,
+                column_name=column_name,
+                sql_type=str((item or {}).get("sql_type", "")).strip().upper(),
+                display_name=str((item or {}).get("display_name") or ""),
+                number_format=str((item or {}).get("number_format") or ""),
+                display_lang=str((item or {}).get("display_lang") or ""),
+                commit=False,
+            )
+            if result.get("error"):
+                raise ValueError(f"items[{idx}] 失败: {result['error']}")
+            created.append(
+                {
+                    "column_name": result["column_name"],
+                    "sql_type": result["sql_type"],
+                }
+            )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        return {"error": str(e)}
+    return {"ok": True, "table_name": table_name, "created": created, "count": len(created)}
 
 
 def _const_delete(conn: sqlite3.Connection, args: Dict[str, Any], can_write: bool) -> Dict[str, Any]:
