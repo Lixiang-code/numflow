@@ -869,8 +869,9 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "支持 ${name} 引用其他已注册常量及数学运算）。"
                 "★ tags 必填且至少 1 个：用于在前端常量页按『主系统/分类』聚合展示，"
                 "可使用 const_tag_register 预先创建标签；通常至少包含所属主系统名。"
-                "★ brief 是常量的概念定义（是什么），应以自然语言描述，不应出现具体数值。"
-                "★ design_intent 可选，用于记录设计意图、边界限制、调参方向（如'后续可上调至0.8'），不必填。"
+                "★ brief 是常量的概念定义（是什么），应以自然语言描述，不应出现具体数值。\n"
+                "★ design_intent 是设计意图/边界限制/调参方向（为什么是这个值/可调范围），强烈建议填写。\n"
+                "  与 brief 分工：brief=定义含义、design_intent=设计决策与边界（如'后续可上调至0.8''与crit_rate共享上限''暂定值待战斗验证'）。"
             ),
             "parameters": {
                 "type": "object",
@@ -891,7 +892,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                     },
                     "design_intent": {
                         "type": "string",
-                        "description": "设计意图/限制/调参方向（如'后续可上调至0.8'/'与crit_rate共享上限'），可选",
+                        "description": "设计意图、边界限制、可调范围、待验证假设（如'后续可上调至0.8''暂定值待战斗验证'），强烈建议填写",
                     },
                     "scope_table": {"type": "string"},
                     "tags": {
