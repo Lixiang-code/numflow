@@ -945,6 +945,45 @@ def _make_state_anchor(
     )
 
 
+def _inject_tool_warning_prompt(
+    messages: List[Dict[str, Any]],
+    tool_name: str,
+    result_json: str,
+) -> None:
+    """检测工具返回中的 warnings 字段，若有则注入 USER 消息要求 AI 自诉。
+
+    相比 system 提示词，user 角色的消息在 LLM attention 中权重更高，
+    对纠偏效果更强。
+    """
+    try:
+        data = json.loads(result_json) if isinstance(result_json, str) else result_json
+    except (json.JSONDecodeError, TypeError):
+        return
+    if not isinstance(data, dict):
+        return
+    warnings = data.get("warnings") or []
+    if isinstance(warnings, list):
+        warnings = [w for w in warnings if w]
+    if not warnings:
+        return
+    warn_text = "\n".join(f"  - {w}" for w in warnings[:10])
+    messages.append(
+        {
+            "role": "user",
+            "content": (
+                f"STOP — 工具 `{tool_name}` 返回了 {len(warnings)} 条警告，"
+                f"你必须立即处理：\n\n"
+                f"{warn_text}\n\n"
+                "请按以下格式逐一回应（禁止跳过）：\n"
+                "1. 对每条警告说明你的理解：这条警告在提醒什么？\n"
+                "2. 对每条警告说明是否需要处理：需要/不需要，理由。\n"
+                "3. 对需要处理的警告，立即通过工具调用修正。\n\n"
+                "警告未全部处理前，禁止结束任务。"
+            ),
+        }
+    )
+
+
 # ---------- gather phase ----------
 
 def _run_gather_phase(
@@ -1457,6 +1496,7 @@ def _resume_agent_sse(
                         exec_text_results.append(f"[{name}]\n{result}")
                     else:
                         execute_messages.append({"role": "tool", "tool_call_id": call_id, "content": result})
+                        _inject_tool_warning_prompt(execute_messages, name, result)
                 
                 if _text_fallback and exec_text_results:
                     execute_messages.append({"role": "user", "content": "[工具调用结果]\n" + "\n---\n".join(exec_text_results)})
@@ -2004,6 +2044,7 @@ def run_agent_sse(
                             "content": result,
                         }
                     )
+                    _inject_tool_warning_prompt(execute_messages, name, result)
             if _text_fallback and exec_text_results:
                 execute_messages.append({"role": "user", "content": "[工具调用结果]\n" + "\n---\n".join(exec_text_results)})
             # ---- 错误后立即注入状态锚点（首次错误时触发）----
