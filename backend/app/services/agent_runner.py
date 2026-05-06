@@ -139,6 +139,7 @@ WRITE_TOOLS = {
     "write_cells",
     "write_cells_series",
     "create_table",
+    "add_column",
     "create_matrix_table",
     "write_matrix_cells",
     "create_3d_table",
@@ -285,6 +286,7 @@ _TOOL_LABELS: Dict[str, str] = {
     "sparse_sample": "稀疏采样",
     "create_3d_table": "创建 3D 表",
     "write_cells_series": "序列写入",
+    "add_column": "追加列",
 }
 
 

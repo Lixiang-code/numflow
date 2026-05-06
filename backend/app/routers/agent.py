@@ -107,6 +107,34 @@ def _session_tracking_wrapper(
         except Exception:  # noqa: BLE001
             pass
 
+    def _collect_gather_context() -> list[dict]:
+        gather_ctx = []
+        for turn in conversation_turns:
+            if turn.get("phase") == "gather":
+                gather_ctx.extend(turn.get("messages", []))
+        return gather_ctx
+
+    def _persist_error_state(error_text: str) -> None:
+        try:
+            update_agent_session(
+                conn,
+                session_id,
+                status="error",
+                design_text="".join(design_buf),
+                review_text="".join(review_buf),
+                execute_text="".join(execute_buf),
+                tools_json=json.dumps(tools, ensure_ascii=False),
+                events_json=json.dumps(tracked_events, ensure_ascii=False),
+                messages_json=json.dumps(conversation_turns, ensure_ascii=False),
+                error_text=error_text[:2000],
+                current_phase=_current_phase,
+                completed_phases=json.dumps(_completed_phases),
+                gather_context_json=json.dumps(_collect_gather_context(), ensure_ascii=False),
+                finished=True,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     try:
         for chunk in gen:
             # Intercept and parse each SSE event
@@ -293,29 +321,7 @@ def _session_tracking_wrapper(
 
                     elif etype == "error":
                         # 保存错误状态和当前进度，以便恢复
-                        # 从conversation_turns中提取gather_context
-                        gather_ctx = []
-                        for turn in conversation_turns:
-                            if turn.get("phase") == "gather":
-                                gather_ctx.extend(turn.get("messages", []))
-                        try:
-                            update_agent_session(
-                                conn, session_id,
-                                status="error",
-                                design_text="".join(design_buf),
-                                review_text="".join(review_buf),
-                                execute_text="".join(execute_buf),
-                                tools_json=json.dumps(tools, ensure_ascii=False),
-                                events_json=json.dumps(tracked_events, ensure_ascii=False),
-                                messages_json=json.dumps(conversation_turns, ensure_ascii=False),
-                                error_text=str(raw.get("message", ""))[:2000],
-                                current_phase=_current_phase,
-                                completed_phases=json.dumps(_completed_phases),
-                                gather_context_json=json.dumps(gather_ctx, ensure_ascii=False),
-                                finished=True,
-                            )
-                        except Exception:  # noqa: BLE001
-                            pass
+                        _persist_error_state(str(raw.get("message", "")))
 
                 except Exception:  # noqa: BLE001 — never crash the stream
                     pass
@@ -323,8 +329,9 @@ def _session_tracking_wrapper(
             yield chunk
 
     except GeneratorExit:
-        # Client disconnected — session stays 'running' (partial data already persisted)
-        pass
+        _persist_error_state("client_disconnected")
+    except Exception as exc:  # noqa: BLE001
+        _persist_error_state(f"unexpected_stream_error: {exc}")
 
 
 @router.post("/chat")

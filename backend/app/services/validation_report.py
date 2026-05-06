@@ -23,15 +23,7 @@ def _is_id_like(col_name: str) -> bool:
 
 
 def _is_percent_like(col_name: str, number_format: str = "") -> bool:
-    if number_format == "0.00%":
-        return True
-    # 显式非百分比格式（如 '#,##0'、'0.00'、'0'）→ 绝不当作百分比
-    if number_format and number_format != "0.00%":
-        return False
-    n = col_name.lower()
-    if any(tok in n for tok in ("_dmg", "dmg_", "multiplier", "_factor", "_coef", "_bonus", "_amp", "_boost", "_power")):
-        return False
-    return any(tok in n for tok in ("ratio", "rate", "percent", "_pct", "pct_", "share"))
+    return "%" in str(number_format or "")
 
 
 def _is_cost_perf_like(col_name: str) -> bool:
@@ -87,21 +79,6 @@ def default_rules_for(
                 "order_by": "row_id",
             })
 
-    # 表层面：alloc 表的所有 REAL 列默认 percent_bounds（除非明显是非占比命名）
-    if kind == "alloc":
-        for col in cols:
-            name = str(col.get("name", ""))
-            if not name or name == "row_id" or _is_id_like(name):
-                continue
-            sqlt = str(col.get("sql_type") or "").upper()
-            if sqlt == "REAL" and not _is_percent_like(name, str(col.get("number_format") or "")):
-                rules.append({
-                    "id": f"alloc_{name}_bounds",
-                    "type": "percent_bounds",
-                    "column": name,
-                    "min": 0.0,
-                    "max": 1.0,
-                })
     return rules
 
 

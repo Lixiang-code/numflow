@@ -34,7 +34,12 @@ from app.services.skill_library import (
 from app.services.snapshot_ops import compare_snapshot, create_snapshot, list_snapshots
 from app.services.table_ops import create_dynamic_table, delete_dynamic_table, create_3d_table, read_3d_table
 from app.services.tool_envelope import wrap_tool_payload
-from app.services.validation_report import build_validation_report, list_validation_history, confirm_validation_rule as _confirm_validation_rule
+from app.services.validation_report import (
+    attach_default_rules,
+    build_validation_report,
+    confirm_validation_rule as _confirm_validation_rule,
+    list_validation_history,
+)
 
 TOOLS_OPENAI: List[Dict[str, Any]] = [
     {
@@ -451,6 +456,29 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "add_column",
+            "description": (
+                "向已有表显式追加一列（ALTER TABLE ADD COLUMN），并同步更新 schema 元数据。"
+                "适合先补结构再填值；不要为少量追加列而新建整张替代表。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string"},
+                    "column_name": {"type": "string", "description": "英文 snake_case 列名"},
+                    "sql_type": {"type": "string", "enum": ["TEXT", "REAL", "INTEGER"]},
+                    "display_name": {"type": "string"},
+                    "number_format": {"type": "string"},
+                    "display_lang": {"type": "string"},
+                },
+                "required": ["table_name", "column_name", "sql_type"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "write_cells_series",
             "description": (
                 "★ 系列填充：用模板生成连续 row_id（如 lv_1..lv_50）的写入，避免一次性贴数百行 JSON。"
@@ -694,7 +722,8 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "x 超出范围时夹持到最近端点。\n"
                 "  聚合：SUM(@@col) / AVERAGE(@@col) / COUNT(@@col)\n"
                 "  条件聚合：SUM(IF(@@col < @表[col], @@val, 0))（典型：累计经验 / 前缀和）\n"
-                "  累计求和：CUMSUM_TO_HERE(@@col)（含本行）/ CUMSUM_PREV(@@col)（截至上一行）\n"
+                "  累计求和：CUMSUM_TO_HERE(@@col)（含本行）/ CUMSUM_PREV(@@col)（截至上一行）/ "
+                "CUMSUM_GROUP_BY(@@group_col, @@value_col)（按分组列在组内累计）\n"
                 "一个公式即可填满整列（200 行/8 列只需 8 次调用，请优先使用，禁止逐行 write_cells）。"
             ),
             "parameters": {
@@ -1658,6 +1687,7 @@ _TOOL_TITLE_ZH: Dict[str, str] = {
     "update_global_readme": "更新全局 README",
     "set_project_setting": "设置项目参数",
     "create_table": "创建业务表",
+    "add_column": "追加表列",
     "write_cells": "批量写单元格",
     "write_cells_series": "按序列批量写入",
     "register_formula": "注册列公式",
@@ -1721,6 +1751,7 @@ _TOOL_GROUP_BY_NAME: Dict[str, str] = {
     "update_global_readme": "write_core",
     "set_project_setting": "write_core",
     "create_table": "write_core",
+    "add_column": "write_core",
     "write_cells": "write_core",
     "write_cells_series": "write_core",
     "delete_table": "write_core",
@@ -1789,6 +1820,7 @@ _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "update_global_readme": "更新项目级全局 README 说明文档。",
     "set_project_setting": "修改项目的全局设置参数（如版本、规则等）。",
     "create_table": "在当前项目中新建一个业务数据表。",
+    "add_column": "向已有业务表显式追加一个新列，并同步更新 schema 元数据。",
     "write_cells": "批量向指定行列位置写入单元格数据。",
     "write_cells_series": "按列序列规则批量写入一组单元格数据。",
     "register_formula": "为某列注册计算公式，供后续触发重算使用。",
@@ -3447,6 +3479,8 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                         out["_notice"] = dim_warn
                 except ValueError as e:
                     out = {"error": str(e)}
+    elif name == "add_column":
+        out = _add_column(conn, args, p.can_write)
     elif name == "write_cells_series":
         out = _write_cells_series(conn, args, p.can_write)
     elif name == "register_formula":
@@ -3861,7 +3895,10 @@ def _list_exposed_params(conn: sqlite3.Connection, target_step: str) -> Dict[str
     def _trim_value(v: Any) -> Any:
         s = json.dumps(v, ensure_ascii=False)
         if len(s) > 200:
-            return json.loads(s[:200] + '..."')
+            try:
+                return json.loads(s[:200] + '..."')
+            except (json.JSONDecodeError, ValueError):
+                return s[:197] + "..."
         return v
 
     items: List[Dict[str, Any]] = []
@@ -4839,6 +4876,90 @@ def _write_cells_series(
     if isinstance(result, dict):
         result["expanded_rows"] = n
     return result
+
+
+def _add_column(
+    conn: sqlite3.Connection,
+    args: Dict[str, Any],
+    can_write: bool,
+) -> Dict[str, Any]:
+    err = _require_write(can_write, "add_column")
+    if err:
+        return err
+    try:
+        table_name = assert_col_or_table(str(args.get("table_name", "")).strip())
+        column_name = assert_col_or_table(str(args.get("column_name", "")).strip())
+    except ValueError as e:
+        return {"error": str(e)}
+    sql_type = str(args.get("sql_type", "")).strip().upper()
+    if sql_type not in {"TEXT", "REAL", "INTEGER"}:
+        return {"error": f"sql_type 非法：{sql_type or '<empty>'}"}
+
+    row = conn.execute(
+        "SELECT schema_json, validation_rules_json FROM _table_registry WHERE table_name = ?",
+        (table_name,),
+    ).fetchone()
+    if not row:
+        return {"error": f"表 {table_name!r} 不存在"}
+
+    current_cols = {
+        (r["name"] if isinstance(r, sqlite3.Row) else r[1])
+        for r in conn.execute(f'PRAGMA table_info("{table_name}")')
+    }
+    if column_name in current_cols:
+        return {"error": f"列 {table_name}.{column_name} 已存在"}
+
+    conn.execute(f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {sql_type} NULL')
+
+    try:
+        schema = json.loads((row["schema_json"] if isinstance(row, sqlite3.Row) else row[0]) or "{}") or {}
+    except Exception:
+        schema = {}
+    schema_cols = list(schema.get("columns") or [])
+    dtype_map = {"TEXT": "text", "REAL": "float", "INTEGER": "int"}
+    schema_cols.append(
+        {
+            "name": column_name,
+            "sql_type": sql_type,
+            "display_name": str(args.get("display_name") or ""),
+            "dtype": dtype_map[sql_type],
+            "number_format": str(args.get("number_format") or ""),
+            "display_lang": str(args.get("display_lang") or ""),
+        }
+    )
+    schema["columns"] = schema_cols
+    conn.execute(
+        "UPDATE _table_registry SET schema_json = ? WHERE table_name = ?",
+        (json.dumps(schema, ensure_ascii=False), table_name),
+    )
+
+    validation_rules_json = row["validation_rules_json"] if isinstance(row, sqlite3.Row) else row[1]
+    rule_kind = "unknown"
+    if validation_rules_json:
+        try:
+            rule_kind = str((json.loads(validation_rules_json or "{}") or {}).get("kind") or "unknown")
+        except Exception:
+            rule_kind = "unknown"
+    try:
+        formula_cols = [
+            r["column_name"] if isinstance(r, sqlite3.Row) else r[0]
+            for r in conn.execute(
+                "SELECT column_name FROM _formula_registry WHERE table_name = ?",
+                (table_name,),
+            ).fetchall()
+        ]
+        attach_default_rules(
+            conn,
+            table_name,
+            kind=rule_kind,
+            schema_columns=schema_cols,
+            formula_columns=formula_cols,
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    conn.commit()
+    return {"ok": True, "table_name": table_name, "column_name": column_name, "sql_type": sql_type}
 
 
 def _const_delete(conn: sqlite3.Connection, args: Dict[str, Any], can_write: bool) -> Dict[str, Any]:

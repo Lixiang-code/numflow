@@ -263,6 +263,21 @@ def _columns_for_table(
     return cols
 
 
+def _join_hint_columns(conn: sqlite3.Connection, table: str) -> Set[str]:
+    hints: Set[str] = set()
+    try:
+        for row in conn.execute(f'PRAGMA table_info("{table}")'):
+            name = row["name"] if isinstance(row, sqlite3.Row) else row[1]
+            if not name or name == "row_id":
+                continue
+            low = str(name).lower()
+            if low in {"level", "stage", "tier", "rank"} or low.endswith(("_id", "_key", "_type", "_level")):
+                hints.add(str(name))
+    except sqlite3.OperationalError:
+        return set()
+    return hints
+
+
 # ───────────────────────── 批量回写工具（A3） ─────────────────────────
 
 
@@ -476,7 +491,10 @@ def execute_formula_on_column(
             main_extra.append("level")
         if use_min_cols:
             main_cols = _columns_for_table(
-                refs, table_name, target_column=column_name, extra=main_extra
+                refs,
+                table_name,
+                target_column=column_name,
+                extra=list(main_extra) + sorted(_join_hint_columns(conn, table_name)),
             )
             frames: Dict[str, pd.DataFrame] = {table_name: load_table_df(conn, table_name, main_cols)}
         else:
@@ -485,7 +503,7 @@ def execute_formula_on_column(
             if rt in frames:
                 continue
             if use_min_cols:
-                ref_cols = _columns_for_table(refs, rt)
+                ref_cols = _columns_for_table(refs, rt, extra=sorted(_join_hint_columns(conn, rt)))
                 frames[rt] = load_table_df(conn, rt, ref_cols)
             else:
                 frames[rt] = load_table_df(conn, rt)

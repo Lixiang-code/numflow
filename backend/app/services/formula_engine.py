@@ -116,14 +116,14 @@ def _safe_log(x: float, base: float | None = None) -> float:
 
 
 def _piecewise(*args: Any) -> Any:
-    """IFS/PIECEWISE(cond1, val1, cond2, val2, ..., default)
+    """IFS(cond1, val1, cond2, val2, ..., default) / PIECEWISE(...)
     依次取第一个为真的 cond 对应 val；末位为默认值。"""
     if len(args) < 1:
-        raise ValueError("IFS/PIECEWISE 至少需要 1 个参数（cond1,val1,...,default）")
+        raise ValueError("IFS 至少需要 1 个参数（cond1,val1,...,default）")
     default = args[-1]
     pairs = args[:-1]
     if len(pairs) % 2 != 0:
-        raise ValueError("IFS/PIECEWISE 需要 cond/val 配对加默认值，参数个数应为奇数（cond1,val1,...,default）")
+        raise ValueError("IFS 需要 cond/val 配对加默认值，参数个数应为奇数（cond1,val1,...,default）")
     for i in range(0, len(pairs), 2):
         if _to_bool(pairs[i]):
             return pairs[i + 1]
@@ -393,6 +393,21 @@ def _cumsum_to_here(arr: Any) -> float:
     return float(sum(vals[: i + 1]))
 
 
+def _cumsum_group_by(dim_col: Any, arr: Any) -> float:
+    """CUMSUM_GROUP_BY(@@dim_col, @@arr)：按 dim_col 分组后在组内累计求和。"""
+    i = _CURRENT_ROW_INDEX.get()
+    dim_vals = list(dim_col) if isinstance(dim_col, (list, tuple, pd.Series)) else [dim_col]
+    arr_vals = _arr_to_floats(arr)
+    if i >= len(dim_vals) or i >= len(arr_vals):
+        return 0.0
+    current_dim = dim_vals[i]
+    total = 0.0
+    for j in range(min(i + 1, len(dim_vals), len(arr_vals))):
+        if dim_vals[j] == current_dim:
+            total += arr_vals[j]
+    return float(total)
+
+
 def _cumsum_prev(arr: Any) -> float:
     """CUMSUM_PREV(@@T[col])：截止上一行的累计求和（第 1 行 = 0）。"""
     i = _CURRENT_ROW_INDEX.get()
@@ -492,6 +507,7 @@ _FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "counta": _counta_arr,
     # 累计求和（用于副本/养成累计门票/累计消耗等场景）
     "cumsum_to_here": _cumsum_to_here,
+    "cumsum_group_by": _cumsum_group_by,
     "cumsum_prev": _cumsum_prev,
     # null 处理
     "coalesce": _coalesce,
@@ -623,11 +639,12 @@ def substitute_refs(
     formula: str,
     *,
     frames: Dict[str, pd.DataFrame],
-) -> Tuple[str, Dict[str, pd.Series], Dict[str, list]]:
+) -> Tuple[str, Dict[str, pd.Series], Dict[str, list], Dict[str, Tuple[str, str]]]:
     """将 @T[c] 替换为 __s<n>（逐行标量），@@T[c] 替换为 __a<n>（整列 list）。
-    返回 (表达式, scalar_map, array_map)。"""
+    返回 (表达式, scalar_map, array_map, scalar_ref_meta)。"""
     scalar_map: Dict[str, pd.Series] = {}
     array_map: Dict[str, list] = {}
+    scalar_ref_meta: Dict[str, Tuple[str, str]] = {}
     out = formula
     s_idx = 0
     a_idx = 0
@@ -664,26 +681,87 @@ def substitute_refs(
         key = f"__s{s_idx}"
         s_idx += 1
         scalar_map[key] = df[col]
+        scalar_ref_meta[key] = (tbl, col)
         out = out.replace(token, key)
 
-    return out, scalar_map, array_map
+    return out, scalar_map, array_map, scalar_ref_meta
+
+
+def _candidate_join_columns(target_df: pd.DataFrame, ref_df: pd.DataFrame) -> List[List[str]]:
+    common = [c for c in target_df.columns if c in ref_df.columns and c != "row_id"]
+    if not common:
+        return []
+    preferred = [
+        c for c in common
+        if c.lower() in {"level", "stage", "tier", "rank"}
+        or c.lower().endswith(("_id", "_key", "_type"))
+    ]
+    candidates: List[List[str]] = []
+    seen: Set[Tuple[str, ...]] = set()
+
+    def _push(cols: List[str]) -> None:
+        key = tuple(cols)
+        if cols and key not in seen:
+            seen.add(key)
+            candidates.append(cols)
+
+    for col in preferred:
+        _push([col])
+    _push(preferred)
+    for col in common:
+        _push([col])
+    _push(common)
+    return candidates
+
+
+def _align_scalar_series(
+    target_df: pd.DataFrame,
+    ref_df: pd.DataFrame,
+    ref_col: str,
+) -> Optional[pd.Series]:
+    if ref_col not in ref_df.columns:
+        return None
+    for join_cols in _candidate_join_columns(target_df, ref_df):
+        ref_cols = list(dict.fromkeys(join_cols + [ref_col]))
+        ref_view = ref_df[ref_cols].copy()
+        if ref_view.duplicated(join_cols).any():
+            continue
+        merged = target_df[join_cols].merge(ref_view, how="left", on=join_cols, sort=False)
+        if len(merged) != len(target_df):
+            continue
+        aligned = merged[ref_col]
+        if aligned.isna().any():
+            continue
+        return aligned
+    return None
 
 
 def eval_series(formula: str, frames: Dict[str, pd.DataFrame]) -> pd.Series:
     formula = preprocess_formula(formula)
-    expr, scalar_map, array_map = substitute_refs(formula, frames=frames)
+    expr, scalar_map, array_map, scalar_ref_meta = substitute_refs(formula, frames=frames)
     if not scalar_map and not array_map:
         v = safe_eval_scalar(expr, {})
         return pd.Series([v] * max(len(df) for df in frames.values()))
     # 累计求和需要逐行求值（即便没有 scalar_map）
-    needs_rowwise = bool(re.search(r"\bcumsum_(to_here|prev)\b", expr.lower()))
+    needs_rowwise = bool(re.search(r"\bcumsum_(to_here|prev|group_by)\b", expr.lower()))
     if scalar_map:
-        first = next(iter(scalar_map.values()))
-        n = len(first)
+        target_name = next(iter(frames))
+        target_df = frames[target_name]
+        n = len(target_df)
+        aligned_scalar_map: Dict[str, pd.Series] = {}
         for k, s in scalar_map.items():
-            if len(s) != n:
+            if len(s) == n:
+                aligned_scalar_map[k] = s
+                continue
+            ref_table, ref_col = scalar_ref_meta.get(k, ("", ""))
+            ref_df = frames.get(ref_table)
+            if ref_df is None:
                 raise ValueError("引用列长度不一致")
-        return pd.Series(safe_eval_vector(expr, scalar_map, array_map))
+            aligned = _align_scalar_series(target_df, ref_df, ref_col)
+            if aligned is None:
+                raise ValueError("引用列长度不一致")
+            aligned_scalar_map[k] = aligned
+        return pd.Series(safe_eval_vector(expr, aligned_scalar_map, array_map))
     if needs_rowwise:
         n = max(len(df) for df in frames.values())
         static_env: Dict[str, Any] = {k: v for k, v in array_map.items()}
@@ -894,7 +972,7 @@ def eval_row_formula(
             return None, {f"__eval_error__: {e}"}
 
 
-_NEEDS_CURRENT_ROW = re.compile(r"\bcumsum_(to_here|prev)\b", re.IGNORECASE)
+_NEEDS_CURRENT_ROW = re.compile(r"\bcumsum_(to_here|prev|group_by)\b", re.IGNORECASE)
 
 
 def safe_eval_vector(
