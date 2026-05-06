@@ -102,6 +102,23 @@ def test_const_register_does_not_warn_for_round_integer_values():
     assert "warning" not in result
 
 
+def test_const_register_does_not_warn_for_decimal_numeric_values():
+    conn = _new_conn()
+    result = _const_register(
+        conn,
+        {
+            "name_en": "base_crit_rate",
+            "name_zh": "基础暴击率",
+            "value": 0.05,
+            "brief": "基础暴击率",
+            "tags": ["combat"],
+        },
+        True,
+    )
+    assert result["ok"] is True
+    assert "warning" not in result
+
+
 def test_create_3d_table_rewrites_dim2_key_alias_and_executes_formula():
     conn = _new_conn()
     result = create_3d_table(
@@ -599,6 +616,39 @@ def test_write_cells_series_supports_text_columns():
         ("r_1", "note_1"),
         ("r_2", "note_2"),
         ("r_3", "note_3"),
+    ]
+
+
+def test_write_cells_series_supports_text_value_list():
+    conn = _new_conn()
+    create_dynamic_table(
+        conn,
+        table_name="notes_value_tbl",
+        display_name="备注值列表表",
+        columns=[("note", "TEXT")],
+    )
+
+    result = json.loads(
+        dispatch_tool(
+            "write_cells_series",
+            {
+                "table_name": "notes_value_tbl",
+                "row_id_template": "r_{i}",
+                "column": "note",
+                "start": 1,
+                "end": 3,
+                "value_list": ["A", "B", "C"],
+            },
+            _project_db(conn),
+        )
+    )
+
+    assert result["status"] == "success"
+    rows = conn.execute('SELECT row_id, note FROM "notes_value_tbl" ORDER BY row_id').fetchall()
+    assert [(row["row_id"], row["note"]) for row in rows] == [
+        ("r_1", "A"),
+        ("r_2", "B"),
+        ("r_3", "C"),
     ]
 
 
