@@ -724,6 +724,9 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "  条件聚合：SUM(IF(@@col < @表[col], @@val, 0))（典型：累计经验 / 前缀和）\n"
                 "  累计求和：CUMSUM_TO_HERE(@@col)（含本行）/ CUMSUM_PREV(@@col)（截至上一行）/ "
                 "CUMSUM_GROUP_BY(@@group_col, @@value_col)（按分组列在组内累计）\n"
+                "  字符串：CONCAT(s1,s2,...) 拼接多个值为字符串\n"
+                "  null 处理：IFNULL(val,default) / COALESCE(v1,v2,...) 返回第一个非 null 值\n"
+                "  计算器调用：call_calculator('calc_name', arg1, arg2, ...) 调用已注册的 calculator 取值\n"
                 "一个公式即可填满整列（200 行/8 列只需 8 次调用，请优先使用，禁止逐行 write_cells）。"
             ),
             "parameters": {
