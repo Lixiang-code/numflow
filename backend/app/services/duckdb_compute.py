@@ -343,6 +343,7 @@ def compute_column_via_duckdb(
     level_column: Optional[str] = None,
     level_min: Optional[float] = None,
     level_max: Optional[float] = None,
+    table_cache: Optional[Dict[str, pd.DataFrame]] = None,
 ) -> List[Tuple[Any, Any]]:
     """白名单公式走 DuckDB 计算，返回 `[(value, row_id), ...]` 待批量回写。"""
     if not is_enabled(conn):
@@ -368,13 +369,13 @@ def compute_column_via_duckdb(
 
     # 加载主表
     if cross_ref_map:
-        df = load_table_df(conn, table_name)
+        df = load_table_df(conn, table_name, table_cache=table_cache)
     else:
         wanted = sorted(set(used_cols) | _join_hint_columns(conn, table_name))
         extra_level = (level_column or ("level" if (level_min is not None) else None))
         if extra_level and extra_level in existing_cols:
             wanted.append(extra_level)
-        df = load_table_df(conn, table_name, wanted)
+        df = load_table_df(conn, table_name, wanted, table_cache=table_cache)
     if df.empty:
         return []
 
@@ -382,7 +383,7 @@ def compute_column_via_duckdb(
     for (src_tbl, src_col), alias in cross_ref_map.items():
         ref_df = ref_frames.get(src_tbl)
         if ref_df is None:
-            ref_df = load_table_df(conn, src_tbl)
+            ref_df = load_table_df(conn, src_tbl, table_cache=table_cache)
             ref_frames[src_tbl] = ref_df
         if src_col not in ref_df.columns:
             raise NotSupported(f"跨表引用列不存在：{src_tbl}.{src_col}")

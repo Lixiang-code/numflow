@@ -31,6 +31,7 @@ from app.services.formula_engine import (
 from app.services.perf_flags import PerfTimer, perf_flag
 
 Node = Tuple[str, str]
+TableFrameCache = Dict[str, pd.DataFrame]
 
 _FLOAT_TOLERANCE = 1e-9
 
@@ -81,6 +82,55 @@ def _current_value_map_from_table(
 ) -> Dict[str, Any]:
     cur = conn.execute(f'SELECT row_id, "{column}" FROM "{table}"')
     return {str(row[0]): row[1] for row in cur.fetchall()}
+
+
+def _copy_df_with_attrs(df: pd.DataFrame) -> pd.DataFrame:
+    copied = df.copy()
+    copied.attrs = dict(df.attrs)
+    return copied
+
+
+def _select_cached_columns(df: pd.DataFrame, columns: Optional[Iterable[str]]) -> pd.DataFrame:
+    if columns is None:
+        return _copy_df_with_attrs(df)
+    wanted: List[str] = []
+    seen: Set[str] = set()
+    if "row_id" in df.columns:
+        wanted.append("row_id")
+        seen.add("row_id")
+    for col in columns:
+        if not col or col in seen:
+            continue
+        if col in df.columns:
+            wanted.append(col)
+            seen.add(col)
+    if not wanted:
+        return _copy_df_with_attrs(df)
+    sliced = df.loc[:, wanted].copy()
+    sliced.attrs = dict(df.attrs)
+    return sliced
+
+
+def _sync_table_cache(
+    table_cache: Optional[TableFrameCache],
+    *,
+    table_name: str,
+    column_name: str,
+    pairs: Sequence[Tuple[Any, Any]],
+) -> None:
+    if not table_cache or table_name not in table_cache or not pairs:
+        return
+    cached_df = table_cache[table_name]
+    if "row_id" not in cached_df.columns:
+        return
+    if column_name not in cached_df.columns:
+        cached_df[column_name] = None
+    row_index = {str(rid): idx for idx, rid in enumerate(cached_df["row_id"].tolist())}
+    for value, row_id in pairs:
+        idx = row_index.get(str(row_id))
+        if idx is None:
+            continue
+        cached_df.iat[idx, cached_df.columns.get_loc(column_name)] = value
 
 
 def _filter_changed_pairs(
@@ -294,6 +344,8 @@ def load_table_df(
     conn: sqlite3.Connection,
     table: str,
     columns: Optional[Iterable[str]] = None,
+    *,
+    table_cache: Optional[TableFrameCache] = None,
 ) -> pd.DataFrame:
     """从业务表加载 DataFrame。
 
@@ -328,6 +380,12 @@ def load_table_df(
             pass
         return df
 
+    if table_cache is not None:
+        cached = table_cache.get(table)
+        if cached is None:
+            cached = _attach_meta(pd.read_sql_query(f'SELECT * FROM "{table}"', conn))
+            table_cache[table] = cached
+        return _select_cached_columns(cached, columns)
     if columns is None:
         return _attach_meta(pd.read_sql_query(f'SELECT * FROM "{table}"', conn))
     try:
@@ -492,6 +550,7 @@ def execute_formula_on_column(
     level_column: Optional[str] = None,
     level_min: Optional[float] = None,
     level_max: Optional[float] = None,
+    table_cache: Optional[TableFrameCache] = None,
 ) -> Dict[str, Any]:
     cur = conn.execute(
         "SELECT formula FROM _formula_registry WHERE table_name = ? AND column_name = ?",
@@ -531,6 +590,7 @@ def execute_formula_on_column(
                 level_column=level_column,
                 level_min=level_min,
                 level_max=level_max,
+                table_cache=table_cache,
             )
             duckdb_used = True
     except Exception:  # noqa: BLE001
@@ -572,6 +632,12 @@ def execute_formula_on_column(
         ) as t2:
             if changed_pairs:
                 _batch_apply_updates(conn, table=table_name, column=column_name, pairs=changed_pairs)
+                _sync_table_cache(
+                    table_cache,
+                    table_name=table_name,
+                    column_name=column_name,
+                    pairs=changed_pairs,
+                )
             _batch_apply_provenance(
                 conn,
                 table=table_name,
@@ -617,17 +683,19 @@ def execute_formula_on_column(
                 target_column=column_name,
                 extra=list(main_extra) + sorted(_join_hint_columns(conn, table_name)),
             )
-            frames: Dict[str, pd.DataFrame] = {table_name: load_table_df(conn, table_name, main_cols)}
+            frames: Dict[str, pd.DataFrame] = {
+                table_name: load_table_df(conn, table_name, main_cols, table_cache=table_cache)
+            }
         else:
-            frames = {table_name: load_table_df(conn, table_name)}
+            frames = {table_name: load_table_df(conn, table_name, table_cache=table_cache)}
         for rt, _rc in refs:
             if rt in frames:
                 continue
             if use_min_cols:
                 ref_cols = _columns_for_table(refs, rt, extra=sorted(_join_hint_columns(conn, rt)))
-                frames[rt] = load_table_df(conn, rt, ref_cols)
+                frames[rt] = load_table_df(conn, rt, ref_cols, table_cache=table_cache)
             else:
-                frames[rt] = load_table_df(conn, rt)
+                frames[rt] = load_table_df(conn, rt, table_cache=table_cache)
         try:
             formula = preprocess_formula(formula)
             with _formula_call_calculator_context(conn):
@@ -680,6 +748,12 @@ def execute_formula_on_column(
 
         if use_batch_write:
             _batch_apply_updates(conn, table=table_name, column=col, pairs=changed_pairs)
+            _sync_table_cache(
+                table_cache,
+                table_name=table_name,
+                column_name=col,
+                pairs=changed_pairs,
+            )
             _batch_apply_provenance(
                 conn,
                 table=table_name,
@@ -819,7 +893,13 @@ def recalculate_downstream(conn: sqlite3.Connection, table_name: str, column_nam
     return {"executed": done, "errors": errors}
 
 
-def _execute_node(conn: sqlite3.Connection, table: str, column: str) -> Dict[str, Any]:
+def _execute_node(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    *,
+    table_cache: Optional[TableFrameCache] = None,
+) -> Dict[str, Any]:
     """根据公式类型选择执行入口（sql/row/row_template）。"""
     cur = conn.execute(
         "SELECT formula_type FROM _formula_registry WHERE table_name = ? AND column_name = ?",
@@ -830,8 +910,8 @@ def _execute_node(conn: sqlite3.Connection, table: str, column: str) -> Dict[str
         raise ValueError(f"未注册公式：{table}.{column}")
     ftype = (r["formula_type"] if isinstance(r, sqlite3.Row) else r[0]) or "sql"
     if ftype == "sql":
-        return execute_formula_on_column(conn, table, column)
-    return execute_row_formula(conn, table, column)
+        return execute_formula_on_column(conn, table, column, table_cache=table_cache)
+    return execute_row_formula(conn, table, column, table_cache=table_cache)
 
 
 def recalculate_downstream_dag(
@@ -936,6 +1016,7 @@ def recalculate_downstream_dag(
     changed_nodes: Set[Node] = set() if execute_seeds else set(seed_set)
     skipped_unchanged = 0
     total_rows_changed = 0
+    table_cache: TableFrameCache = {}
     timer = PerfTimer(
         conn,
         op="recalculate_downstream_dag",
@@ -983,7 +1064,7 @@ def recalculate_downstream_dag(
                 )
                 continue
             try:
-                result = _execute_node(conn, t, c)
+                result = _execute_node(conn, t, c, table_cache=table_cache)
                 rows_changed = int(result.get("rows_changed", result.get("rows_updated", 0)) or 0)
                 if rows_changed > 0:
                     changed_nodes.add(node)
@@ -1008,6 +1089,7 @@ def recalculate_downstream_dag(
             skipped_unchanged=skipped_unchanged,
             changed_nodes=len(changed_nodes),
             rows_changed=total_rows_changed,
+            cached_tables=len(table_cache),
         )
 
     out: Dict[str, Any] = {"executed": executed, "errors": errors, "skipped": skipped}
@@ -1155,6 +1237,8 @@ def execute_row_formula(
     conn: sqlite3.Connection,
     table_name: str,
     column_name: str,
+    *,
+    table_cache: Optional[TableFrameCache] = None,
 ) -> Dict[str, Any]:
     """重新执行已注册的同行公式，计算所有行。"""
     cur = conn.execute(
@@ -1185,9 +1269,9 @@ def execute_row_formula(
         available_cols = existing_cols
         refs = parse_row_refs(raw_formula)
         wanted = (refs & existing_cols) | {column_name}
-        df = load_table_df(conn, table_name, wanted)
+        df = load_table_df(conn, table_name, wanted, table_cache=table_cache)
     else:
-        df = load_table_df(conn, table_name)
+        df = load_table_df(conn, table_name, table_cache=table_cache)
         available_cols = set(df.columns) - {"row_id"}
         refs = parse_row_refs(raw_formula)
     external_refs = refs - available_cols
@@ -1270,6 +1354,12 @@ def execute_row_formula(
     )
     if use_batch_write:
         _batch_apply_updates(conn, table=table_name, column=column_name, pairs=changed_pairs)
+        _sync_table_cache(
+            table_cache,
+            table_name=table_name,
+            column_name=column_name,
+            pairs=changed_pairs,
+        )
         _batch_apply_provenance(
             conn,
             table=table_name,

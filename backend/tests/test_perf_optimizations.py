@@ -16,7 +16,7 @@ from app.db.project_migrations import (
     ensure_project_migrations,
 )
 from app.db.project_schema import init_project_db
-from app.services import duckdb_compute, formula_engine
+from app.services import duckdb_compute, formula_engine, formula_exec
 from app.services.calculator_ops import register_calculator
 from app.services.formula_exec import (
     execute_formula_on_column,
@@ -684,6 +684,63 @@ def test_b4_execute_formula_supports_cross_table_refs_with_3d_dim_alignment_via_
         "1_def": 20.0,
         "2_atk": 30.0,
         "2_def": 40.0,
+    }
+
+
+def test_b4_dag_reuses_shared_table_cache_for_duckdb_nodes(monkeypatch):
+    conn = _new_conn()
+    _make_table(conn, "base", "k", "x")
+    _make_table(conn, "ref", "k", "v")
+    _make_table(conn, "mid", "k", "y")
+    _make_table(conn, "top", "k", "z")
+    _insert_rows(
+        conn,
+        "base",
+        [{"row_id": f"r{i}", "k": float(i), "x": float(i)} for i in range(1, 4)],
+    )
+    _insert_rows(
+        conn,
+        "ref",
+        [{"row_id": f"r{i}", "k": float(i), "v": float(i * 10)} for i in range(1, 4)],
+    )
+    _insert_rows(
+        conn,
+        "mid",
+        [{"row_id": f"r{i}", "k": float(i), "y": 0.0} for i in range(1, 4)],
+    )
+    _insert_rows(
+        conn,
+        "top",
+        [{"row_id": f"r{i}", "k": float(i), "z": 0.0} for i in range(1, 4)],
+    )
+    register_formula(conn, "mid", "y", "@base[x] + @ref[v]", defer=True)
+    register_formula(conn, "top", "z", "@base[x] + @ref[v] * 2", defer=True)
+    _set_perf(conn, use_duckdb_compute=True)
+
+    read_sql_calls = 0
+    original_read_sql_query = formula_exec.pd.read_sql_query
+
+    def _counting_read_sql_query(sql, *args, **kwargs):
+        nonlocal read_sql_calls
+        if 'FROM "ref"' in sql:
+            read_sql_calls += 1
+        return original_read_sql_query(sql, *args, **kwargs)
+
+    monkeypatch.setattr(formula_exec.pd, "read_sql_query", _counting_read_sql_query)
+
+    out = recalculate_downstream_dag(conn, [("base", "x")])
+
+    assert out["errors"] == []
+    assert read_sql_calls == 1
+    assert dict(conn.execute('SELECT row_id, y FROM mid ORDER BY row_id').fetchall()) == {
+        "r1": 11.0,
+        "r2": 22.0,
+        "r3": 33.0,
+    }
+    assert dict(conn.execute('SELECT row_id, z FROM top ORDER BY row_id').fetchall()) == {
+        "r1": 21.0,
+        "r2": 42.0,
+        "r3": 63.0,
     }
 
 
