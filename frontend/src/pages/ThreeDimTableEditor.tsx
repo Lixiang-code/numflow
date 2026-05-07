@@ -101,7 +101,7 @@ function parseFormulaRefs(text: string): { colRefs: string[]; constRefs: string[
   return { colRefs, constRefs, refColorMap }
 }
 
-function renderColoredFormula(formula: string, colorMap: Map<string, string>, colDisplay: Map<string, string> = new Map(), constDisplay: Map<string, string> = new Map(), tableDisplay: Map<string, string> = new Map()): React.ReactNode[] {
+function renderColoredFormula(formula: string, colorMap: Map<string, string>, colDisplay: Map<string, string> = new Map(), constDisplay: Map<string, string> = new Map(), tableDisplay: Map<string, string> = new Map(), curTable = ''): React.ReactNode[] {
   const parts = formula.split(/(@@?\w+\[\w+\]|@\w+|\$\{\w+\})/g)
   return parts.map((part, i) => {
     // @@table[col] / @table[col] / @T[col] / @this[col]
@@ -112,7 +112,7 @@ function renderColoredFormula(formula: string, colorMap: Map<string, string>, co
       const cname = crossRefMatch[3]
       let td: string
       if (tname === 'T' || tname === 'this') {
-        td = tableDisplay.get(tableName) || tableName  // 本表显示名
+        td = tableDisplay.get(curTable) || curTable
       } else {
         td = tableDisplay.get(tname) || tname
       }
@@ -614,7 +614,7 @@ export default function ThreeDimTableEditor({
         minHeight: `calc(${FAB_STYLE.lineHeight} * ${clampedRows} + .6rem)`,
       }}>
         <span style={{ color: FAB_STYLE.color }}>
-          {renderColoredFormula(text, map, showEnNames ? new Map() : colDisplayMap, showEnNames ? new Map() : constDisplayMap, showEnNames ? new Map() : tableDisplayMap)}
+          {renderColoredFormula(text, map, showEnNames ? new Map() : colDisplayMap, showEnNames ? new Map() : constDisplayMap, showEnNames ? new Map() : tableDisplayMap, tableName)}
           {!text && <span>&nbsp;</span>}
           {'\n'}
         </span>
@@ -991,7 +991,7 @@ export default function ThreeDimTableEditor({
                     </div>
                   ) : (
                     <code className="matrix-formula-text matrix-formula-text-colored">
-                      {renderColoredFormula(formula.formula, displayRefs.refColorMap, showEnNames ? new Map() : colDisplayMap, showEnNames ? new Map() : constDisplayMap, showEnNames ? new Map() : tableDisplayMap)}
+                      {renderColoredFormula(formula.formula, displayRefs.refColorMap, showEnNames ? new Map() : colDisplayMap, showEnNames ? new Map() : constDisplayMap, showEnNames ? new Map() : tableDisplayMap, tableName)}
                     </code>
                   )}
                 </div>
