@@ -124,6 +124,7 @@ export default function ThreeDimTableEditor({
   canWrite = false,
   onConstantsChanged,
   columnKinds = {},
+  tableKind = '',
 }: {
   tableName: string
   headers: Record<string, string>
@@ -133,6 +134,7 @@ export default function ThreeDimTableEditor({
   canWrite?: boolean
   onConstantsChanged?: () => void
   columnKinds?: Record<string, string>
+  tableKind?: string
 }) {
   const [snapshot, setSnapshot] = useState<ThreeDimSnapshot | null>(null)
   const [loadedRequestKey, setLoadedRequestKey] = useState('')
@@ -505,7 +507,11 @@ export default function ThreeDimTableEditor({
   }
 
   const getColumnKindBg = (colKey: string): string | undefined => {
-    const kind = columnKinds[colKey]
+    let kind = columnKinds[colKey]
+    if (!kind) {
+      if (tableKind === 'compute') kind = 'compute'
+      else if (tableKind === 'config') kind = 'config'
+    }
     if (kind === 'config') return '#faf0e6'
     if (kind === 'compute') return '#f0f0f0'
     return undefined

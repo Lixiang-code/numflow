@@ -67,6 +67,7 @@ export default function MatrixEditor({
   glossary,
   canWrite = false,
   columnKinds = {},
+  tableKind = '',
 }: {
   tableName: string
   matrixMeta: Record<string, unknown>
@@ -74,6 +75,7 @@ export default function MatrixEditor({
   glossary: GlossaryItem[]
   canWrite?: boolean
   columnKinds?: Record<string, string>
+  tableKind?: string
 }) {
   const [snapshot, setSnapshot] = useState<MatrixSnapshot | null>(null)
   const [loadedRequestKey, setLoadedRequestKey] = useState('')
@@ -358,7 +360,9 @@ export default function MatrixEditor({
                   const isEditingCell = editingCell?.row === r && editingCell?.col === c && editingCell?.level === displayLevel
                   const cellEditable = canWrite && !hasFormula && !cellSaving
                     const kindBg = (() => {
-                      const k = columnKinds[c]
+                      let k = columnKinds[c]
+                      if (!k && tableKind === 'compute') k = 'compute'
+                      if (!k && tableKind === 'config') k = 'config'
                       if (k === 'config') return '#faf0e6'
                       if (k === 'compute') return '#f0f0f0'
                       return undefined

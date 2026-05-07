@@ -553,6 +553,7 @@ export default function Workbench() {
   const [showConstEn, setShowConstEn] = useState(false)
   const [kindFilter, setKindFilter] = useState<string>('all')  // all / config / compute
   const [columnKinds, setColumnKinds] = useState<Record<string, string>>({})
+  const [activeTableKind, setActiveTableKind] = useState('')
 
   /** 全部常量（用于"📐 常量"专属页） */
   const [allConstants, setAllConstants] = useState<Array<{
@@ -1005,7 +1006,7 @@ export default function Workbench() {
 
   /** 把一张表的数据写入对应 Univer sheet（首次或刷新调用） */
    const populateSheet = useCallback(
-    (tableName: string, rowsArr: Record<string, unknown>[], cols: string[], formulas: FormulaMap, colMeta: ColumnMeta[] = [], displayName = '', columnKinds: Record<string, string> = {}) => {
+    (tableName: string, rowsArr: Record<string, unknown>[], cols: string[], formulas: FormulaMap, colMeta: ColumnMeta[] = [], displayName = '', columnKinds: Record<string, string> = {}, tableKind = '') => {
       const wb = workbookRef.current
       if (!wb) return
       const sheetTitle = displayName ? `${displayName}（${tableName}）` : tableName
@@ -1085,24 +1086,32 @@ export default function Workbench() {
           styleSetters.setFontWeight?.('bold')
         } catch { /* ignore styling errors */ }
         // ── 列分类着色：计算列浅灰(#f0f0f0)、配置列浅棕(#faf0e6) ──
+        // 纯配置表/纯计算表：全部列着色（无需 column_kinds 逐列标注）
+        // 混合表：仅 column_kinds 中标明的列着色
         try {
-          const dataStartRow = 3  // skip header rows
+          const dataStartRow = 3
           const dataEndRow = matrix.length - 1
-          const kindKeys = Object.keys(columnKinds)
-          console.log('[columnKinds]', kindKeys.length, 'classified columns', JSON.stringify(columnKinds))
-          if (dataEndRow >= dataStartRow && kindKeys.length > 0) {
+          if (dataEndRow >= dataStartRow) {
+            const allCompute = tableKind === 'compute'
+            const allConfig = tableKind === 'config'
             for (let ci = 0; ci < numCols; ci++) {
               const colName = cols[ci] || ''
-              const kind = columnKinds[colName] || ''
+              let kind = columnKinds[colName] || ''
+              if (!kind && allCompute) kind = 'compute'
+              if (!kind && allConfig) kind = 'config'
               if (kind !== 'config' && kind !== 'compute') continue
               const bg = kind === 'compute' ? '#f0f0f0' : '#faf0e6'
-              for (let ri = dataStartRow; ri <= dataEndRow; ri++) {
-                try {
-                  const cell = sheet.getRange(ri, ci, 1, 1)
-                  const cs = cell as unknown as { setBackgroundColor?: (c: string) => unknown; setBackground?: (c: string) => unknown }
-                  cs.setBackgroundColor?.(bg)
-                  cs.setBackground?.(bg)
-                } catch { /* cell fail */ }
+              // 使用 sheet.getRange 单行批量着色比逐单元格快
+              const colRange = sheet.getRange(dataStartRow, ci, dataEndRow - dataStartRow + 1, 1)
+              try {
+                const cs = colRange as unknown as { setBackground?: (c: string) => unknown; setBackgroundColor?: (c: string) => unknown }
+                cs.setBackground?.(bg)
+                cs.setBackgroundColor?.(bg)
+              } catch {
+                // fallback: 逐单元格
+                for (let ri = dataStartRow; ri <= dataEndRow; ri++) {
+                  try { (sheet.getRange(ri, ci, 1, 1) as unknown as { setBackground?: (c: string) => unknown }).setBackground?.(bg) } catch {}
+                }
               }
             }
           }
@@ -1287,10 +1296,11 @@ export default function Workbench() {
         setColumnFormulas(cf)
         setRelatedConstants(Array.isArray(desc.related_constants) ? desc.related_constants : [])
         setColumnKinds(desc.column_kinds || {})
+        setActiveTableKind(desc.table_kind || '')
 
         // 写入 Univer 并切换到该 sheet（2D/3D matrix 专用视图不需要写入 Univer）
         if (!isMatrix && !is3DMatrix && !is3DMatrixFromMeta) {
-          populateSheet(selected, normalized, cols, cf, colMeta, displayName, desc.column_kinds || {})
+          populateSheet(selected, normalized, cols, cf, colMeta, displayName, desc.column_kinds || {}, desc.table_kind || '')
           activeTableRef.current = selected
           const wb = workbookRef.current
           if (wb) {
@@ -1331,7 +1341,7 @@ export default function Workbench() {
       const colMeta = tableColMetaCacheRef.current.get(selected) || []
       setRows(normalized)
       setActiveCols(cols)
-      populateSheet(selected, normalized, cols, formulas, colMeta, activeDisplayName, columnKinds)
+      populateSheet(selected, normalized, cols, formulas, colMeta, activeDisplayName, columnKinds, activeTableKind)
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     }
@@ -1399,7 +1409,7 @@ export default function Workbench() {
                   tableRowsCacheRef.current.set(tn, normalized2)
                   if (tn === activeTableRef.current) {
                     setRows(normalized2)
-                    populateSheet(tn, normalized2, cols2, tf, colMeta2, dn2, columnKinds)
+                    populateSheet(tn, normalized2, cols2, tf, colMeta2, dn2, columnKinds, activeTableKind)
                   }
                 } catch { /* 重算失败不影响写入 */ }
               }
@@ -1962,6 +1972,7 @@ export default function Workbench() {
                 glossary={glossary}
                 canWrite={!readOnly}
                 columnKinds={columnKinds}
+                tableKind={activeTableKind}
               />
             </>
           ) : selected && selectedIs3DMatrix ? (
@@ -1988,6 +1999,7 @@ export default function Workbench() {
                 canWrite={!readOnly}
                 onConstantsChanged={() => void loadAllConstants()}
                 columnKinds={columnKinds}
+                tableKind={activeTableKind}
               />
             </>
           ) : selected !== '__constants__' && !selectedIsMatrix ? (
