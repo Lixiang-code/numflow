@@ -687,7 +687,7 @@ def test_b4_execute_formula_supports_cross_table_refs_with_3d_dim_alignment_via_
     }
 
 
-def test_b4_dag_reuses_shared_table_cache_for_duckdb_nodes(monkeypatch):
+def test_a5_dag_reuses_shared_table_cache_for_pandas_nodes(monkeypatch):
     conn = _new_conn()
     _make_table(conn, "base", "k", "x")
     _make_table(conn, "ref", "k", "v")
@@ -715,7 +715,6 @@ def test_b4_dag_reuses_shared_table_cache_for_duckdb_nodes(monkeypatch):
     )
     register_formula(conn, "mid", "y", "@base[x] + @ref[v]", defer=True)
     register_formula(conn, "top", "z", "@base[x] + @ref[v] * 2", defer=True)
-    _set_perf(conn, use_duckdb_compute=True)
 
     read_sql_calls = 0
     original_read_sql_query = formula_exec.pd.read_sql_query

@@ -133,6 +133,16 @@ def _sync_table_cache(
         cached_df.iat[idx, cached_df.columns.get_loc(column_name)] = value
 
 
+def _invalidate_table_cache(
+    table_cache: Optional[TableFrameCache],
+    *,
+    table_name: str,
+) -> None:
+    if not table_cache:
+        return
+    table_cache.pop(table_name, None)
+
+
 def _filter_changed_pairs(
     pairs: Sequence[Tuple[Any, Any]],
     *,
@@ -590,7 +600,7 @@ def execute_formula_on_column(
                 level_column=level_column,
                 level_min=level_min,
                 level_max=level_max,
-                table_cache=table_cache,
+                table_cache=None,
             )
             duckdb_used = True
     except Exception:  # noqa: BLE001
@@ -632,12 +642,7 @@ def execute_formula_on_column(
         ) as t2:
             if changed_pairs:
                 _batch_apply_updates(conn, table=table_name, column=column_name, pairs=changed_pairs)
-                _sync_table_cache(
-                    table_cache,
-                    table_name=table_name,
-                    column_name=column_name,
-                    pairs=changed_pairs,
-                )
+                _invalidate_table_cache(table_cache, table_name=table_name)
             _batch_apply_provenance(
                 conn,
                 table=table_name,
