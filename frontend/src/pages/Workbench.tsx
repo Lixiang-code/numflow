@@ -88,6 +88,102 @@ type ValidateReport = {
 
 type SnapshotRow = { id: number; label: string; created_at: string; note?: string }
 
+/** Workbench Agent 面板：结构化日志条目 */
+type WbAgentEntry =
+  | { id: number; kind: 'user'; text: string }
+  | { id: number; kind: 'phase_text'; phase: string; text: string }
+  | { id: number; kind: 'tool_call'; phase: string; name: string; args: string }
+  | { id: number; kind: 'tool_result'; phase: string; name: string; preview: string }
+  | { id: number; kind: 'log'; phase: string; text: string }
+  | { id: number; kind: 'error'; text: string }
+
+/** pushEntry 时不含 id 的输入类型 */
+type WbAgentInput =
+  | { kind: 'user'; text: string }
+  | { kind: 'phase_text'; phase: string; text: string }
+  | { kind: 'tool_call'; phase: string; name: string; args: string }
+  | { kind: 'tool_result'; phase: string; name: string; preview: string }
+  | { kind: 'log'; phase: string; text: string }
+  | { kind: 'error'; text: string }
+
+/** Agent 阶段标签映射 */
+const WB_PHASE_LABELS: Record<string, string> = {
+  route: '路由', design: '设计', review: '审核', execute: '执行',
+}
+
+/** Agent 阶段对应的 CSS class */
+function wbPhaseCls(phase: string): string {
+  if (phase === 'route') return 'route'
+  if (phase === 'design') return 'design'
+  if (phase === 'review') return 'review'
+  if (phase === 'execute') return 'execute'
+  return ''
+}
+
+/** 渲染单条 WbAgentEntry */
+function WbAgentEntryRow({ entry }: { entry: WbAgentEntry }) {
+  const [open, setOpen] = React.useState(false)
+  if (entry.kind === 'user') {
+    return (
+      <div className="agent-entry agent-entry-user">
+        <span className="agent-entry-icon">👤</span>
+        <span className="agent-entry-text">{entry.text}</span>
+      </div>
+    )
+  }
+  if (entry.kind === 'phase_text') {
+    return (
+      <div className={`agent-entry agent-entry-phase`}>
+        <div className="agent-entry-phase-head" onClick={() => setOpen(o => !o)}>
+          <span className={`agent-msg-phase ${wbPhaseCls(entry.phase)}`}>{WB_PHASE_LABELS[entry.phase] ?? entry.phase}</span>
+          <span className="agent-entry-phase-preview">{entry.text.slice(0, 80).replace(/\n/g, ' ')}</span>
+          <span className="agent-entry-chevron">{open ? '▲' : '▼'}</span>
+        </div>
+        {open && <pre className="agent-entry-phase-body">{entry.text}</pre>}
+      </div>
+    )
+  }
+  if (entry.kind === 'tool_call') {
+    return (
+      <div className="agent-entry agent-entry-tool-call" onClick={() => setOpen(o => !o)}>
+        <div className="agent-entry-tool-head">
+          <span className="agent-entry-tool-icon">🔧</span>
+          <span className="agent-entry-tool-name">{entry.name}</span>
+          {entry.phase && <span className={`agent-msg-phase ${wbPhaseCls(entry.phase)}`} style={{ fontSize: '0.62rem' }}>{WB_PHASE_LABELS[entry.phase] ?? entry.phase}</span>}
+          <span className="agent-entry-chevron">{open ? '▲' : '▼'}</span>
+        </div>
+        {open && entry.args && <pre className="agent-entry-tool-args">{(() => { try { return JSON.stringify(JSON.parse(entry.args), null, 2) } catch { return entry.args } })()}</pre>}
+      </div>
+    )
+  }
+  if (entry.kind === 'tool_result') {
+    return (
+      <div className="agent-entry agent-entry-tool-result">
+        <span className="agent-entry-tool-icon">✓</span>
+        <span className="agent-entry-tool-name">{entry.name}</span>
+        <span className="agent-entry-result-preview">{entry.preview}</span>
+      </div>
+    )
+  }
+  if (entry.kind === 'log') {
+    return (
+      <div className="agent-entry agent-entry-log">
+        {entry.phase && <span className={`agent-msg-phase ${wbPhaseCls(entry.phase)}`} style={{ fontSize: '0.62rem' }}>{WB_PHASE_LABELS[entry.phase] ?? entry.phase}</span>}
+        <span className="agent-entry-text">{entry.text}</span>
+      </div>
+    )
+  }
+  if (entry.kind === 'error') {
+    return (
+      <div className="agent-entry agent-entry-error">
+        <span className="agent-entry-icon">❌</span>
+        <span className="agent-entry-text">{entry.text}</span>
+      </div>
+    )
+  }
+  return null
+}
+
 /**
  * 按 Excel 风格的 number_format 格式化数值（仅用于表格阅读展示）。
  * 存储值和公式计算始终使用原始数值，格式不影响任何计算。
@@ -605,11 +701,15 @@ export default function Workbench() {
     completed_steps: string[]
     finished?: boolean
   } | null>(null)
-  const [agentLog, setAgentLog] = useState<string[]>([])
+  const [agentEntries, setAgentEntries] = useState<WbAgentEntry[]>([])
   const [agentStream, setAgentStream] = useState('')
+  const [agentLivePhase, setAgentLivePhase] = useState('')
   const [agentInput, setAgentInput] = useState('')
   const [agentBusy, setAgentBusy] = useState(false)
   const [agentMode, setAgentMode] = useState<'init' | 'maintain'>('maintain')
+  const [agentOpen, setAgentOpen] = useState(() => localStorage.getItem('wb_agent_open') !== 'false')
+  const agentEntryIdRef = useRef(0)
+  const agentLogEndRef = useRef<HTMLDivElement | null>(null)
   const [err, setErr] = useState<string | null>(null)
   /** 列名 -> 公式信息（用于公式栏显示与编辑） */
   const [columnFormulas, setColumnFormulas] = useState<FormulaMap>({})
@@ -1575,10 +1675,21 @@ export default function Workbench() {
     e.preventDefault()
     if (!agentInput.trim() || agentBusy) return
     setAgentBusy(true)
-    setAgentLog((l) => [...l, `> ${agentInput}`])
-    setAgentStream('')
     const msg = agentInput
     setAgentInput('')
+    setAgentStream('')
+    setAgentLivePhase('')
+
+    const nextId = () => ++agentEntryIdRef.current
+    const pushEntry = (entry: WbAgentInput) =>
+      setAgentEntries((prev) => [...prev, { ...entry, id: nextId() } as WbAgentEntry])
+
+    pushEntry({ kind: 'user', text: msg })
+
+    // 按阶段累积流式文本（done 时归档）
+    const phaseTextBuf: Record<string, string> = {}
+    let currentPhase = ''
+
     try {
       const res = await fetch('/api/agent/chat', {
         method: 'POST',
@@ -1601,33 +1712,64 @@ export default function Workbench() {
           if (!block.startsWith('data:')) continue
           const line = block.replace(/^data:\s*/i, '').trim()
           try {
-            const ev = JSON.parse(line) as {
-              type: string
-              message?: string
-              text?: string
-              name?: string
-              preview?: string
+            const raw = JSON.parse(line) as Record<string, unknown>
+            const phase = String(raw.phase ?? '')
+            const type = String(raw.type ?? '')
+
+            // 追踪当前阶段
+            if (phase && phase !== currentPhase) {
+              currentPhase = phase
+              setAgentLivePhase(phase)
             }
-            if (ev.type === 'log' && ev.message) setAgentLog((l) => [...l, `[log] ${ev.message}`])
-            if (ev.type === 'tool_call') setAgentLog((l) => [...l, `[tool] ${ev.name}`])
-            if (ev.type === 'tool_result' && ev.preview)
-              setAgentLog((l) => [...l, `[result] ${ev.preview}`])
-            if (ev.type === 'token' && ev.text) setAgentStream((s) => s + ev.text)
-            if (ev.type === 'done') {
-              const ft = (ev as { full_text?: string }).full_text || ''
-              setAgentLog((l) => [...l, ft])
+
+            if (type === 'token' && raw.text) {
+              const text = String(raw.text)
+              phaseTextBuf[phase] = (phaseTextBuf[phase] ?? '') + text
+              setAgentStream((s) => s + text)
+            } else if (type === 'log' && raw.message) {
+              pushEntry({ kind: 'log', phase, text: String(raw.message) })
+            } else if (type === 'tool_call') {
+              pushEntry({ kind: 'tool_call', phase, name: String(raw.name ?? ''), args: String(raw.arguments ?? '') })
+            } else if (type === 'tool_result') {
+              pushEntry({ kind: 'tool_result', phase, name: String(raw.name ?? ''), preview: String(raw.preview ?? '') })
+            } else if (type === 'error') {
+              pushEntry({ kind: 'error', text: String(raw.message ?? raw.error ?? '未知错误') })
               setAgentStream('')
+            } else if (type === 'done') {
+              // 把各阶段流式文本归档为条目
+              const phaseOrder = ['route', 'design', 'review', 'execute']
+              for (const p of phaseOrder) {
+                if (phaseTextBuf[p]) {
+                  pushEntry({ kind: 'phase_text', phase: p, text: phaseTextBuf[p] })
+                }
+              }
+              // 处理未知阶段
+              for (const [p, t] of Object.entries(phaseTextBuf)) {
+                if (!phaseOrder.includes(p) && t) pushEntry({ kind: 'phase_text', phase: p, text: t })
+              }
+              setAgentStream('')
+              setAgentLivePhase('')
             }
           } catch {
-            /* ignore parse */
+            /* ignore parse error */
           }
         }
       }
     } catch (x) {
-      setAgentLog((l) => [...l, `错误: ${x instanceof Error ? x.message : String(x)}`])
+      pushEntry({ kind: 'error', text: x instanceof Error ? x.message : String(x) })
+      setAgentStream('')
     } finally {
       setAgentBusy(false)
+      setAgentLivePhase('')
+      // 滚动到底
+      requestAnimationFrame(() => agentLogEndRef.current?.scrollIntoView({ behavior: 'smooth' }))
     }
+  }
+
+  function clearAgentConversation() {
+    setAgentEntries([])
+    setAgentStream('')
+    setAgentLivePhase('')
   }
 
   const formulaCols = useMemo(
@@ -2552,36 +2694,88 @@ export default function Workbench() {
         </aside>
       </div>
 
-      <footer className="wb-agent">
-        <form className="wb-agent-form" onSubmit={runAgent}>
-          <select
-            className="agent-mode"
-            value={agentMode}
-            onChange={(e) => setAgentMode(e.target.value as 'init' | 'maintain')}
-            disabled={agentBusy}
-            aria-label="Agent 模式"
+      <footer className={`wb-agent${agentOpen ? '' : ' wb-agent--collapsed'}`}>
+        {/* 面板头部：标题 + 阶段指示 + 操作按钮 */}
+        <div className="wb-agent-header">
+          <span className="wb-agent-title">
+            🤖 Agent
+            {agentLivePhase && (
+              <span className={`agent-msg-phase ${wbPhaseCls(agentLivePhase)}`} style={{ marginLeft: '0.4rem', fontSize: '0.65rem' }}>
+                {WB_PHASE_LABELS[agentLivePhase] ?? agentLivePhase}
+              </span>
+            )}
+            {agentBusy && <span className="agent-busy-dot" />}
+          </span>
+          <span style={{ flex: 1 }} />
+          {!agentBusy && agentEntries.length > 0 && (
+            <button
+              type="button"
+              className="btn tiny ghost"
+              onClick={clearAgentConversation}
+              title="清空当前对话，开始新会话"
+            >
+              新对话
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn tiny ghost wb-agent-toggle"
+            onClick={() => {
+              const next = !agentOpen
+              setAgentOpen(next)
+              localStorage.setItem('wb_agent_open', String(next))
+            }}
+            title={agentOpen ? '收起 Agent 面板' : '展开 Agent 面板'}
           >
-            <option value="maintain">维护 Agent</option>
-            <option value="init">初始化 Agent</option>
-          </select>
-          <input
-            value={agentInput}
-            onChange={(e) => setAgentInput(e.target.value)}
-            placeholder={agentPlaceholder}
-            disabled={agentBusy}
-          />
-          <button type="submit" disabled={agentBusy}>
-            {agentBusy ? '执行中…' : '发送'}
+            {agentOpen ? '▼' : '▲'}
           </button>
-        </form>
-        {agentStream && <pre className="agent-stream">{agentStream}</pre>}
-        <div className="agent-log">
-          {agentLog.map((line, i) => (
-            <div key={i} className="log-line">
-              {line}
-            </div>
-          ))}
         </div>
+
+        {agentOpen && (
+          <>
+            {/* 对话记录区 */}
+            <div className="agent-log wb-agent-log">
+              {agentEntries.map((entry) => (
+                <WbAgentEntryRow key={entry.id} entry={entry} />
+              ))}
+              {/* 实时流式输出 */}
+              {agentStream && (
+                <div className="agent-stream-live">
+                  {agentLivePhase && (
+                    <span className={`agent-msg-phase ${wbPhaseCls(agentLivePhase)}`} style={{ fontSize: '0.65rem', marginBottom: '0.2rem', display: 'inline-block' }}>
+                      {WB_PHASE_LABELS[agentLivePhase] ?? agentLivePhase} ⟳
+                    </span>
+                  )}
+                  <pre className="agent-stream-text">{agentStream}</pre>
+                </div>
+              )}
+              <div ref={agentLogEndRef} />
+            </div>
+
+            {/* 输入表单 */}
+            <form className="wb-agent-form" onSubmit={runAgent}>
+              <select
+                className="agent-mode"
+                value={agentMode}
+                onChange={(e) => setAgentMode(e.target.value as 'init' | 'maintain')}
+                disabled={agentBusy}
+                aria-label="Agent 模式"
+              >
+                <option value="maintain">维护 Agent</option>
+                <option value="init">初始化 Agent</option>
+              </select>
+              <input
+                value={agentInput}
+                onChange={(e) => setAgentInput(e.target.value)}
+                placeholder={agentPlaceholder}
+                disabled={agentBusy}
+              />
+              <button type="submit" disabled={agentBusy}>
+                {agentBusy ? '执行中…' : '发送'}
+              </button>
+            </form>
+          </>
+        )}
       </footer>
       <MaintainSidebar projectId={pid} currentTable={selected} cellSelection={cellSelection} />
     </div>

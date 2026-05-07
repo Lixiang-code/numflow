@@ -1164,13 +1164,51 @@ label > input, label > select, label > textarea { color: var(--text); }
 /* Agent 底部面板 */
 .wb-agent {
   flex-shrink: 0;
-  border-top: 1px solid var(--border);
+  border-top: 2px solid var(--border);
   background: var(--surface);
-  max-height: 240px;
   display: flex;
   flex-direction: column;
-  padding: 0.5rem 0.75rem 0.5rem;
-  gap: 0.4rem;
+  transition: max-height 0.2s ease;
+  max-height: 360px;
+}
+.wb-agent--collapsed {
+  max-height: 36px;
+  overflow: hidden;
+}
+.wb-agent-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 0.75rem;
+  height: 36px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border-light);
+  background: var(--surface);
+}
+.wb-agent-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.agent-busy-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  animation: agent-pulse 1s infinite;
+  margin-left: 2px;
+}
+@keyframes agent-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.wb-agent-toggle {
+  font-size: 0.7rem !important;
+  min-width: 26px;
 }
 .pipe-agent-hint {
   display: flex;
@@ -1183,15 +1221,17 @@ label > input, label > select, label > textarea { color: var(--text); }
   gap: 0.4rem;
   align-items: center;
   flex-shrink: 0;
+  padding: 0.4rem 0.75rem;
+  border-top: 1px solid var(--border-light);
 }
 .wb-agent-form input {
   flex: 1;
-  height: 32px;
+  height: 30px;
   font-size: 0.8rem;
 }
 .agent-mode {
-  height: 32px;
-  font-size: 0.8rem;
+  height: 30px;
+  font-size: 0.78rem;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 0 0.45rem;
@@ -1199,6 +1239,157 @@ label > input, label > select, label > textarea { color: var(--text); }
   color: var(--text);
   flex-shrink: 0;
 }
+/* 对话记录滚动区 */
+.wb-agent-log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.3rem 0.6rem 0.2rem;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+/* 通用条目基类 */
+.agent-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.35rem;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  border-radius: var(--radius);
+  padding: 0.22rem 0.45rem;
+  word-break: break-word;
+}
+/* 用户消息 */
+.agent-entry-user {
+  background: var(--info-bg);
+  color: #1f3b6e;
+  font-weight: 600;
+  align-self: flex-start;
+  max-width: 90%;
+}
+.agent-entry-user .agent-entry-icon { font-size: 0.7rem; margin-top: 1px; }
+/* 阶段文本 */
+.agent-entry-phase {
+  border: 1px solid var(--border-light);
+  background: var(--surface-alt);
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+  cursor: pointer;
+}
+.agent-entry-phase-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.22rem 0.45rem;
+}
+.agent-entry-phase-preview {
+  flex: 1;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.72rem;
+}
+.agent-entry-chevron {
+  font-size: 0.6rem;
+  color: var(--text-light);
+  flex-shrink: 0;
+}
+.agent-entry-phase-body {
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--surface);
+  border-top: 1px solid var(--border-light);
+  max-height: 200px;
+  overflow-y: auto;
+  color: var(--text);
+}
+/* 工具调用 */
+.agent-entry-tool-call {
+  flex-direction: column;
+  gap: 0;
+  background: var(--green-light);
+  border: 1px solid var(--green-muted);
+  padding: 0;
+  cursor: pointer;
+  overflow: hidden;
+}
+.agent-entry-tool-head {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.22rem 0.45rem;
+}
+.agent-entry-tool-icon { font-size: 0.75rem; flex-shrink: 0; margin-top: 1px; }
+.agent-entry-tool-name { color: var(--green-dark); font-weight: 700; flex: 1; }
+.agent-entry-tool-args {
+  margin: 0;
+  padding: 0.35rem 0.55rem;
+  font-size: 0.7rem;
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: rgba(255,255,255,0.5);
+  border-top: 1px solid var(--green-muted);
+  max-height: 150px;
+  overflow-y: auto;
+  color: var(--green-dark);
+}
+/* 工具结果 */
+.agent-entry-tool-result {
+  background: var(--warn-bg);
+  border: 1px solid #ffe082;
+  color: #6d4c00;
+}
+.agent-entry-result-preview {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 日志 */
+.agent-entry-log {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  gap: 0.3rem;
+  padding: 0.1rem 0.35rem;
+}
+/* 错误 */
+.agent-entry-error {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-left: 3px solid var(--danger);
+  font-weight: 500;
+}
+/* 流式输出块 */
+.agent-stream-live {
+  display: flex;
+  flex-direction: column;
+  border-left: 2px solid var(--green);
+  padding: 0.2rem 0.5rem;
+  margin-top: 0.1rem;
+}
+.agent-stream-text {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--green-dark);
+  white-space: pre-wrap;
+  background: var(--green-light);
+  border-radius: var(--radius);
+  padding: 0.25rem 0.45rem;
+  margin: 0.15rem 0 0;
+  max-height: 100px;
+  overflow-y: auto;
+}
+/* (deprecated) 保留旧 .agent-stream 兼容 */
 .agent-stream {
   font-family: var(--font-mono);
   font-size: 0.75rem;
@@ -1233,6 +1424,7 @@ label > input, label > select, label > textarea { color: var(--text); }
   border-bottom: 1px solid var(--border-light);
 }
 .log-line:last-child { border-bottom: none; }
+
 
 /* 小型按钮 */
 .btn.tiny {
