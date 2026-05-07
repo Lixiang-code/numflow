@@ -1804,8 +1804,8 @@ export default function Workbench() {
           </select>
           {modelSwitching && <span style={{ marginLeft: 4, fontSize: '0.7rem' }}>切换中…</span>}
         </span>
-        <label style={{ fontSize: '0.78rem', cursor: 'pointer', userSelect: 'none', marginLeft: 12, display: 'inline-flex', alignItems: 'center', gap: 4, color: '#fff', whiteSpace: 'nowrap' }}>
-          <input type="checkbox" checked={showEnNames} onChange={e => setShowEnNames(e.target.checked)} />
+        <label style={{ fontSize: '0.78rem', cursor: 'pointer', userSelect: 'none', marginLeft: 12, display: 'flex', alignItems: 'center', gap: 4, color: '#fff', whiteSpace: 'nowrap', flexShrink: 0 }}>
+          <input type="checkbox" checked={showEnNames} onChange={e => setShowEnNames(e.target.checked)} style={{ margin: 0 }} />
           英文名
         </label>
       </header>
