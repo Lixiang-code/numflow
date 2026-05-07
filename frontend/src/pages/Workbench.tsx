@@ -1593,17 +1593,19 @@ export default function Workbench() {
   ): string {
     if (!text) return text
     let out = text
-    // 替换 @table[col] / @@table[col] → @表显示名[列显示名]
-    // 同时处理 @T[col] / @this[col] 等本表引用缩写
     const curTable = selected || ''
-    const curTableDisp = tableDispMap.get(curTable) || curTable
+    // 替换 @table[col] / @@table[col] / @T[col] / @this[col]
     out = out.replace(/(@{1,2})(T|this|[\w]+)\[(\w+)\]/g, (_, at, tname, cname) => {
-      let td: string
-      if (tname === 'T' || tname === 'this') td = curTableDisp
-      else td = tableDispMap.get(tname) || tname
-      const cm = colMetaArr.find((m) => m.name === cname)
-      const cd = cm?.display_name || cname
-      return `${at}${td}[${cd}]`
+      const isSelf = tname === 'T' || tname === 'this' || tname === curTable
+      // 本表引用 → 省略表名，仅保留 @[列中文] 或 @@[列中文]
+      if (isSelf) {
+        const cm = colMetaArr.find((m) => m.name === cname)
+        const cd = cm?.display_name || cname
+        return `${at}[${cd}]`
+      }
+      // 外部表 → @表中文[列英文]
+      const td = tableDispMap.get(tname) || tname
+      return `${at}${td}[${cname}]`
     })
     // 替换 @col → @显示名（裸引用，无表名前缀）
     for (const cm of colMetaArr) {
@@ -2077,16 +2079,15 @@ export default function Workbench() {
             </span>
             {formulaBarCol && (
               <>
-                {!showEnNames && formulaBarText && (() => {
-                  const meta = tableColMetaCacheRef.current.get(selected ?? '') || []
-                  const constMap = new Map(allConstants.map((c: any) => [c.name_en, c]))
-                  const translated = translateFormulaDisplay(formulaBarText, meta, constMap, tableDispMap)
-                  return translated !== formulaBarText ? (
-                    <span className="wb-formula-translated muted" style={{ fontSize: 12, fontFamily: 'monospace', marginBottom: 2, display: 'block', fontWeight: 500 }}>
-                      {translated}
-                    </span>
-                  ) : null
-                })()}
+                {!showEnNames && formulaBarText ? (
+                  <span className="wb-formula-translated" style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 600, marginBottom: 3, display: 'block', color: '#333' }}>
+                    {(() => {
+                      const meta = tableColMetaCacheRef.current.get(selected ?? '') || []
+                      const constMap = new Map(allConstants.map((c: any) => [c.name_en, c]))
+                      return translateFormulaDisplay(formulaBarText, meta, constMap, tableDispMap)
+                    })()}
+                  </span>
+                ) : null}
                 <input
                   className="wb-formula-bar-input"
                   value={formulaBarText}

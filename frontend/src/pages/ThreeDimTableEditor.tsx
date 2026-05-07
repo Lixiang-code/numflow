@@ -111,8 +111,13 @@ function renderColoredFormula(formula: string, colorMap: Map<string, string>, co
       const tname = crossRefMatch[2]
       const cname = crossRefMatch[3]
       let td: string
-      if (tname === 'T' || tname === 'this') {
-        td = tableDisplay.get(curTable) || curTable
+      if (tname === 'T' || tname === 'this' || tname === curTable) {
+        // 本表引用 → 省略表名
+        const cd = colDisplay.get(cname) || cname
+        const label = `${at}[${cd}]`
+        const color = colorMap.get(cname)
+        if (color) return <span key={i} style={{ color, fontWeight: 700 }}>{label}</span>
+        return <span key={i}>{label}</span>
       } else {
         td = tableDisplay.get(tname) || tname
       }
