@@ -526,7 +526,7 @@ def collect_projection_requirements(
         existing_cols = {row[1] for row in conn.execute(f'PRAGMA table_info("{table_name}")')}
     except Exception as exc:
         raise NotSupported(f"读取表结构失败：{exc}") from exc
-    used_cols, _sql_expr, _aref_map = _check_whitelist(formula, table_name, existing_cols)
+    used_cols, _sql_expr, aref_map = _check_whitelist(formula, table_name, existing_cols)
     cross_ref_map = _cross_ref_aliases(formula, table_name)
 
     from app.services.formula_exec import _join_hint_columns
@@ -551,6 +551,8 @@ def collect_projection_requirements(
     out: Dict[str, Set[str]] = {table_name: main_projection_cols}
     for ref_table, ref_cols in ref_projection_cols.items():
         out.setdefault(ref_table, set()).update(ref_cols)
+    for (src_tbl, src_col), _idx in aref_map.items():
+        out.setdefault(src_tbl, set()).add(src_col)
     return out
 
 
@@ -672,6 +674,7 @@ def compute_column_via_duckdb(
     table_cache: Optional[Dict[str, pd.DataFrame]] = None,
     duckdb_conn: Any = None,
     sqlite_schema: Optional[str] = None,
+    preloaded_frames: Optional[Dict[str, pd.DataFrame]] = None,
 ) -> List[Tuple[Any, Any]]:
     """白名单公式走 DuckDB 计算，返回 `[(value, row_id), ...]` 待批量回写。"""
     if not is_enabled(conn):
@@ -739,13 +742,18 @@ def compute_column_via_duckdb(
         main_projection_cols.update(_join_hint_columns(conn, table_name))
     if extra_level and extra_level in existing_cols:
         main_projection_cols.add(extra_level)
-    df = load_table_df(
-        conn,
-        table_name,
-        sorted(main_projection_cols) if main_projection_cols else None,
-        table_cache=table_cache,
-        copy_result=True,
-    )
+    if preloaded_frames and table_name in preloaded_frames:
+        base_df = preloaded_frames[table_name]
+        df = base_df.copy() if cross_ref_map else base_df
+        df.attrs = dict(base_df.attrs)
+    else:
+        df = load_table_df(
+            conn,
+            table_name,
+            sorted(main_projection_cols) if main_projection_cols else None,
+            table_cache=table_cache,
+            copy_result=True,
+        )
     if df.empty:
         return []
 
@@ -754,13 +762,16 @@ def compute_column_via_duckdb(
         ref_df = ref_frames.get(src_tbl)
         if ref_df is None:
             wanted_ref_cols = sorted(ref_projection_cols.get(src_tbl) or {src_col})
-            ref_df = load_table_df(
-                conn,
-                src_tbl,
-                wanted_ref_cols,
-                table_cache=table_cache,
-                copy_result=False,
-            )
+            if preloaded_frames and src_tbl in preloaded_frames:
+                ref_df = preloaded_frames[src_tbl]
+            else:
+                ref_df = load_table_df(
+                    conn,
+                    src_tbl,
+                    wanted_ref_cols,
+                    table_cache=table_cache,
+                    copy_result=False,
+                )
             ref_frames[src_tbl] = ref_df
         if src_col not in ref_df.columns:
             raise NotSupported(f"跨表引用列不存在：{src_tbl}.{src_col}")
@@ -772,14 +783,22 @@ def compute_column_via_duckdb(
     # 加载 @@ 整列引用到 pandas DataFrame 以便 DuckDB 使用
     array_dfs: Dict[str, pd.DataFrame] = {}
     for (src_tbl, src_col), idx in sorted(aref_map.items(), key=lambda x: x[1]):
-        try:
-            rows = conn.execute(
-                f'SELECT rowid, row_id, "{src_col}" FROM "{src_tbl}" ORDER BY rowid'
-            ).fetchall()
-        except Exception as exc:
-            raise NotSupported(f"加载 @@{src_tbl}[{src_col}] 失败：{exc}") from exc
-        sorted_rows = sorted(rows, key=lambda r: _row_sort_key(r[1], int(r[0])))
-        vals = _normalize_array_values([r[2] for r in sorted_rows])
+        source_df = (preloaded_frames or {}).get(src_tbl)
+        if source_df is not None and "row_id" in source_df.columns and src_col in source_df.columns:
+            sorted_rows = sorted(
+                zip(source_df["row_id"].tolist(), source_df[src_col].tolist()),
+                key=lambda r: _row_sort_key(r[0], 0),
+            )
+            vals = _normalize_array_values([r[1] for r in sorted_rows])
+        else:
+            try:
+                rows = conn.execute(
+                    f'SELECT rowid, row_id, "{src_col}" FROM "{src_tbl}" ORDER BY rowid'
+                ).fetchall()
+            except Exception as exc:
+                raise NotSupported(f"加载 @@{src_tbl}[{src_col}] 失败：{exc}") from exc
+            sorted_rows = sorted(rows, key=lambda r: _row_sort_key(r[1], int(r[0])))
+            vals = _normalize_array_values([r[2] for r in sorted_rows])
         array_dfs[f"__t_a{idx}"] = pd.DataFrame({"arr": [vals]})
 
     # 构建 SQL：将 @@ 引用替换为 (SELECT arr FROM __t_aN) 形式的 list 访问

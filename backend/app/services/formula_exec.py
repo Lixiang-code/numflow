@@ -34,6 +34,7 @@ Node = Tuple[str, str]
 TableCacheKey = Tuple[str, Tuple[str, ...]]
 TableFrameCache = Dict[TableCacheKey, pd.DataFrame]
 DuckDBSession = Dict[str, Any]
+LayerFrames = Dict[str, pd.DataFrame]
 
 _FLOAT_TOLERANCE = 1e-9
 _ALL_COLUMNS_CACHE_KEY = "__all__"
@@ -276,9 +277,9 @@ def _prewarm_layer_tables(
     layer_nodes: Sequence[Node],
     table_cache: TableFrameCache,
     use_duckdb: bool,
-) -> None:
+) -> LayerFrames:
     if not layer_nodes:
-        return
+        return {}
     wanted_by_table: Dict[str, Set[str]] = defaultdict(set)
     for table_name, column_name in layer_nodes:
         for ref_table, cols in _node_projection_requirements(
@@ -288,14 +289,16 @@ def _prewarm_layer_tables(
             use_duckdb=use_duckdb,
         ).items():
             wanted_by_table[ref_table].update(cols)
+    out: LayerFrames = {}
     for table_name in sorted(wanted_by_table):
-        load_table_df(
+        out[table_name] = load_table_df(
             conn,
             table_name,
             sorted(wanted_by_table[table_name]),
             table_cache=table_cache,
             copy_result=False,
         )
+    return out
 
 
 def _sync_table_cache(
@@ -775,6 +778,7 @@ def execute_formula_on_column(
     table_cache: Optional[TableFrameCache] = None,
     duckdb_session: Optional[DuckDBSession] = None,
     auto_commit: bool = True,
+    preloaded_frames: Optional[LayerFrames] = None,
 ) -> Dict[str, Any]:
     cur = conn.execute(
         "SELECT formula FROM _formula_registry WHERE table_name = ? AND column_name = ?",
@@ -817,6 +821,7 @@ def execute_formula_on_column(
                 table_cache=table_cache,
                 duckdb_conn=(duckdb_session or {}).get("conn"),
                 sqlite_schema=(duckdb_session or {}).get("sqlite_schema"),
+                preloaded_frames=preloaded_frames,
             )
             duckdb_used = True
     except Exception:  # noqa: BLE001
@@ -904,28 +909,36 @@ def execute_formula_on_column(
                 target_column=column_name,
                 extra=list(main_extra) + sorted(_join_hint_columns(conn, table_name)),
             )
-            frames: Dict[str, pd.DataFrame] = {
-                table_name: load_table_df(
-                    conn,
-                    table_name,
-                    main_cols,
-                    table_cache=table_cache,
-                    copy_result=False,
-                )
-            }
+            if preloaded_frames and table_name in preloaded_frames:
+                frames = {table_name: preloaded_frames[table_name]}
+            else:
+                frames = {
+                    table_name: load_table_df(
+                        conn,
+                        table_name,
+                        main_cols,
+                        table_cache=table_cache,
+                        copy_result=False,
+                    )
+                }
         else:
-            frames = {
-                table_name: load_table_df(
-                    conn,
-                    table_name,
-                    table_cache=table_cache,
-                    copy_result=False,
-                )
-            }
+            if preloaded_frames and table_name in preloaded_frames:
+                frames = {table_name: preloaded_frames[table_name]}
+            else:
+                frames = {
+                    table_name: load_table_df(
+                        conn,
+                        table_name,
+                        table_cache=table_cache,
+                        copy_result=False,
+                    )
+                }
         for rt, _rc in refs:
             if rt in frames:
                 continue
-            if use_min_cols:
+            if preloaded_frames and rt in preloaded_frames:
+                frames[rt] = preloaded_frames[rt]
+            elif use_min_cols:
                 ref_cols = _columns_for_table(refs, rt, extra=sorted(_join_hint_columns(conn, rt)))
                 frames[rt] = load_table_df(
                     conn,
@@ -1146,6 +1159,7 @@ def _execute_node(
     table_cache: Optional[TableFrameCache] = None,
     duckdb_session: Optional[DuckDBSession] = None,
     auto_commit: bool = True,
+    preloaded_frames: Optional[LayerFrames] = None,
 ) -> Dict[str, Any]:
     """根据公式类型选择执行入口（sql/row/row_template）。"""
     cur = conn.execute(
@@ -1164,6 +1178,7 @@ def _execute_node(
             table_cache=table_cache,
             duckdb_session=duckdb_session,
             auto_commit=auto_commit,
+            preloaded_frames=preloaded_frames,
         )
     return execute_row_formula(
         conn,
@@ -1172,6 +1187,7 @@ def _execute_node(
         table_cache=table_cache,
         duckdb_session=duckdb_session,
         auto_commit=auto_commit,
+        preloaded_frames=preloaded_frames,
     )
 
 
@@ -1312,7 +1328,7 @@ def recalculate_downstream_dag(
                     if node in seed_set or triggered_by:
                         runnable.append(node)
 
-                _prewarm_layer_tables(
+                layer_frames = _prewarm_layer_tables(
                     conn,
                     layer_nodes=runnable,
                     table_cache=table_cache,
@@ -1353,6 +1369,7 @@ def recalculate_downstream_dag(
                             table_cache=table_cache,
                             duckdb_session=duckdb_session,
                             auto_commit=False,
+                            preloaded_frames=layer_frames,
                         )
                         rows_changed = int(result.get("rows_changed", result.get("rows_updated", 0)) or 0)
                         if rows_changed > 0:
@@ -1539,6 +1556,7 @@ def execute_row_formula(
     table_cache: Optional[TableFrameCache] = None,
     duckdb_session: Optional[DuckDBSession] = None,
     auto_commit: bool = True,
+    preloaded_frames: Optional[LayerFrames] = None,
 ) -> Dict[str, Any]:
     """重新执行已注册的同行公式，计算所有行。"""
     cur = conn.execute(
@@ -1562,6 +1580,7 @@ def execute_row_formula(
             table_cache=table_cache,
             duckdb_session=duckdb_session,
             auto_commit=auto_commit,
+            preloaded_frames=preloaded_frames,
         )
 
     use_min_cols = perf_flag(conn, "use_min_column_load")
@@ -1576,20 +1595,26 @@ def execute_row_formula(
         available_cols = existing_cols
         refs = parse_row_refs(raw_formula)
         wanted = (refs & existing_cols) | {column_name}
-        df = load_table_df(
-            conn,
-            table_name,
-            wanted,
-            table_cache=table_cache,
-            copy_result=False,
-        )
+        if preloaded_frames and table_name in preloaded_frames:
+            df = preloaded_frames[table_name]
+        else:
+            df = load_table_df(
+                conn,
+                table_name,
+                wanted,
+                table_cache=table_cache,
+                copy_result=False,
+            )
     else:
-        df = load_table_df(
-            conn,
-            table_name,
-            table_cache=table_cache,
-            copy_result=False,
-        )
+        if preloaded_frames and table_name in preloaded_frames:
+            df = preloaded_frames[table_name]
+        else:
+            df = load_table_df(
+                conn,
+                table_name,
+                table_cache=table_cache,
+                copy_result=False,
+            )
         available_cols = set(df.columns) - {"row_id"}
         refs = parse_row_refs(raw_formula)
     external_refs = refs - available_cols

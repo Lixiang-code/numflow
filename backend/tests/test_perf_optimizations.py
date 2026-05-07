@@ -976,6 +976,59 @@ def test_b6_dag_prewarms_layer_union_projection_for_duckdb_nodes(monkeypatch):
     }
 
 
+def test_b6_dag_prewarms_layer_union_projection_for_duckdb_arrays(monkeypatch):
+    conn = _new_conn()
+    _make_table(conn, "src", "key", "value", "bonus")
+    conn.executemany(
+        'INSERT INTO "src" (row_id, "key", "value", "bonus") VALUES (?, ?, ?, ?)',
+        [
+            ("r1", 1.0, 10.0, 100.0),
+            ("r2", 2.0, 20.0, 200.0),
+            ("r3", 3.0, 30.0, 300.0),
+        ],
+    )
+    _make_table(conn, "left_t", "k", "out")
+    _make_table(conn, "right_t", "k", "out")
+    _insert_rows(
+        conn,
+        "left_t",
+        [{"row_id": f"r{i}", "k": float(i), "out": 0.0} for i in range(1, 4)],
+    )
+    _insert_rows(
+        conn,
+        "right_t",
+        [{"row_id": f"r{i}", "k": float(i), "out": 0.0} for i in range(1, 4)],
+    )
+    register_formula(conn, "left_t", "out", "INDEX(@@src[value], MATCH(@left_t[k], @@src[key], 0))", defer=True)
+    register_formula(conn, "right_t", "out", "INDEX(@@src[bonus], MATCH(@right_t[k], @@src[key], 0))", defer=True)
+    _set_perf(conn, use_duckdb_compute=True)
+
+    src_sqls = []
+    original_read_sql_query = formula_exec.pd.read_sql_query
+
+    def _counting_read_sql_query(sql, *args, **kwargs):
+        if 'FROM "src"' in sql:
+            src_sqls.append(sql)
+        return original_read_sql_query(sql, *args, **kwargs)
+
+    monkeypatch.setattr(formula_exec.pd, "read_sql_query", _counting_read_sql_query)
+
+    out = recalculate_downstream_dag(conn, [("src", "value"), ("src", "bonus")])
+
+    assert out["errors"] == []
+    assert src_sqls == ['SELECT "row_id", "bonus", "key", "value" FROM "src"']
+    assert dict(conn.execute('SELECT row_id, out FROM left_t ORDER BY row_id').fetchall()) == {
+        "r1": 10.0,
+        "r2": 20.0,
+        "r3": 30.0,
+    }
+    assert dict(conn.execute('SELECT row_id, out FROM right_t ORDER BY row_id').fetchall()) == {
+        "r1": 100.0,
+        "r2": 200.0,
+        "r3": 300.0,
+    }
+
+
 def test_a5_dag_reuses_shared_table_cache_for_pandas_nodes(monkeypatch):
     conn = _new_conn()
     _make_table(conn, "base", "k", "x")
