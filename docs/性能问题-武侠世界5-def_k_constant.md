@@ -313,6 +313,15 @@ JOIN player_model_equip_summary ON ...
 | V4 | `d00ce64` | DAG级表缓存（全路径） | 1.09s | 0.20s | 13/13 | 59x (⚠ 回归→已修复) |
 | **V5** | `5da1bd9` | **DuckDB 跳过缓存 + 写后失效** | **0.98s** | **0.21s** | **13/13** | **65x** ✓ |
 | V6 | `3106f49` | DuckDB SQLite Scanner | 1.08s (冷14.8s) | 0.21s | 13/13 | 59x (⚠ 回归) |
+| **V7** | `7b00b84` | **Scanner旗标+缓存键粒化** | **0.92s** | **0.18s** | **13/13** | **70x** ✓ |
+
+### V6→V7 修复说明
+
+V7（`7b00b84`）：
+- Scanner 加 `perf.use_duckdb_sqlite_scanner` 旗标（默认 `False`），彻底消除冷启动回归
+- `TableFrameCache` 键从 `table_name` 改为 `(table_name, columns_tuple)` 粒化，同表不同列投影可独立缓存
+- `_alignment_projection_columns` 仅加载对齐所需的列，避免全表 `SELECT *`
+- 稳跑 0.92s（比 V5 的 0.98s 再快 6%），同值 0.18s（快 14%）
 
 ### V4→V5 修复说明
 
