@@ -32,6 +32,7 @@ from app.services.perf_flags import PerfTimer, perf_flag
 
 Node = Tuple[str, str]
 TableFrameCache = Dict[str, pd.DataFrame]
+DuckDBSession = Dict[str, Any]
 
 _FLOAT_TOLERANCE = 1e-9
 
@@ -561,6 +562,7 @@ def execute_formula_on_column(
     level_min: Optional[float] = None,
     level_max: Optional[float] = None,
     table_cache: Optional[TableFrameCache] = None,
+    duckdb_session: Optional[DuckDBSession] = None,
 ) -> Dict[str, Any]:
     cur = conn.execute(
         "SELECT formula FROM _formula_registry WHERE table_name = ? AND column_name = ?",
@@ -601,6 +603,8 @@ def execute_formula_on_column(
                 level_min=level_min,
                 level_max=level_max,
                 table_cache=None,
+                duckdb_conn=(duckdb_session or {}).get("conn"),
+                sqlite_schema=(duckdb_session or {}).get("sqlite_schema"),
             )
             duckdb_used = True
     except Exception:  # noqa: BLE001
@@ -904,6 +908,7 @@ def _execute_node(
     column: str,
     *,
     table_cache: Optional[TableFrameCache] = None,
+    duckdb_session: Optional[DuckDBSession] = None,
 ) -> Dict[str, Any]:
     """根据公式类型选择执行入口（sql/row/row_template）。"""
     cur = conn.execute(
@@ -915,8 +920,20 @@ def _execute_node(
         raise ValueError(f"未注册公式：{table}.{column}")
     ftype = (r["formula_type"] if isinstance(r, sqlite3.Row) else r[0]) or "sql"
     if ftype == "sql":
-        return execute_formula_on_column(conn, table, column, table_cache=table_cache)
-    return execute_row_formula(conn, table, column, table_cache=table_cache)
+        return execute_formula_on_column(
+            conn,
+            table,
+            column,
+            table_cache=table_cache,
+            duckdb_session=duckdb_session,
+        )
+    return execute_row_formula(
+        conn,
+        table,
+        column,
+        table_cache=table_cache,
+        duckdb_session=duckdb_session,
+    )
 
 
 def recalculate_downstream_dag(
@@ -1022,6 +1039,13 @@ def recalculate_downstream_dag(
     skipped_unchanged = 0
     total_rows_changed = 0
     table_cache: TableFrameCache = {}
+    duckdb_session: Optional[DuckDBSession] = None
+    try:
+        from app.services import duckdb_compute as _dd
+
+        duckdb_session = _dd.open_duckdb_session(conn)
+    except Exception:  # noqa: BLE001
+        duckdb_session = None
     timer = PerfTimer(
         conn,
         op="recalculate_downstream_dag",
@@ -1032,70 +1056,85 @@ def recalculate_downstream_dag(
             "cycle_skipped": len(skipped_cycle),
         },
     )
-    with timer:
-        timer.set_rows(len(order))
-        for t, c in order:
-            node = (t, c)
-            blocked_by = sorted(
-                f"{dt}.{dc}"
-                for dt, dc in deps.get(node, set())
-                if (dt, dc) in failed_nodes or (dt, dc) in blocked_nodes
-            )
-            if blocked_by:
-                blocked_nodes.add(node)
-                skipped.append(
-                    {
-                        "table": t,
-                        "column": c,
-                        "reason": "blocked_by_failed_dependency",
-                        "blocked_by": blocked_by,
-                    }
+    try:
+        with timer:
+            timer.set_rows(len(order))
+            for t, c in order:
+                node = (t, c)
+                blocked_by = sorted(
+                    f"{dt}.{dc}"
+                    for dt, dc in deps.get(node, set())
+                    if (dt, dc) in failed_nodes or (dt, dc) in blocked_nodes
                 )
-                continue
-            triggered_by = sorted(
-                f"{dt}.{dc}"
-                for dt, dc in deps.get(node, set())
-                if (dt, dc) in changed_nodes
-            )
-            is_seed_node = node in seed_set
-            if not is_seed_node and not triggered_by:
-                skipped_unchanged += 1
-                skipped.append(
-                    {
-                        "table": t,
-                        "column": c,
-                        "reason": "upstream_unchanged",
-                    }
+                if blocked_by:
+                    blocked_nodes.add(node)
+                    skipped.append(
+                        {
+                            "table": t,
+                            "column": c,
+                            "reason": "blocked_by_failed_dependency",
+                            "blocked_by": blocked_by,
+                        }
+                    )
+                    continue
+                triggered_by = sorted(
+                    f"{dt}.{dc}"
+                    for dt, dc in deps.get(node, set())
+                    if (dt, dc) in changed_nodes
                 )
-                continue
+                is_seed_node = node in seed_set
+                if not is_seed_node and not triggered_by:
+                    skipped_unchanged += 1
+                    skipped.append(
+                        {
+                            "table": t,
+                            "column": c,
+                            "reason": "upstream_unchanged",
+                        }
+                    )
+                    continue
+                try:
+                    result = _execute_node(
+                        conn,
+                        t,
+                        c,
+                        table_cache=table_cache,
+                        duckdb_session=duckdb_session,
+                    )
+                    rows_changed = int(result.get("rows_changed", result.get("rows_updated", 0)) or 0)
+                    if rows_changed > 0:
+                        changed_nodes.add(node)
+                        total_rows_changed += rows_changed
+                    executed.append(
+                        {
+                            "table": t,
+                            "column": c,
+                            "rows_changed": rows_changed,
+                            "engine": str(result.get("engine") or ""),
+                        }
+                    )
+                except Exception as e:  # noqa: BLE001
+                    failed_nodes.add(node)
+                    errors.append(f"{t}.{c}: {e}")
+            timer.add_extra(
+                errors=len(errors),
+                blocked=len(
+                    [item for item in skipped if item.get("reason") == "blocked_by_failed_dependency"]
+                ),
+                skipped=len(skipped),
+                skipped_unchanged=skipped_unchanged,
+                changed_nodes=len(changed_nodes),
+                rows_changed=total_rows_changed,
+                cached_tables=len(table_cache),
+            )
+    finally:
+        if duckdb_session:
             try:
-                result = _execute_node(conn, t, c, table_cache=table_cache)
-                rows_changed = int(result.get("rows_changed", result.get("rows_updated", 0)) or 0)
-                if rows_changed > 0:
-                    changed_nodes.add(node)
-                    total_rows_changed += rows_changed
-                executed.append(
-                    {
-                        "table": t,
-                        "column": c,
-                        "rows_changed": rows_changed,
-                        "engine": str(result.get("engine") or ""),
-                    }
-                )
-            except Exception as e:  # noqa: BLE001
-                failed_nodes.add(node)
-                errors.append(f"{t}.{c}: {e}")
-        timer.add_extra(
-            errors=len(errors),
-            blocked=len(
-                [item for item in skipped if item.get("reason") == "blocked_by_failed_dependency"]
-            ),
-            skipped=len(skipped),
-            skipped_unchanged=skipped_unchanged,
-            changed_nodes=len(changed_nodes),
-            rows_changed=total_rows_changed,
-            cached_tables=len(table_cache),
-        )
+                from app.services import duckdb_compute as _dd
+
+                _dd.close_duckdb_session(duckdb_session)
+            except Exception:  # noqa: BLE001
+                pass
 
     out: Dict[str, Any] = {"executed": executed, "errors": errors, "skipped": skipped}
     if skipped_cycle:
@@ -1244,6 +1283,7 @@ def execute_row_formula(
     column_name: str,
     *,
     table_cache: Optional[TableFrameCache] = None,
+    duckdb_session: Optional[DuckDBSession] = None,
 ) -> Dict[str, Any]:
     """重新执行已注册的同行公式，计算所有行。"""
     cur = conn.execute(
@@ -1260,7 +1300,13 @@ def execute_row_formula(
     raw_formula = normalize_self_row_refs(raw_formula, table_name)
 
     if formula_type == "sql":
-        return execute_formula_on_column(conn, table_name, column_name)
+        return execute_formula_on_column(
+            conn,
+            table_name,
+            column_name,
+            table_cache=table_cache,
+            duckdb_session=duckdb_session,
+        )
 
     use_min_cols = perf_flag(conn, "use_min_column_load")
     use_batch_write = perf_flag(conn, "use_batch_writeback")

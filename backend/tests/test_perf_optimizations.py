@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sqlite3
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -37,6 +39,16 @@ def _new_conn() -> sqlite3.Connection:
     init_project_db(conn, seed_readme=False)
     ensure_project_migrations(conn)
     return conn
+
+
+def _new_file_conn() -> tuple[sqlite3.Connection, str]:
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    init_project_db(conn, seed_readme=False)
+    ensure_project_migrations(conn)
+    return conn, path
 
 
 def _make_table(conn: sqlite3.Connection, name: str, *cols: str) -> None:
@@ -685,6 +697,83 @@ def test_b4_execute_formula_supports_cross_table_refs_with_3d_dim_alignment_via_
         "2_atk": 30.0,
         "2_def": 40.0,
     }
+
+
+def test_b6_execute_formula_uses_sqlite_scanner_without_pandas_loads(monkeypatch):
+    conn, path = _new_file_conn()
+    try:
+        _make_table(conn, "src", "key", "value")
+        conn.executemany(
+            'INSERT INTO "src" (row_id, "key", "value") VALUES (?, ?, ?)',
+            [("r1", 1.0, 10.0), ("r2", 2.0, 20.0), ("r3", 3.0, 30.0)],
+        )
+        _make_table(conn, "t", "k", "out")
+        _insert_rows(
+            conn,
+            "t",
+            [
+                {"row_id": "r1", "k": 2.0, "out": 0.0},
+                {"row_id": "r2", "k": 1.0, "out": 0.0},
+                {"row_id": "r3", "k": 3.0, "out": 0.0},
+            ],
+        )
+        register_formula(conn, "t", "out", "INDEX(@@src[value], MATCH(@t[k], @@src[key], 0))", defer=True)
+        _set_perf(conn, use_duckdb_compute=True)
+
+        def _fail_read_sql_query(*args, **kwargs):
+            raise AssertionError("DuckDB SQLite scanner path should not call pandas.read_sql_query")
+
+        monkeypatch.setattr(formula_exec.pd, "read_sql_query", _fail_read_sql_query)
+
+        out = execute_formula_on_column(conn, "t", "out")
+
+        assert out["ok"] is True
+        assert out["engine"] == "duckdb"
+        assert dict(conn.execute('SELECT row_id, out FROM t ORDER BY row_id').fetchall()) == {
+            "r1": 20.0,
+            "r2": 10.0,
+            "r3": 30.0,
+        }
+    finally:
+        conn.close()
+        os.remove(path)
+
+
+def test_b6_dag_reuses_shared_duckdb_sqlite_session(monkeypatch):
+    conn, path = _new_file_conn()
+    try:
+        _make_table(conn, "base", "x")
+        _make_table(conn, "mid", "y")
+        _make_table(conn, "top", "z")
+        _insert_rows(conn, "base", [{"row_id": "r1", "x": 0.0}])
+        _insert_rows(conn, "mid", [{"row_id": "r1", "y": 0.0}])
+        _insert_rows(conn, "top", [{"row_id": "r1", "z": 0.0}])
+        register_formula(conn, "base", "x", "const_value(5)", defer=True)
+        register_formula(conn, "mid", "y", "@base[x] + 1", defer=True)
+        register_formula(conn, "top", "z", "@mid[y] + 1", defer=True)
+        _set_perf(conn, use_duckdb_compute=True)
+
+        original_compute = duckdb_compute.compute_column_via_duckdb
+        session_ids = []
+
+        def _wrapped_compute(*args, **kwargs):
+            session_ids.append(id(kwargs.get("duckdb_conn")))
+            return original_compute(*args, **kwargs)
+
+        monkeypatch.setattr(duckdb_compute, "compute_column_via_duckdb", _wrapped_compute)
+
+        out = recalculate_downstream_dag(conn, [("base", "x")], execute_seeds=True)
+
+        assert out["errors"] == []
+        assert len(session_ids) == 3
+        assert len(set(session_ids)) == 1
+        assert session_ids[0] != id(None)
+        assert conn.execute("SELECT x FROM base WHERE row_id='r1'").fetchone()[0] == 5.0
+        assert conn.execute("SELECT y FROM mid WHERE row_id='r1'").fetchone()[0] == 6.0
+        assert conn.execute("SELECT z FROM top WHERE row_id='r1'").fetchone()[0] == 7.0
+    finally:
+        conn.close()
+        os.remove(path)
 
 
 def test_a5_dag_reuses_shared_table_cache_for_pandas_nodes(monkeypatch):

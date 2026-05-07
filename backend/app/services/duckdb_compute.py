@@ -30,6 +30,8 @@ B2/B3 白名单扩展
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import sqlite3
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -70,6 +72,7 @@ _NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _CONST_VALUE_PATTERN = re.compile(r"const_value\(([\-\d\.]+)\)")
 _NUMERIC_ROW_ID = re.compile(r"^-?\d+$")
 _SUFFIX_NUMERIC_ROW_ID = re.compile(r"^(.*?)(-?\d+)$")
+_SQLITE_SCHEMA = "__nf_sqlite"
 
 
 def _cross_ref_aliases(formula: str, table_name: str) -> Dict[Tuple[str, str], str]:
@@ -334,6 +337,268 @@ def _normalize_array_values(values: List[Any]) -> List[Any]:
     return [None if value is None else str(value) for value in values]
 
 
+def _quote_ident(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _sqlite_db_path(conn: sqlite3.Connection) -> Optional[str]:
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+    except Exception:  # noqa: BLE001
+        return None
+    for row in rows:
+        name = row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        path = row["file"] if isinstance(row, sqlite3.Row) else row[2]
+        if str(name) != "main":
+            continue
+        raw = str(path or "").strip()
+        if not raw or raw == ":memory:":
+            return None
+        if raw.startswith("file:"):
+            return raw
+        return os.path.abspath(raw)
+    return None
+
+
+def _load_sqlite_extension(dcon: Any) -> bool:
+    attempts = [
+        ("LOAD sqlite",),
+        ("INSTALL sqlite", "LOAD sqlite"),
+        ("LOAD sqlite_scanner",),
+        ("INSTALL sqlite_scanner", "LOAD sqlite_scanner"),
+    ]
+    for stmts in attempts:
+        try:
+            for stmt in stmts:
+                dcon.execute(stmt)
+            return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+def _attach_sqlite_database(dcon: Any, conn: sqlite3.Connection) -> Optional[str]:
+    db_path = _sqlite_db_path(conn)
+    if not db_path:
+        return None
+    if not _load_sqlite_extension(dcon):
+        return None
+    escaped = db_path.replace("'", "''")
+    try:
+        dcon.execute(f"ATTACH '{escaped}' AS {_quote_ident(_SQLITE_SCHEMA)} (TYPE sqlite)")
+    except Exception:  # noqa: BLE001
+        return None
+    return _SQLITE_SCHEMA
+
+
+def open_duckdb_session(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
+    if not is_enabled(conn):
+        return None
+    try:
+        import duckdb
+    except Exception:  # noqa: BLE001
+        return None
+    dcon = duckdb.connect(database=":memory:")
+    sqlite_schema = _attach_sqlite_database(dcon, conn)
+    if not sqlite_schema:
+        dcon.close()
+        return None
+    return {"conn": dcon, "sqlite_schema": sqlite_schema}
+
+
+def close_duckdb_session(session: Optional[Dict[str, Any]]) -> None:
+    if not session:
+        return
+    dcon = session.get("conn")
+    if dcon is None:
+        return
+    try:
+        dcon.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> List[str]:
+    return [row[1] for row in conn.execute(f'PRAGMA table_info("{table_name}")')]
+
+
+def _empty_table_frame(conn: sqlite3.Connection, table_name: str) -> pd.DataFrame:
+    df = pd.DataFrame(columns=_table_columns(conn, table_name))
+    try:
+        row = conn.execute(
+            "SELECT schema_json, COALESCE(matrix_meta_json, '') AS matrix_meta_json FROM _table_registry WHERE table_name = ?",
+            (table_name,),
+        ).fetchone()
+    except Exception:  # noqa: BLE001
+        row = None
+    if row:
+        schema_json = row["schema_json"] if isinstance(row, sqlite3.Row) else row[0]
+        matrix_meta_json = row["matrix_meta_json"] if isinstance(row, sqlite3.Row) else row[1]
+        try:
+            df.attrs["schema_columns"] = list((json.loads(schema_json or "{}") or {}).get("columns") or [])
+        except Exception:  # noqa: BLE001
+            df.attrs["schema_columns"] = []
+        try:
+            df.attrs["matrix_meta"] = json.loads(matrix_meta_json or "{}") or {}
+        except Exception:  # noqa: BLE001
+            df.attrs["matrix_meta"] = {}
+    return df
+
+
+def _resolve_join_pairs_for_scanner(
+    conn: sqlite3.Connection,
+    dcon: Any,
+    *,
+    sqlite_schema: str,
+    target_table: str,
+    ref_table: str,
+    ref_col: str,
+) -> Optional[List[Tuple[str, str]]]:
+    from app.services.formula_engine import _candidate_join_columns
+
+    target_df = _empty_table_frame(conn, target_table)
+    ref_df = _empty_table_frame(conn, ref_table)
+    table_sql = f"{_quote_ident(sqlite_schema)}.{_quote_ident(target_table)}"
+    ref_sql = f"{_quote_ident(sqlite_schema)}.{_quote_ident(ref_table)}"
+    for join_pairs in _candidate_join_columns(target_df, ref_df):
+        right_cols = [right for _left, right in join_pairs]
+        group_sql = ", ".join(_quote_ident(col) for col in right_cols)
+        try:
+            dup = dcon.execute(
+                f"SELECT 1 FROM {ref_sql} GROUP BY {group_sql} HAVING COUNT(*) > 1 LIMIT 1"
+            ).fetchone()
+        except Exception:  # noqa: BLE001
+            continue
+        if dup is not None:
+            continue
+        on_sql = " AND ".join(
+            f't.{_quote_ident(left)} = r.{_quote_ident(right)}'
+            for left, right in join_pairs
+        )
+        try:
+            missing = dcon.execute(
+                f"""
+                SELECT 1
+                FROM {table_sql} AS t
+                LEFT JOIN {ref_sql} AS r ON {on_sql}
+                WHERE r.{_quote_ident(ref_col)} IS NULL
+                LIMIT 1
+                """
+            ).fetchone()
+        except Exception:  # noqa: BLE001
+            continue
+        if missing is not None:
+            continue
+        return join_pairs
+    return None
+
+
+def _row_order_sql(*, row_id_expr: str, row_num_expr: str) -> str:
+    rid = f"COALESCE(CAST({row_id_expr} AS VARCHAR), '')"
+    numeric = f"regexp_full_match({rid}, '^-?[0-9]+$')"
+    suffix = f"regexp_full_match({rid}, '^(.*?)(-?[0-9]+)$')"
+    return ", ".join(
+        [
+            f"CASE WHEN {numeric} THEN 0 WHEN {suffix} THEN 1 ELSE 2 END",
+            f"CASE WHEN {numeric} THEN CAST({rid} AS BIGINT) ELSE NULL END",
+            f"CASE WHEN {suffix} THEN regexp_extract({rid}, '^(.*?)(-?[0-9]+)$', 1) ELSE {rid} END",
+            f"CASE WHEN {suffix} THEN CAST(regexp_extract({rid}, '^(.*?)(-?[0-9]+)$', 2) AS BIGINT) ELSE NULL END",
+            row_num_expr,
+        ]
+    )
+
+
+def _scanner_array_sql(*, sqlite_schema: str, table_name: str, column_name: str) -> str:
+    table_sql = f"{_quote_ident(sqlite_schema)}.{_quote_ident(table_name)}"
+    order_sql = _row_order_sql(row_id_expr='src."row_id"', row_num_expr="src.rowid")
+    return f'(SELECT list(src.{_quote_ident(column_name)} ORDER BY {order_sql}) FROM {table_sql} AS src)'
+
+
+def _compute_via_sqlite_scanner(
+    conn: sqlite3.Connection,
+    *,
+    dcon: Any,
+    sqlite_schema: str,
+    table_name: str,
+    formula: str,
+    existing_cols: Set[str],
+    used_cols: Set[str],
+    sql_expr: str,
+    aref_map: Dict[Tuple[str, str], int],
+    cross_ref_map: Dict[Tuple[str, str], str],
+    level_column: Optional[str],
+    level_min: Optional[float],
+    level_max: Optional[float],
+) -> List[Tuple[Any, Any]]:
+    from app.services.formula_exec import _join_hint_columns
+
+    table_sql = f"{_quote_ident(sqlite_schema)}.{_quote_ident(table_name)}"
+    wanted_main = sorted(set(used_cols) | _join_hint_columns(conn, table_name))
+    extra_level = level_column or ("level" if (level_min is not None) else None)
+    if extra_level and extra_level in existing_cols:
+        wanted_main.append(extra_level)
+
+    select_cols: List[str] = ['t."row_id"']
+    seen_cols = {"row_id"}
+    for col in wanted_main:
+        if col not in existing_cols or col in seen_cols:
+            continue
+        select_cols.append(f't.{_quote_ident(col)}')
+        seen_cols.add(col)
+
+    joins: List[str] = []
+    for idx, ((src_tbl, src_col), alias) in enumerate(cross_ref_map.items()):
+        join_pairs = _resolve_join_pairs_for_scanner(
+            conn,
+            dcon,
+            sqlite_schema=sqlite_schema,
+            target_table=table_name,
+            ref_table=src_tbl,
+            ref_col=src_col,
+        )
+        if not join_pairs:
+            raise NotSupported(f"无法对齐跨表引用 @{src_tbl}[{src_col}]")
+        ref_alias = f"r{idx}"
+        ref_sql = f"{_quote_ident(sqlite_schema)}.{_quote_ident(src_tbl)}"
+        on_sql = " AND ".join(
+            f't.{_quote_ident(left)} = {ref_alias}.{_quote_ident(right)}'
+            for left, right in join_pairs
+        )
+        joins.append(f"LEFT JOIN {ref_sql} AS {ref_alias} ON {on_sql}")
+        select_cols.append(f'{ref_alias}.{_quote_ident(src_col)} AS {_quote_ident(alias)}')
+
+    scanner_expr = sql_expr
+    for (src_tbl, src_col), idx in aref_map.items():
+        scanner_expr = scanner_expr.replace(
+            f"__a{idx}",
+            _scanner_array_sql(sqlite_schema=sqlite_schema, table_name=src_tbl, column_name=src_col),
+        )
+
+    inner_sql = f'SELECT {", ".join(select_cols)} FROM {table_sql} AS t'
+    if joins:
+        inner_sql += " " + " ".join(joins)
+
+    where_clauses: List[str] = []
+    params: List[Any] = []
+    if level_min is not None and level_max is not None and extra_level and extra_level in seen_cols:
+        where_clauses.append(f'CAST("{extra_level}" AS DOUBLE) BETWEEN ? AND ?')
+        params.extend([float(level_min), float(level_max)])
+    where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+    sql = f'SELECT "row_id", ({scanner_expr}) AS __value FROM ({inner_sql}) AS df{where_sql}'
+
+    pairs: List[Tuple[Any, Any]] = []
+    result = dcon.execute(sql, params)
+    for row_data in result.fetchall():
+        v = row_data[1]
+        rid = row_data[0]
+        try:
+            v = float(v) if v is not None else None
+        except (TypeError, ValueError):
+            pass
+        pairs.append((v, rid))
+    return pairs
+
+
 def compute_column_via_duckdb(
     conn: sqlite3.Connection,
     *,
@@ -344,6 +609,8 @@ def compute_column_via_duckdb(
     level_min: Optional[float] = None,
     level_max: Optional[float] = None,
     table_cache: Optional[Dict[str, pd.DataFrame]] = None,
+    duckdb_conn: Any = None,
+    sqlite_schema: Optional[str] = None,
 ) -> List[Tuple[Any, Any]]:
     """白名单公式走 DuckDB 计算，返回 `[(value, row_id), ...]` 待批量回写。"""
     if not is_enabled(conn):
@@ -366,6 +633,33 @@ def compute_column_via_duckdb(
 
     from app.services.formula_engine import _align_scalar_series
     from app.services.formula_exec import _join_hint_columns, load_table_df
+
+    local_dcon = duckdb_conn
+    close_local_dcon = False
+    if local_dcon is None:
+        local_dcon = duckdb.connect(database=":memory:")
+        close_local_dcon = True
+        sqlite_schema = _attach_sqlite_database(local_dcon, conn)
+
+    if sqlite_schema:
+        try:
+            return _compute_via_sqlite_scanner(
+                conn,
+                dcon=local_dcon,
+                sqlite_schema=sqlite_schema,
+                table_name=table_name,
+                formula=formula,
+                existing_cols=existing_cols,
+                used_cols=used_cols,
+                sql_expr=sql_expr,
+                aref_map=aref_map,
+                cross_ref_map=cross_ref_map,
+                level_column=level_column,
+                level_min=level_min,
+                level_max=level_max,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     # 加载主表
     if cross_ref_map:
@@ -423,24 +717,27 @@ def compute_column_via_duckdb(
     sql = f'SELECT "row_id", ({sql_expr}) AS __value FROM df{where_sql}'
 
     try:
-        dcon = duckdb.connect(database=":memory:")
-        try:
-            dcon.register("df", df)
-            for name, arr_df in array_dfs.items():
-                dcon.register(name, arr_df)
-            pairs: List[Tuple[Any, Any]] = []
-            result = dcon.execute(sql, params)
-            for row_data in result.fetchall():
-                v = row_data[1]
-                rid = row_data[0]
-                try:
-                    v = float(v) if v is not None else None
-                except (TypeError, ValueError):
-                    pass
-                pairs.append((v, rid))
-        finally:
-            dcon.close()
+        local_dcon.register("df", df)
+        for name, arr_df in array_dfs.items():
+            local_dcon.register(name, arr_df)
+        pairs: List[Tuple[Any, Any]] = []
+        result = local_dcon.execute(sql, params)
+        for row_data in result.fetchall():
+            v = row_data[1]
+            rid = row_data[0]
+            try:
+                v = float(v) if v is not None else None
+            except (TypeError, ValueError):
+                pass
+            pairs.append((v, rid))
+        return pairs
     except Exception as exc:
         raise NotSupported(f"DuckDB 执行失败：{exc}") from exc
-
-    return pairs
+    finally:
+        for name in ["df", *array_dfs.keys()]:
+            try:
+                local_dcon.unregister(name)
+            except Exception:  # noqa: BLE001
+                pass
+        if close_local_dcon:
+            local_dcon.close()
