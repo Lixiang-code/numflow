@@ -1,3 +1,9 @@
+/**
+ * ============================================================
+ * 这里才是「维护 Agent 侧边栏」——右侧覆盖式可收起面板
+ * 不是底部 Agent 面板（底部那个在 Workbench.tsx <footer> 里）
+ * ============================================================
+ */
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { projectHeaders } from '../api'
 import './MaintainSidebar.css'

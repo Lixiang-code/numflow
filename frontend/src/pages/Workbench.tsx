@@ -2777,6 +2777,10 @@ export default function Workbench() {
           </>
         )}
       </footer>
+      {/* ═══════════════════════════════════════════════════
+          这里才是「维护 Agent 侧边栏」——右侧覆盖式面板
+          上面的 <footer> 是底部 Agent 面板（初始化流水线用）
+          ═══════════════════════════════════════════════════ */}
       <MaintainSidebar projectId={pid} currentTable={selected} cellSelection={cellSelection} />
     </div>
   )
