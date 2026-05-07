@@ -33,8 +33,26 @@ from app.services.recalc_lock import try_acquire_recalc_lock
 from app.services.table_ops import create_3d_table
 
 
+class _CountingConnection(sqlite3.Connection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.commit_count = 0
+
+    def commit(self):
+        self.commit_count += 1
+        return super().commit()
+
+
 def _new_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_project_db(conn, seed_readme=False)
+    ensure_project_migrations(conn)
+    return conn
+
+
+def _new_counting_conn() -> _CountingConnection:
+    conn = sqlite3.connect(":memory:", factory=_CountingConnection)
     conn.row_factory = sqlite3.Row
     init_project_db(conn, seed_readme=False)
     ensure_project_migrations(conn)
@@ -305,6 +323,28 @@ def test_a5_dag_can_execute_seed_formulas_when_requested():
     assert executed == [("A", "x"), ("B", "y")]
     assert conn.execute("SELECT x FROM A WHERE row_id='r1'").fetchone()[0] == 5.0
     assert conn.execute("SELECT y FROM B WHERE row_id='r1'").fetchone()[0] == 6.0
+
+
+def test_a5_dag_batches_commit_for_multiple_nodes():
+    conn = _new_counting_conn()
+    _make_table(conn, "A", "x")
+    _make_table(conn, "B", "y")
+    _make_table(conn, "C", "z")
+    _insert_rows(conn, "A", [{"row_id": "r1", "x": 0.0}])
+    _insert_rows(conn, "B", [{"row_id": "r1", "y": 0.0}])
+    _insert_rows(conn, "C", [{"row_id": "r1", "z": 0.0}])
+    register_formula(conn, "A", "x", "const_value(5)", defer=True)
+    register_formula(conn, "B", "y", "@A[x] + 1", defer=True)
+    register_formula(conn, "C", "z", "@B[y] + 1", defer=True)
+
+    conn.commit_count = 0
+    out = recalculate_downstream_dag(conn, [("A", "x")], execute_seeds=True)
+
+    assert out["errors"] == []
+    assert conn.commit_count == 1
+    assert conn.execute("SELECT x FROM A WHERE row_id='r1'").fetchone()[0] == 5.0
+    assert conn.execute("SELECT y FROM B WHERE row_id='r1'").fetchone()[0] == 6.0
+    assert conn.execute("SELECT z FROM C WHERE row_id='r1'").fetchone()[0] == 7.0
 
 
 def test_a5_dag_skips_downstream_when_seed_result_is_unchanged():

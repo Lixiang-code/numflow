@@ -566,6 +566,7 @@ def execute_formula_on_column(
     level_max: Optional[float] = None,
     table_cache: Optional[TableFrameCache] = None,
     duckdb_session: Optional[DuckDBSession] = None,
+    auto_commit: bool = True,
 ) -> Dict[str, Any]:
     cur = conn.execute(
         "SELECT formula FROM _formula_registry WHERE table_name = ? AND column_name = ?",
@@ -657,7 +658,7 @@ def execute_formula_on_column(
                 row_ids=all_row_ids,
                 now=now,
             )
-            if changed_pairs or all_row_ids:
+            if auto_commit and (changed_pairs or all_row_ids):
                 conn.commit()
             t2.set_rows(len(changed_pairs))
             t2.add_extra(rows_total=len(normalized), rows_changed=len(changed_pairs))
@@ -807,7 +808,7 @@ def execute_formula_on_column(
                 _upsert_formula_provenance(
                     conn, table_name=table_name, row_id=str(rid), column_name=col, now=now,
                 )
-        if changed_pairs or pending:
+        if auto_commit and (changed_pairs or pending):
             conn.commit()
         updated = len(changed_pairs)
         timer.set_rows(updated)
@@ -936,6 +937,7 @@ def _execute_node(
     *,
     table_cache: Optional[TableFrameCache] = None,
     duckdb_session: Optional[DuckDBSession] = None,
+    auto_commit: bool = True,
 ) -> Dict[str, Any]:
     """根据公式类型选择执行入口（sql/row/row_template）。"""
     cur = conn.execute(
@@ -953,6 +955,7 @@ def _execute_node(
             column,
             table_cache=table_cache,
             duckdb_session=duckdb_session,
+            auto_commit=auto_commit,
         )
     return execute_row_formula(
         conn,
@@ -960,6 +963,7 @@ def _execute_node(
         column,
         table_cache=table_cache,
         duckdb_session=duckdb_session,
+        auto_commit=auto_commit,
     )
 
 
@@ -1127,6 +1131,7 @@ def recalculate_downstream_dag(
                         c,
                         table_cache=table_cache,
                         duckdb_session=duckdb_session,
+                        auto_commit=False,
                     )
                     rows_changed = int(result.get("rows_changed", result.get("rows_updated", 0)) or 0)
                     if rows_changed > 0:
@@ -1154,6 +1159,7 @@ def recalculate_downstream_dag(
                 rows_changed=total_rows_changed,
                 cached_tables=len(table_cache),
             )
+        conn.commit()
     finally:
         if duckdb_session:
             try:
@@ -1311,6 +1317,7 @@ def execute_row_formula(
     *,
     table_cache: Optional[TableFrameCache] = None,
     duckdb_session: Optional[DuckDBSession] = None,
+    auto_commit: bool = True,
 ) -> Dict[str, Any]:
     """重新执行已注册的同行公式，计算所有行。"""
     cur = conn.execute(
@@ -1333,6 +1340,7 @@ def execute_row_formula(
             column_name,
             table_cache=table_cache,
             duckdb_session=duckdb_session,
+            auto_commit=auto_commit,
         )
 
     use_min_cols = perf_flag(conn, "use_min_column_load")
@@ -1381,7 +1389,8 @@ def execute_row_formula(
             """,
             (table_name, column_name),
         )
-        conn.commit()
+        if auto_commit:
+            conn.commit()
         errors: List[str] = []
         if external_refs:
             errors.extend(f"缺少同行列引用：{r}" for r in sorted(external_refs))
@@ -1403,7 +1412,8 @@ def execute_row_formula(
             """,
             (table_name, column_name),
         )
-        conn.commit()
+        if auto_commit:
+            conn.commit()
 
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     col_sql_type = "REAL"
@@ -1466,7 +1476,7 @@ def execute_row_formula(
             _upsert_formula_provenance(
                 conn, table_name=table_name, row_id=rid, column_name=column_name, now=now,
             )
-    if changed_pairs or pending:
+    if auto_commit and (changed_pairs or pending):
         conn.commit()
     return {
         "ok": True,
