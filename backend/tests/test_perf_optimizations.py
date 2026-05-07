@@ -156,6 +156,53 @@ def test_a2_load_table_df_with_columns_whitelist():
     assert set(df_min.columns) == {"row_id", "a", "b"}
 
 
+def test_a2_load_table_df_expands_cached_projection_with_missing_columns(monkeypatch):
+    conn = _new_conn()
+    _make_table(conn, "t1", "a", "b", "c", "d")
+    _insert_rows(conn, "t1", [{"row_id": "r1", "a": 1.0, "b": 2.0, "c": 3.0, "d": 4.0}])
+    table_cache = {}
+    sqls = []
+    original_read_sql_query = formula_exec.pd.read_sql_query
+
+    def _recording_read_sql_query(sql, *args, **kwargs):
+        sqls.append(sql)
+        return original_read_sql_query(sql, *args, **kwargs)
+
+    monkeypatch.setattr(formula_exec.pd, "read_sql_query", _recording_read_sql_query)
+
+    first = load_table_df(conn, "t1", ["a", "b"], table_cache=table_cache)
+    second = load_table_df(conn, "t1", ["a", "b", "c"], table_cache=table_cache)
+
+    assert list(first.columns) == ["row_id", "a", "b"]
+    assert list(second.columns) == ["row_id", "a", "b", "c"]
+    assert sqls == [
+        'SELECT "row_id", "a", "b" FROM "t1"',
+        'SELECT "row_id", "c" FROM "t1"',
+    ]
+
+
+def test_a2_load_table_df_reuses_cached_superset_without_sql(monkeypatch):
+    conn = _new_conn()
+    _make_table(conn, "t1", "a", "b", "c", "d")
+    _insert_rows(conn, "t1", [{"row_id": "r1", "a": 1.0, "b": 2.0, "c": 3.0, "d": 4.0}])
+    table_cache = {}
+    sqls = []
+    original_read_sql_query = formula_exec.pd.read_sql_query
+
+    def _recording_read_sql_query(sql, *args, **kwargs):
+        sqls.append(sql)
+        return original_read_sql_query(sql, *args, **kwargs)
+
+    monkeypatch.setattr(formula_exec.pd, "read_sql_query", _recording_read_sql_query)
+
+    full = load_table_df(conn, "t1", ["a", "b", "c"], table_cache=table_cache)
+    sub = load_table_df(conn, "t1", ["a", "c"], table_cache=table_cache)
+
+    assert list(full.columns) == ["row_id", "a", "b", "c"]
+    assert list(sub.columns) == ["row_id", "a", "c"]
+    assert sqls == ['SELECT "row_id", "a", "b", "c" FROM "t1"']
+
+
 # ───────────────────── A3: 批量回写正确性 ─────────────────────
 
 

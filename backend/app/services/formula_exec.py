@@ -120,6 +120,78 @@ def _cache_key_columns(cache_key: TableCacheKey) -> Optional[Tuple[str, ...]]:
     return columns
 
 
+def _select_df_columns(
+    df: pd.DataFrame,
+    columns: Optional[Sequence[str]],
+    *,
+    copy_result: bool,
+) -> pd.DataFrame:
+    if columns is None:
+        return _copy_df_with_attrs(df) if copy_result else df
+    selected = df.loc[:, list(columns)]
+    if copy_result:
+        selected = selected.copy()
+    selected.attrs = dict(df.attrs)
+    return selected
+
+
+def _find_cached_superset(
+    table_cache: TableFrameCache,
+    *,
+    table_name: str,
+    requested_columns: Optional[Tuple[str, ...]],
+) -> Optional[Tuple[TableCacheKey, pd.DataFrame]]:
+    best: Optional[Tuple[TableCacheKey, pd.DataFrame]] = None
+    best_size: Optional[int] = None
+    requested_set = set(requested_columns or ())
+    for cache_key, cached_df in table_cache.items():
+        if cache_key[0] != table_name:
+            continue
+        cached_columns = _cache_key_columns(cache_key)
+        if cached_columns is None:
+            size = len(cached_df.columns)
+            if best is None or best_size is None or size < best_size:
+                best = (cache_key, cached_df)
+                best_size = size
+            continue
+        if requested_columns is None:
+            continue
+        cached_set = set(cached_columns)
+        if not requested_set.issubset(cached_set):
+            continue
+        size = len(cached_columns)
+        if best is None or best_size is None or size < best_size:
+            best = (cache_key, cached_df)
+            best_size = size
+    return best
+
+
+def _expand_cached_projection(
+    conn: sqlite3.Connection,
+    *,
+    table_name: str,
+    base_df: pd.DataFrame,
+    requested_columns: Tuple[str, ...],
+) -> Optional[pd.DataFrame]:
+    base_columns = [col for col in base_df.columns if col in requested_columns]
+    missing_columns = [col for col in requested_columns if col not in base_columns]
+    if not missing_columns:
+        out = base_df.loc[:, list(requested_columns)].copy()
+        out.attrs = dict(base_df.attrs)
+        return out
+    if "row_id" not in base_df.columns:
+        return None
+    cols_sql = ", ".join(f'"{c}"' for c in missing_columns)
+    extra_df = pd.read_sql_query(
+        f'SELECT "row_id", {cols_sql} FROM "{table_name}"',
+        conn,
+    )
+    merged = base_df.loc[:, base_columns].merge(extra_df, how="left", on="row_id", sort=False)
+    merged = merged.loc[:, list(requested_columns)]
+    merged.attrs = dict(base_df.attrs)
+    return merged
+
+
 def _sync_table_cache(
     table_cache: Optional[TableFrameCache],
     *,
@@ -414,6 +486,36 @@ def load_table_df(
             return _copy_df_with_attrs(cached) if copy_result else cached
 
     cache_cols = _cache_key_columns(cache_key)
+    if table_cache is not None:
+        superset_hit = _find_cached_superset(
+            table_cache,
+            table_name=table,
+            requested_columns=cache_cols,
+        )
+        if superset_hit is not None:
+            _superset_key, superset_df = superset_hit
+            selected = _select_df_columns(superset_df, cache_cols, copy_result=copy_result)
+            if cache_cols is not None and cache_key not in table_cache:
+                table_cache[cache_key] = _select_df_columns(superset_df, cache_cols, copy_result=True)
+            return selected
+        if cache_cols is not None:
+            same_table_entries = [
+                (entry_key, entry_df)
+                for entry_key, entry_df in table_cache.items()
+                if entry_key[0] == table
+            ]
+            if same_table_entries:
+                same_table_entries.sort(key=lambda item: len(item[1].columns), reverse=True)
+                expanded = _expand_cached_projection(
+                    conn,
+                    table_name=table,
+                    base_df=same_table_entries[0][1],
+                    requested_columns=cache_cols,
+                )
+                if expanded is not None:
+                    table_cache[cache_key] = expanded
+                    return _copy_df_with_attrs(expanded) if copy_result else expanded
+
     if cache_cols is None:
         df = _attach_meta(pd.read_sql_query(f'SELECT * FROM "{table}"', conn))
     else:
