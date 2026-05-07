@@ -101,9 +101,22 @@ function parseFormulaRefs(text: string): { colRefs: string[]; constRefs: string[
   return { colRefs, constRefs, refColorMap }
 }
 
-function renderColoredFormula(formula: string, colorMap: Map<string, string>, colDisplay: Map<string, string> = new Map(), constDisplay: Map<string, string> = new Map()): React.ReactNode[] {
-  const parts = formula.split(/(@\w+|\$\{\w+\})/g)
+function renderColoredFormula(formula: string, colorMap: Map<string, string>, colDisplay: Map<string, string> = new Map(), constDisplay: Map<string, string> = new Map(), tableDisplay: Map<string, string> = new Map()): React.ReactNode[] {
+  const parts = formula.split(/(@@?\w+\[\w+\]|@\w+|\$\{\w+\})/g)
   return parts.map((part, i) => {
+    // @@table[col] / @table[col]
+    const crossRefMatch = part.match(/^(@{1,2})(\w+)\[(\w+)\]$/)
+    if (crossRefMatch) {
+      const at = crossRefMatch[1]
+      const tname = crossRefMatch[2]
+      const cname = crossRefMatch[3]
+      const td = tableDisplay.get(tname) || tname
+      const cd = colDisplay.get(cname) || cname
+      const label = `${at}${td}[${cd}]`
+      const color = colorMap.get(cname)
+      if (color) return <span key={i} style={{ color, fontWeight: 700 }}>{label}</span>
+      return <span key={i}>{label}</span>
+    }
     const colMatch = part.match(/^@(\w+)$/)
     if (colMatch) {
       const name = colMatch[1]
@@ -133,6 +146,7 @@ export default function ThreeDimTableEditor({
   columnKinds = {},
   tableKind = '',
   showEnNames = false,
+  tableDisplayMap = new Map<string, string>(),
 }: {
   tableName: string
   headers: Record<string, string>
@@ -144,6 +158,7 @@ export default function ThreeDimTableEditor({
   columnKinds?: Record<string, string>
   tableKind?: string
   showEnNames?: boolean
+  tableDisplayMap?: Map<string, string>
 }) {
   const [snapshot, setSnapshot] = useState<ThreeDimSnapshot | null>(null)
   const [loadedRequestKey, setLoadedRequestKey] = useState('')
@@ -594,7 +609,7 @@ export default function ThreeDimTableEditor({
         minHeight: `calc(${FAB_STYLE.lineHeight} * ${clampedRows} + .6rem)`,
       }}>
         <span style={{ color: FAB_STYLE.color }}>
-          {renderColoredFormula(text, map, showEnNames ? new Map() : colDisplayMap, showEnNames ? new Map() : constDisplayMap)}
+          {renderColoredFormula(text, map, showEnNames ? new Map() : colDisplayMap, showEnNames ? new Map() : constDisplayMap, showEnNames ? new Map() : tableDisplayMap)}
           {!text && <span>&nbsp;</span>}
           {'\n'}
         </span>
@@ -971,7 +986,7 @@ export default function ThreeDimTableEditor({
                     </div>
                   ) : (
                     <code className="matrix-formula-text matrix-formula-text-colored">
-                      {renderColoredFormula(formula.formula, displayRefs.refColorMap, showEnNames ? new Map() : colDisplayMap, showEnNames ? new Map() : constDisplayMap)}
+                      {renderColoredFormula(formula.formula, displayRefs.refColorMap, showEnNames ? new Map() : colDisplayMap, showEnNames ? new Map() : constDisplayMap, showEnNames ? new Map() : tableDisplayMap)}
                     </code>
                   )}
                 </div>

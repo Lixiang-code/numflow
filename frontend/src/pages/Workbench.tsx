@@ -554,6 +554,10 @@ export default function Workbench() {
   const [kindFilter, setKindFilter] = useState<string>('all')  // all / config / compute
   const [columnKinds, setColumnKinds] = useState<Record<string, string>>({})
   const [activeTableKind, setActiveTableKind] = useState('')
+  const tableDispMap = useMemo(
+    () => new Map(tables.filter(t => t.display_name).map(t => [t.table_name, t.display_name!])),
+    [tables],
+  )
   const [showEnNames, setShowEnNames] = useState(false)  // false=显示中文，true=显示英文
 
   /** 全部常量（用于"📐 常量"专属页） */
@@ -1581,10 +1585,22 @@ export default function Workbench() {
     return 'SQL公式'
   }
 
-  function translateFormulaDisplay(text: string, colMetaArr: ColumnMeta[], constMap: Map<string, { name_zh?: string }>): string {
+  function translateFormulaDisplay(
+    text: string,
+    colMetaArr: ColumnMeta[],
+    constMap: Map<string, { name_zh?: string }>,
+    tableDispMap: Map<string, string>,
+  ): string {
     if (!text) return text
     let out = text
-    // 替换 @col → @显示名
+    // 替换 @table[col] / @@table[col] → @表显示名[列显示名]
+    out = out.replace(/(@{1,2})(\w+)\[(\w+)\]/g, (_, at, tname, cname) => {
+      const td = tableDispMap.get(tname) || tname
+      const cm = colMetaArr.find((m) => m.name === cname)
+      const cd = cm?.display_name || cname
+      return `${at}${td}[${cd}]`
+    })
+    // 替换 @col → @显示名（裸引用，无表名前缀）
     for (const cm of colMetaArr) {
       if (cm.display_name && cm.name && out.includes(`@${cm.name}`)) {
         out = out.replace(new RegExp(`@${cm.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w])`, 'g'), `@${cm.display_name}`)
@@ -2020,6 +2036,7 @@ export default function Workbench() {
                 columnKinds={columnKinds}
                 tableKind={activeTableKind}
                 showEnNames={showEnNames}
+                tableDisplayMap={tableDispMap}
               />
             </>
           ) : selected !== '__constants__' && !selectedIsMatrix ? (
@@ -2068,7 +2085,7 @@ export default function Workbench() {
                 {!showEnNames && formulaBarText && (() => {
                   const meta = tableColMetaCacheRef.current.get(selected ?? '') || []
                   const constMap = new Map(allConstants.map((c: any) => [c.name_en, c]))
-                  const translated = translateFormulaDisplay(formulaBarText, meta, constMap)
+                  const translated = translateFormulaDisplay(formulaBarText, meta, constMap, tableDispMap)
                   return translated !== formulaBarText ? (
                     <span className="wb-formula-translated muted" style={{ fontSize: 11, fontFamily: 'monospace', marginBottom: 2, display: 'block' }}>
                       {translated}
