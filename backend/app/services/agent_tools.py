@@ -4344,12 +4344,59 @@ def _check_value_formula_suspicion(value, brief: str) -> Optional[str]:
     eff = _count_effective_digits(v)
     if eff >= 3:
         formula_reasons.append(f"有效数字={eff}位")
-    formula_syms = '+*=×÷^'
+    formula_syms = '+−*/=×÷^'
     if any(c in brief for c in formula_syms):
         hits = [c for c in formula_syms if c in brief]
         formula_reasons.append(f"brief含运算符{'/'.join(hits)}")
     if formula_reasons:
         warnings_list.append(f"疑是 formula 常量被填写为 value 常量，请考虑改为 formula（{'；'.join(formula_reasons)}）")
+
+    # 检查 3：brief 中固化了 value 的数字
+
+
+def _check_const_looks_like_table_row(conn: sqlite3.Connection, name_en: str, name_zh: str) -> Optional[str]:
+    """检查 name_zh 含 '·' 时是否疑似二维表数据被注册为常量。"""
+    if not name_zh or '·' not in name_zh:
+        return None
+
+    parts = name_zh.split('·')
+    # 至少两段才可能表示行列结构
+    if len(parts) < 2:
+        return None
+
+    # 取第一段作为"行分组"前缀，统计同前缀的常量数量
+    prefix = parts[0].strip()
+    # 也统计对应 name_en 的前缀（英文名可能有相似模式）
+    en_parts = name_en.split('_')
+
+    # 统计同中文前缀的常量数
+    cnt = conn.execute(
+        "SELECT COUNT(*) FROM _constants WHERE name_zh LIKE ? || '·%' AND name_en != ?",
+        (prefix, name_en),
+    ).fetchone()[0]
+
+    # 也检查英文命名模式是否呈现枚举结构
+    en_pattern_count = 0
+    if len(en_parts) >= 2:
+        en_prefix = '_'.join(en_parts[:-1])
+        en_pattern_count = conn.execute(
+            "SELECT COUNT(*) FROM _constants WHERE name_en LIKE ? || '_%' AND name_en != ? AND name_en != ?",
+            (en_prefix, name_en, name_en),
+        ).fetchone()[0]
+
+    if cnt >= 3:
+        return (
+            f"⚠ 该常量中文名含 '·' 分隔符且已有 {cnt} 个同前缀（'{prefix}'）的常量，"
+            f"疑似二维表数据被拆成了独立常量。强烈建议用 create_matrix_table 或 "
+            f"create_dynamic_table 创建正式表（行={prefix} 各组，列=各属性），"
+            f"避免常量数量膨胀且丧失结构化查询能力。"
+        )
+    if cnt >= 1:
+        return (
+            f"该常量中文名含 '·' 分隔符（'{prefix}·...'），疑似二维表数据点。"
+            f"若后续还需要添加同前缀的其他数据点，建议改为创建矩阵表而非独立常量。"
+        )
+    return None
 
     # 检查 3：brief 中是否直接出现与 value 相同的字面量
     literal_forms = set()
@@ -4563,6 +4610,11 @@ def _const_register(conn: sqlite3.Connection, args: Dict[str, Any], can_write: b
         value_json = _coerce_value_json(args["value"])
         formula_to_store = None
         warning = _check_value_formula_suspicion(json.loads(value_json), brief)
+
+    # ── 检测 name_zh 中 '·' 分隔符，疑似二维表数据被注册为常量 ──
+    table_warn = _check_const_looks_like_table_row(conn, name_en, name_zh)
+    if table_warn:
+        warning = table_warn if warning is None else (warning + "\n" + table_warn)
 
     # 自动建标签
     for t in tags:
