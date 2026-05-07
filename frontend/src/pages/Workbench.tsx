@@ -1961,6 +1961,7 @@ export default function Workbench() {
                 headers={headers}
                 glossary={glossary}
                 canWrite={!readOnly}
+                columnKinds={columnKinds}
               />
             </>
           ) : selected && selectedIs3DMatrix ? (

@@ -66,12 +66,14 @@ export default function MatrixEditor({
   headers,
   glossary,
   canWrite = false,
+  columnKinds = {},
 }: {
   tableName: string
   matrixMeta: Record<string, unknown>
   headers: Record<string, string>
   glossary: GlossaryItem[]
   canWrite?: boolean
+  columnKinds?: Record<string, string>
 }) {
   const [snapshot, setSnapshot] = useState<MatrixSnapshot | null>(null)
   const [loadedRequestKey, setLoadedRequestKey] = useState('')
@@ -355,11 +357,18 @@ export default function MatrixEditor({
                   const hasFormula = Boolean(formula)
                   const isEditingCell = editingCell?.row === r && editingCell?.col === c && editingCell?.level === displayLevel
                   const cellEditable = canWrite && !hasFormula && !cellSaving
-                  return (
-                    <td
-                      key={c}
-                      className={`matrix-cell${isEmpty ? ' matrix-cell-empty' : ''}${hasNote ? ' matrix-cell-noted' : ''}${cellEditable ? ' matrix-cell-editable' : ''}`}
-                      title={formula?.formula || (hasNote ? note : cellEditable ? '点击编辑' : undefined)}
+                    const kindBg = (() => {
+                      const k = columnKinds[c]
+                      if (k === 'config') return '#faf0e6'
+                      if (k === 'compute') return '#f0f0f0'
+                      return undefined
+                    })()
+                    return (
+                      <td
+                        key={c}
+                        className={`matrix-cell${isEmpty ? ' matrix-cell-empty' : ''}${hasNote ? ' matrix-cell-noted' : ''}${cellEditable ? ' matrix-cell-editable' : ''}`}
+                        style={kindBg ? { background: kindBg } : undefined}
+                        title={formula?.formula || (hasNote ? note : cellEditable ? '点击编辑' : undefined)}
                       onClick={() => {
                         if (!cellEditable) return
                         setEditingCell({ row: r, col: c, level: displayLevel })
