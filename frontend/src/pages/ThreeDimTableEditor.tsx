@@ -123,6 +123,7 @@ export default function ThreeDimTableEditor({
   canRecalculate = false,
   canWrite = false,
   onConstantsChanged,
+  columnKinds = {},
 }: {
   tableName: string
   headers: Record<string, string>
@@ -131,6 +132,7 @@ export default function ThreeDimTableEditor({
   canRecalculate?: boolean
   canWrite?: boolean
   onConstantsChanged?: () => void
+  columnKinds?: Record<string, string>
 }) {
   const [snapshot, setSnapshot] = useState<ThreeDimSnapshot | null>(null)
   const [loadedRequestKey, setLoadedRequestKey] = useState('')
@@ -502,6 +504,13 @@ export default function ThreeDimTableEditor({
     return undefined
   }
 
+  const getColumnKindBg = (colKey: string): string | undefined => {
+    const kind = columnKinds[colKey]
+    if (kind === 'config') return '#faf0e6'
+    if (kind === 'compute') return '#f0f0f0'
+    return undefined
+  }
+
   const getValue = (rowKey: string, colKey: string): unknown => {
     if (!effectiveFixedValue) return null
     const values: Record<AxisKey, string> = {
@@ -756,6 +765,8 @@ export default function ThreeDimTableEditor({
                     const metricMeta = metricKey ? metricMetaMap.get(metricKey) : undefined
                     const value = getValue(rowKey, colKey)
                     const cellBg = getCellBg(colKey, rowKey)
+                    const kindBg = getColumnKindBg(colKey)
+                    const bg = cellBg || kindBg
                     const coords = getCellCoords(rowKey, colKey)
                     const isEditingCell = editingCell?.dim1Key === coords?.dim1Key
                       && editingCell?.dim2Key === coords?.dim2Key
@@ -766,7 +777,7 @@ export default function ThreeDimTableEditor({
                       <td
                         key={colKey}
                         className={`matrix-cell${value == null ? ' matrix-cell-empty' : ''}${cellEditable ? ' matrix-cell-editable' : ''}`}
-                        style={cellBg ? { background: cellBg } : undefined}
+                        style={bg ? { background: bg } : undefined}
                         title={cellFormula ? '公式列值，自动计算不可编辑' : cellEditable ? '点击编辑' : undefined}
                         onClick={() => {
                           if (!cellEditable || !coords) return

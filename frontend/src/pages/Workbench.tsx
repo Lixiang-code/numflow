@@ -1986,6 +1986,7 @@ export default function Workbench() {
                 canRecalculate={!readOnly}
                 canWrite={!readOnly}
                 onConstantsChanged={() => void loadAllConstants()}
+                columnKinds={columnKinds}
               />
             </>
           ) : selected !== '__constants__' && !selectedIsMatrix ? (
