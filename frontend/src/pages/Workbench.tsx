@@ -1581,6 +1581,23 @@ export default function Workbench() {
     return 'SQL公式'
   }
 
+  function translateFormulaDisplay(text: string, colMetaArr: ColumnMeta[], constMap: Map<string, { name_zh?: string }>): string {
+    if (!text) return text
+    let out = text
+    // 替换 @col → @显示名
+    for (const cm of colMetaArr) {
+      if (cm.display_name && cm.name && out.includes(`@${cm.name}`)) {
+        out = out.replace(new RegExp(`@${cm.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w])`, 'g'), `@${cm.display_name}`)
+      }
+    }
+    // 替换 ${const} → ${常量中文名}
+    out = out.replace(/\$\{(\w+)\}/g, (_, name) => {
+      const c = constMap.get(name)
+      return c?.name_zh ? `\${${c.name_zh}}` : `\${${name}}`
+    })
+    return out
+  }
+
   function parseFabRefs(text: string): { colRefs: Set<string>; constRefs: string[] } {
     const colRefs = new Set<string>()
     const constRefs: string[] = []
@@ -2030,7 +2047,12 @@ export default function Workbench() {
             <span className="wb-formula-bar-label">
               {formulaBarCol ? (
                 <>
-                  <strong>fx</strong>: {formulaBarCol}
+                  <strong>fx</strong>:{' '}
+                  {showEnNames ? formulaBarCol : ((() => {
+                    const meta = tableColMetaCacheRef.current.get(selected ?? '') || []
+                    const cm = meta.find((m: ColumnMeta) => m.name === formulaBarCol)
+                    return cm?.display_name || formulaBarCol
+                  })())}
                   {columnFormulas[formulaBarCol] && (
                     <span className={`wb-formula-type-badge wb-ftype-${columnFormulas[formulaBarCol].type}`}>
                       {formulaTypeLabel(columnFormulas[formulaBarCol].type)}
@@ -2043,6 +2065,16 @@ export default function Workbench() {
             </span>
             {formulaBarCol && (
               <>
+                {!showEnNames && formulaBarText && (() => {
+                  const meta = tableColMetaCacheRef.current.get(selected ?? '') || []
+                  const constMap = new Map(allConstants.map((c: any) => [c.name_en, c]))
+                  const translated = translateFormulaDisplay(formulaBarText, meta, constMap)
+                  return translated !== formulaBarText ? (
+                    <span className="wb-formula-translated muted" style={{ fontSize: 11, fontFamily: 'monospace', marginBottom: 2, display: 'block' }}>
+                      {translated}
+                    </span>
+                  ) : null
+                })()}
                 <input
                   className="wb-formula-bar-input"
                   value={formulaBarText}
