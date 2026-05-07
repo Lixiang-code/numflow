@@ -16,7 +16,7 @@ from app.db.project_migrations import (
     ensure_project_migrations,
 )
 from app.db.project_schema import init_project_db
-from app.services import duckdb_compute
+from app.services import duckdb_compute, formula_engine
 from app.services.calculator_ops import register_calculator
 from app.services.formula_exec import (
     execute_formula_on_column,
@@ -221,8 +221,10 @@ def test_a5_recalculate_downstream_uses_dag_when_enabled():
     conn = _make_chain_env()
     out = recalculate_downstream(conn, "base", "y")
     executed = {(r["table"], r["column"]) for r in out["executed"]}
-    # base.y 自身是 seed 不在 executed；下游应包含 mid.v, mid.w, top.z
-    assert {("mid", "v"), ("mid", "w"), ("top", "z")} <= executed
+    # base.y 自身是 seed 不在 executed；直接下游会执行。
+    assert {("mid", "v"), ("mid", "w")} <= executed
+    assert ("top", "z") not in executed
+    assert out["skipped"] == [{"table": "top", "column": "z", "reason": "upstream_unchanged"}]
 
 
 def test_a5_recalculate_downstream_legacy_when_flag_off():
@@ -289,6 +291,27 @@ def test_a5_dag_can_execute_seed_formulas_when_requested():
     executed = [(r["table"], r["column"]) for r in out["executed"]]
     assert executed == [("A", "x"), ("B", "y")]
     assert conn.execute("SELECT x FROM A WHERE row_id='r1'").fetchone()[0] == 5.0
+    assert conn.execute("SELECT y FROM B WHERE row_id='r1'").fetchone()[0] == 6.0
+
+
+def test_a5_dag_skips_downstream_when_seed_result_is_unchanged():
+    conn = _new_conn()
+    _make_table(conn, "A", "x")
+    _make_table(conn, "B", "y")
+    _insert_rows(conn, "A", [{"row_id": "r1", "x": 0.0}])
+    _insert_rows(conn, "B", [{"row_id": "r1", "y": 0.0}])
+    register_formula(conn, "A", "x", "const_value(5)", defer=True)
+    register_formula(conn, "B", "y", "@A[x] + 1", defer=True)
+
+    first = recalculate_downstream_dag(conn, [("A", "x")], execute_seeds=True)
+    assert [(r["table"], r["column"]) for r in first["executed"]] == [("A", "x"), ("B", "y")]
+    assert conn.execute("SELECT x FROM A WHERE row_id='r1'").fetchone()[0] == 5.0
+    assert conn.execute("SELECT y FROM B WHERE row_id='r1'").fetchone()[0] == 6.0
+
+    second = recalculate_downstream_dag(conn, [("A", "x")], execute_seeds=True)
+
+    assert second["executed"] == [{"table": "A", "column": "x", "rows_changed": 0, "engine": ""}]
+    assert second["skipped"] == [{"table": "B", "column": "y", "reason": "upstream_unchanged"}]
     assert conn.execute("SELECT y FROM B WHERE row_id='r1'").fetchone()[0] == 6.0
 
 
@@ -520,6 +543,50 @@ def test_a4_batch_lookup_reuses_calculator_metadata_query():
         "r1": 11.0,
         "r2": 22.0,
         "r3": 33.0,
+    }
+
+
+def test_a4_vlookup_exact_uses_lookup_cache(monkeypatch):
+    conn = _new_conn()
+    _make_table(conn, "lk", "k", "value")
+    _insert_rows(
+        conn,
+        "lk",
+        [{"row_id": f"r{i}", "k": float(i), "value": float(i * 10)} for i in range(1, 11)],
+    )
+    _make_table(conn, "t", "k", "out")
+    _insert_rows(
+        conn,
+        "t",
+        [{"row_id": f"r{i}", "k": float((i % 10) + 1), "out": 0.0} for i in range(100)],
+    )
+    register_formula(conn, "t", "out", "VLOOKUP(@t[k], @@lk[k], @@lk[value], 0)", defer=True)
+
+    compare_calls = 0
+    original_values_equal = formula_engine._values_equal
+
+    def _counting_values_equal(a, b):
+        nonlocal compare_calls
+        compare_calls += 1
+        return original_values_equal(a, b)
+
+    monkeypatch.setattr("app.services.formula_engine._values_equal", _counting_values_equal)
+
+    execute_formula_on_column(conn, "t", "out")
+    cached_calls = compare_calls
+
+    compare_calls = 0
+    _set_perf(conn, use_batch_lookup=False)
+    conn.execute('UPDATE "t" SET "out" = 0')
+    conn.commit()
+    execute_formula_on_column(conn, "t", "out")
+    uncached_calls = compare_calls
+
+    assert cached_calls < uncached_calls
+    assert dict(conn.execute('SELECT row_id, out FROM t WHERE row_id IN ("r0", "r1", "r9")').fetchall()) == {
+        "r0": 10.0,
+        "r1": 20.0,
+        "r9": 100.0,
     }
 
 

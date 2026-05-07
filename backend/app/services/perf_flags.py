@@ -6,7 +6,7 @@
 默认值（与部署文档一致）：
 - perf.use_min_column_load     = True   # A2 最小列加载
 - perf.use_batch_writeback     = True   # A3 批量回写
-- perf.use_batch_lookup        = True   # A4 calculator 批量 lookup / 缓存
+ - perf.use_batch_lookup        = True   # A4 calculator + 公式 lookup 批量缓存
 - perf.use_dag_recalc          = True   # A5 DAG 批量重算
 - perf.use_duckdb_compute      = False  # B1/B2 DuckDB 计算（默认关闭）
 """

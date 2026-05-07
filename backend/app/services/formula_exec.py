@@ -16,6 +16,7 @@ from app.services.formula_engine import (
     eval_row_formula,
     eval_series,
     inject_call_calculator,
+    inject_lookup_cache,
     normalize_self_row_refs,
     normalize_self_table_refs,
     parse_constant_refs,
@@ -24,11 +25,79 @@ from app.services.formula_engine import (
     precompile_row_formula,
     preprocess_formula,
     reset_call_calculator,
+    reset_lookup_cache,
     substitute_constants,
 )
 from app.services.perf_flags import PerfTimer, perf_flag
 
 Node = Tuple[str, str]
+
+_FLOAT_TOLERANCE = 1e-9
+
+
+def _is_null_like(v: Any) -> bool:
+    if v is None:
+        return True
+    try:
+        return bool(pd.isna(v))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _normalize_formula_value(value: Any, *, is_text_col: bool) -> Any:
+    if _is_null_like(value):
+        return None
+    if is_text_col:
+        return str(value)
+    return float(value)
+
+
+def _formula_values_equal(old: Any, new: Any, *, is_text_col: bool) -> bool:
+    if _is_null_like(old) and _is_null_like(new):
+        return True
+    if is_text_col:
+        return str(old) == str(new)
+    try:
+        old_f = float(old)
+        new_f = float(new)
+    except (TypeError, ValueError):
+        return old == new
+    if pd.isna(old_f) and pd.isna(new_f):
+        return True
+    return abs(old_f - new_f) <= _FLOAT_TOLERANCE
+
+
+def _current_value_map_from_df(df: pd.DataFrame, column: str) -> Dict[str, Any]:
+    if "row_id" not in df.columns or column not in df.columns:
+        return {}
+    return {str(rid): val for rid, val in zip(df["row_id"].tolist(), df[column].tolist())}
+
+
+def _current_value_map_from_table(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    column: str,
+) -> Dict[str, Any]:
+    cur = conn.execute(f'SELECT row_id, "{column}" FROM "{table}"')
+    return {str(row[0]): row[1] for row in cur.fetchall()}
+
+
+def _filter_changed_pairs(
+    pairs: Sequence[Tuple[Any, Any]],
+    *,
+    current_by_row_id: Dict[str, Any],
+    is_text_col: bool,
+) -> Tuple[List[Tuple[Any, Any]], List[str]]:
+    changed_pairs: List[Tuple[Any, Any]] = []
+    changed_row_ids: List[str] = []
+    for value, row_id in pairs:
+        rid = str(row_id)
+        if _formula_values_equal(current_by_row_id.get(rid), value, is_text_col=is_text_col):
+            continue
+        changed_pairs.append((value, row_id))
+        changed_row_ids.append(rid)
+    return changed_pairs, changed_row_ids
 
 
 def _rewrite_3d_dim_aliases(
@@ -89,6 +158,7 @@ def _formula_call_calculator_context(conn: sqlite3.Connection):
     meta_cache: Dict[str, Dict[str, Any]] = {}
     # 结果缓存：(name, frozenset(kwargs.items 可哈希化)) -> value
     result_cache: Dict[Tuple[str, Any], Any] = {}
+    lookup_cache: Optional[Dict[Tuple[Any, ...], Dict[Any, Any]]] = {} if use_cache else None
 
     def _hashable_kwargs(kwargs: Dict[str, Any]) -> Optional[Any]:
         try:
@@ -160,11 +230,13 @@ def _formula_call_calculator_context(conn: sqlite3.Connection):
             result_cache[cache_key] = value
         return value
 
+    lookup_token = inject_lookup_cache(lookup_cache)
     token = inject_call_calculator(_formula_call_calculator)
     try:
         yield
     finally:
         reset_call_calculator(token)
+        reset_lookup_cache(lookup_token)
 
 
 def _graph_has_cycle(edges: List[Tuple[Node, Node]]) -> bool:
@@ -482,10 +554,15 @@ def execute_formula_on_column(
         is_text_col = col_sql_type == "TEXT"
         normalized: List[Tuple[Any, Any]] = []
         for v, rid in duckdb_pairs:
-            db_val = (str(v) if v is not None else None) if is_text_col else (
-                float(v) if v is not None else None
-            )
+            db_val = _normalize_formula_value(v, is_text_col=is_text_col)
             normalized.append((db_val, rid))
+        current_by_row_id = _current_value_map_from_table(conn, table=table_name, column=column_name)
+        changed_pairs, _changed_row_ids = _filter_changed_pairs(
+            normalized,
+            current_by_row_id=current_by_row_id,
+            is_text_col=is_text_col,
+        )
+        all_row_ids = [str(rid) for _, rid in normalized]
         with PerfTimer(
             conn,
             op="execute_formula_on_column",
@@ -493,18 +570,28 @@ def execute_formula_on_column(
             column_name=column_name,
             extra={"engine": "duckdb"},
         ) as t2:
-            _batch_apply_updates(conn, table=table_name, column=column_name, pairs=normalized)
+            if changed_pairs:
+                _batch_apply_updates(conn, table=table_name, column=column_name, pairs=changed_pairs)
             _batch_apply_provenance(
                 conn,
                 table=table_name,
                 column=column_name,
-                row_ids=[rid for _, rid in normalized],
+                row_ids=all_row_ids,
                 now=now,
             )
-            conn.commit()
-            t2.set_rows(len(normalized))
+            if changed_pairs or all_row_ids:
+                conn.commit()
+            t2.set_rows(len(changed_pairs))
+            t2.add_extra(rows_total=len(normalized), rows_changed=len(changed_pairs))
         # rows_total 在 DuckDB 路径下使用结果集长度；与 Pandas 路径返回结构兼容
-        return {"ok": True, "rows_updated": len(normalized), "rows_total": len(normalized), "engine": "duckdb"}
+        return {
+            "ok": True,
+            "rows_updated": len(changed_pairs),
+            "rows_changed": len(changed_pairs),
+            "rows_total": len(normalized),
+            "rows_evaluated": len(normalized),
+            "engine": "duckdb",
+        }
 
     with PerfTimer(
         conn,
@@ -574,6 +661,7 @@ def execute_formula_on_column(
         except Exception:
             pass
         is_text_col = col_sql_type == "TEXT"
+        current_by_row_id = _current_value_map_from_df(df, col)
 
         # 收集本次需要写入的 (value, row_id) 对，统一批量回写
         pending: List[Tuple[Any, Any]] = []
@@ -582,32 +670,45 @@ def execute_formula_on_column(
             if mask is not None and not bool(mask.iloc[i]):
                 continue
             val = series.iloc[i]
-            db_val = str(val) if is_text_col else float(val)
+            db_val = _normalize_formula_value(val, is_text_col=is_text_col)
             pending.append((db_val, rid))
+        changed_pairs, _changed_row_ids = _filter_changed_pairs(
+            pending,
+            current_by_row_id=current_by_row_id,
+            is_text_col=is_text_col,
+        )
 
         if use_batch_write:
-            _batch_apply_updates(conn, table=table_name, column=col, pairs=pending)
+            _batch_apply_updates(conn, table=table_name, column=col, pairs=changed_pairs)
             _batch_apply_provenance(
                 conn,
                 table=table_name,
                 column=col,
-                row_ids=[rid for _, rid in pending],
+                row_ids=[str(rid) for _, rid in pending],
                 now=now,
             )
         else:
-            for db_val, rid in pending:
+            for db_val, rid in changed_pairs:
                 conn.execute(
                     f'UPDATE "{table_name}" SET "{col}" = ? WHERE row_id = ?',
                     (db_val, rid),
                 )
+            for _db_val, rid in pending:
                 _upsert_formula_provenance(
                     conn, table_name=table_name, row_id=str(rid), column_name=col, now=now,
                 )
-        updated = len(pending)
-        conn.commit()
+        if changed_pairs or pending:
+            conn.commit()
+        updated = len(changed_pairs)
         timer.set_rows(updated)
-        timer.add_extra(rows_total=len(df))
-        return {"ok": True, "rows_updated": updated, "rows_total": len(df)}
+        timer.add_extra(rows_total=len(df), rows_evaluated=len(pending), rows_changed=updated)
+        return {
+            "ok": True,
+            "rows_updated": updated,
+            "rows_changed": updated,
+            "rows_total": len(df),
+            "rows_evaluated": len(pending),
+        }
 
 
 def register_formula(
@@ -718,7 +819,7 @@ def recalculate_downstream(conn: sqlite3.Connection, table_name: str, column_nam
     return {"executed": done, "errors": errors}
 
 
-def _execute_node(conn: sqlite3.Connection, table: str, column: str) -> None:
+def _execute_node(conn: sqlite3.Connection, table: str, column: str) -> Dict[str, Any]:
     """根据公式类型选择执行入口（sql/row/row_template）。"""
     cur = conn.execute(
         "SELECT formula_type FROM _formula_registry WHERE table_name = ? AND column_name = ?",
@@ -729,9 +830,8 @@ def _execute_node(conn: sqlite3.Connection, table: str, column: str) -> None:
         raise ValueError(f"未注册公式：{table}.{column}")
     ftype = (r["formula_type"] if isinstance(r, sqlite3.Row) else r[0]) or "sql"
     if ftype == "sql":
-        execute_formula_on_column(conn, table, column)
-    else:
-        execute_row_formula(conn, table, column)
+        return execute_formula_on_column(conn, table, column)
+    return execute_row_formula(conn, table, column)
 
 
 def recalculate_downstream_dag(
@@ -799,11 +899,12 @@ def recalculate_downstream_dag(
             tt = r["to_table"] if isinstance(r, sqlite3.Row) else r[0]
             tc = r["to_column"] if isinstance(r, sqlite3.Row) else r[1]
             dep = (tt, tc)
+            if dep in nodes or dep in seed_set:
+                forward[dep].append(n)
+                deps[n].add(dep)
             # 仅在 dep 也属于 affected 时纳入子图（seeds 视为已就绪）
             if dep in nodes:
                 # 边方向：dep → n （n 依赖 dep，所以先算 dep）
-                forward[dep].append(n)
-                deps[n].add(dep)
                 indeg[n] += 1
 
     # Step 3: Kahn 拓扑
@@ -832,6 +933,9 @@ def recalculate_downstream_dag(
     skipped: List[Dict[str, Any]] = []
     failed_nodes: Set[Node] = set()
     blocked_nodes: Set[Node] = set()
+    changed_nodes: Set[Node] = set() if execute_seeds else set(seed_set)
+    skipped_unchanged = 0
+    total_rows_changed = 0
     timer = PerfTimer(
         conn,
         op="recalculate_downstream_dag",
@@ -862,13 +966,49 @@ def recalculate_downstream_dag(
                     }
                 )
                 continue
+            triggered_by = sorted(
+                f"{dt}.{dc}"
+                for dt, dc in deps.get(node, set())
+                if (dt, dc) in changed_nodes
+            )
+            is_seed_node = node in seed_set
+            if not is_seed_node and not triggered_by:
+                skipped_unchanged += 1
+                skipped.append(
+                    {
+                        "table": t,
+                        "column": c,
+                        "reason": "upstream_unchanged",
+                    }
+                )
+                continue
             try:
-                _execute_node(conn, t, c)
-                executed.append({"table": t, "column": c})
+                result = _execute_node(conn, t, c)
+                rows_changed = int(result.get("rows_changed", result.get("rows_updated", 0)) or 0)
+                if rows_changed > 0:
+                    changed_nodes.add(node)
+                    total_rows_changed += rows_changed
+                executed.append(
+                    {
+                        "table": t,
+                        "column": c,
+                        "rows_changed": rows_changed,
+                        "engine": str(result.get("engine") or ""),
+                    }
+                )
             except Exception as e:  # noqa: BLE001
                 failed_nodes.add(node)
                 errors.append(f"{t}.{c}: {e}")
-        timer.add_extra(errors=len(errors), blocked=len(skipped))
+        timer.add_extra(
+            errors=len(errors),
+            blocked=len(
+                [item for item in skipped if item.get("reason") == "blocked_by_failed_dependency"]
+            ),
+            skipped=len(skipped),
+            skipped_unchanged=skipped_unchanged,
+            changed_nodes=len(changed_nodes),
+            rows_changed=total_rows_changed,
+        )
 
     out: Dict[str, Any] = {"executed": executed, "errors": errors, "skipped": skipped}
     if skipped_cycle:
@@ -1104,11 +1244,11 @@ def execute_row_formula(
     except Exception:
         pass
     is_text_col = col_sql_type == "TEXT"
-    updated = 0
     errors: List[str] = []
 
     pending: List[Tuple[Any, Any]] = []
     precomp = precompile_row_formula(formula_for_compute, available_cols)
+    current_by_row_id = _current_value_map_from_df(df, column_name)
     with _formula_call_calculator_context(conn):
         for _, row_data in df.iterrows():
             row_dict: Dict[str, Any] = {c: row_data[c] for c in df.columns}
@@ -1117,31 +1257,46 @@ def execute_row_formula(
                 errors.append(f"行 {row_dict.get('row_id')}: 缺少参数 {missing}")
                 continue
             try:
-                val = str(val) if is_text_col else round(float(val), 6) if val is not None else None
+                val = _normalize_formula_value(val, is_text_col=is_text_col)
+                if not is_text_col and val is not None:
+                    val = round(float(val), 6)
             except (TypeError, ValueError):
                 pass
             pending.append((val, str(row_dict["row_id"])))
-            updated += 1
+    changed_pairs, _changed_row_ids = _filter_changed_pairs(
+        pending,
+        current_by_row_id=current_by_row_id,
+        is_text_col=is_text_col,
+    )
     if use_batch_write:
-        _batch_apply_updates(conn, table=table_name, column=column_name, pairs=pending)
+        _batch_apply_updates(conn, table=table_name, column=column_name, pairs=changed_pairs)
         _batch_apply_provenance(
             conn,
             table=table_name,
             column=column_name,
-            row_ids=[rid for _, rid in pending],
+            row_ids=[str(rid) for _, rid in pending],
             now=now,
         )
     else:
-        for val, rid in pending:
+        for val, rid in changed_pairs:
             conn.execute(
                 f'UPDATE "{table_name}" SET "{column_name}" = ? WHERE row_id = ?',
                 (val, rid),
             )
+        for _val, rid in pending:
             _upsert_formula_provenance(
                 conn, table_name=table_name, row_id=rid, column_name=column_name, now=now,
             )
-    conn.commit()
-    return {"ok": True, "rows_updated": updated, "rows_total": len(df), "errors": errors}
+    if changed_pairs or pending:
+        conn.commit()
+    return {
+        "ok": True,
+        "rows_updated": len(changed_pairs),
+        "rows_changed": len(changed_pairs),
+        "rows_total": len(df),
+        "rows_evaluated": len(pending),
+        "errors": errors,
+    }
 
 
 def delete_column_formula(

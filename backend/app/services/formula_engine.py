@@ -19,6 +19,10 @@ _CALL_CALCULATOR: "contextvars.ContextVar[Optional[Callable[..., Any]]]" = conte
     "_call_calculator",
     default=None,
 )
+_LOOKUP_CACHE: "contextvars.ContextVar[Optional[Dict[Tuple[Any, ...], Dict[Any, Any]]]]" = contextvars.ContextVar(
+    "_lookup_cache",
+    default=None,
+)
 
 # 逐行引用：@T[col]（注意先匹配 @@ 再匹配 @，避免混淆）
 _REF = re.compile(
@@ -82,6 +86,14 @@ def inject_call_calculator(fn: Optional[Callable[..., Any]]) -> contextvars.Toke
 
 def reset_call_calculator(token: contextvars.Token) -> None:
     _CALL_CALCULATOR.reset(token)
+
+
+def inject_lookup_cache(cache: Optional[Dict[Tuple[Any, ...], Dict[Any, Any]]]) -> contextvars.Token:
+    return _LOOKUP_CACHE.set(cache)
+
+
+def reset_lookup_cache(token: contextvars.Token) -> None:
+    _LOOKUP_CACHE.reset(token)
 
 
 def _is_null_like(v: Any) -> bool:
@@ -212,6 +224,30 @@ def _values_equal(a: Any, b: Any) -> bool:
         return str(a) == str(b)
 
 
+def _lookup_cache_key(v: Any) -> Optional[Tuple[str, Any]]:
+    if _is_null_like(v):
+        return None
+    try:
+        fv = float(v)
+    except (TypeError, ValueError):
+        return ("str", str(v))
+    if math.isnan(fv):
+        return None
+    return ("num", fv)
+
+
+def _lookup_cache_bucket(kind: str, *arrays: Any) -> Optional[Dict[Any, Any]]:
+    cache = _LOOKUP_CACHE.get()
+    if cache is None:
+        return None
+    bucket_key = (kind,) + tuple(id(arr) for arr in arrays)
+    bucket = cache.get(bucket_key)
+    if bucket is None:
+        bucket = {}
+        cache[bucket_key] = bucket
+    return bucket
+
+
 def _vlookup(
     lookup_val: Any,
     lookup_arr: List[Any],
@@ -228,6 +264,17 @@ def _vlookup(
     # Excel 语义：FALSE/0 → 精确匹配，TRUE/1 → 近似匹配
     is_exact = not (_to_bool(exact) if not isinstance(exact, bool) else exact)
     if is_exact:
+        cache_key = _lookup_cache_key(lookup_val)
+        cache_bucket = _lookup_cache_bucket("vlookup_exact", lookup_arr, return_arr)
+        if cache_key is not None and cache_bucket is not None:
+            if not cache_bucket:
+                for lv, rv in zip(lookup_arr, return_arr):
+                    row_key = _lookup_cache_key(lv)
+                    if row_key is not None and row_key not in cache_bucket:
+                        cache_bucket[row_key] = _coerce(rv)
+            if cache_key in cache_bucket:
+                return cache_bucket[cache_key]
+            return _NAN
         for lv, rv in zip(lookup_arr, return_arr):
             if _values_equal(lv, lookup_val):
                 return _coerce(rv)
@@ -257,6 +304,17 @@ def _xlookup(
         raise ValueError("XLOOKUP 第 2 参须为 @@列 整列引用")
     if not isinstance(return_arr, (list, pd.Series)):
         raise ValueError("XLOOKUP 第 3 参须为 @@列 整列引用")
+    cache_key = _lookup_cache_key(lookup_val)
+    cache_bucket = _lookup_cache_bucket("xlookup_exact", lookup_arr, return_arr)
+    if cache_key is not None and cache_bucket is not None:
+        if not cache_bucket:
+            for lv, rv in zip(lookup_arr, return_arr):
+                row_key = _lookup_cache_key(lv)
+                if row_key is not None and row_key not in cache_bucket:
+                    cache_bucket[row_key] = _coerce(rv)
+        if cache_key in cache_bucket:
+            return cache_bucket[cache_key]
+        return if_not_found
     for lv, rv in zip(lookup_arr, return_arr):
         if _values_equal(lv, lookup_val):
             return _coerce(rv)
@@ -275,6 +333,17 @@ def _match(
         raise ValueError("MATCH 第 2 参须为 @@列 整列引用")
     mt = int(float(match_type))
     if mt == 0:
+        cache_key = _lookup_cache_key(lookup_val)
+        cache_bucket = _lookup_cache_bucket("match_exact", lookup_arr)
+        if cache_key is not None and cache_bucket is not None:
+            if not cache_bucket:
+                for i, lv in enumerate(lookup_arr):
+                    row_key = _lookup_cache_key(lv)
+                    if row_key is not None and row_key not in cache_bucket:
+                        cache_bucket[row_key] = float(i + 1)
+            if cache_key in cache_bucket:
+                return cache_bucket[cache_key]
+            return _NAN
         for i, lv in enumerate(lookup_arr):
             if _values_equal(lv, lookup_val):
                 return float(i + 1)
