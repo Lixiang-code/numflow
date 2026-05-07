@@ -581,17 +581,7 @@ def maintain_session_generate_title(
     if not first_user:
         raise HTTPException(status_code=400, detail="no user message found")
 
-    # 读取项目绑定模型
-    _project_model: Optional[str] = None
-    try:
-        row = p.conn.execute(
-            "SELECT value_json FROM project_settings WHERE key = 'agent_model'"
-        ).fetchone()
-        if row:
-            _project_model = json.loads(row[0]) if row[0] else None
-    except Exception:  # noqa: BLE001
-        pass
-
+    # 标题生成用默认模型（避免 deepseek 推理模型消耗 token 做无用推理）
     title_msgs = [
         {
             "role": "system",
@@ -606,8 +596,8 @@ def maintain_session_generate_title(
         title, _ = qwen_client.chat_once(
             title_msgs,
             temperature=0,
-            max_tokens=128,
-            model=_project_model,
+            max_tokens=32,
+            model=None,
         )
         title = title.strip().strip('"\'《》').strip()[:60]
         if not title:
