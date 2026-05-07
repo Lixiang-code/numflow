@@ -125,30 +125,70 @@ def_k_constant 变更
 
 `project_settings` 中无 `perf` 配置，`use_duckdb_compute` 默认 `False`。即使开启，VLOOKUP/CONCAT 类公式也不在白名单内，无法受益。
 
-## 建议修复方向
+---
 
-### 短期止血（restart 后立即生效）
+## 优化实施与实测结果（2026-05-07）
 
-1. **跳过常量值变更的自动 DAG**：`meta.py:168` 中修改 `value` 型常量（非 formula 型）时跳过 `recalculate_downstream_dag`，让用户手动触发重算。
+### 优化策略（commit `bf46c79`）
 
-### 中期优化
+| 策略 | 文件 | 原理 |
+|---|---|---|
+| **VLOOKUP/XLOOKUP/MATCH 结果缓存** | `formula_engine.py` | 首次 lookup 构建 hashmap，后续 O(1) 命中 |
+| **写前值对比** | `formula_exec.py` | 新值 vs DB 当前值 (float 容差 1e-9)，只写真正变更的行 |
+| **DAG 上游未变跳过** | `formula_exec.py` | 追踪每个节点 `rows_changed`，上游全 0 则跳过本节点 |
+| **按需 commit** | `formula_exec.py` | 无变更不 commit，减少锁争用 |
 
-2. **拆分超级公式**：`player_model_paid.hp` / `player_model_standard.hp` / `player_model_free.hp` 拆为多个中间列：
-   - `player_model_equip_power.hp` = 装备子系统HP
-   - `player_model_partner_power.hp` = 伙伴子系统HP
-   - 然后 `player_model_paid.hp` = IF(sub_system, ...引用中间列...)
-   - 好处：def_k_constant 变更时中间列不变，只需重算引用 def_k 的叶子列
+### 实测数据（project_id=36 武侠世界5）
 
-3. **VLOOKUP 预索引**：monster_verification 的 VLOOKUP(CONCAT(...)) 在每行重复构建 lookup 数组，可以预先构建 lookup dict 缓存。
+| 场景 | 优化前 | 优化后 | 提升 |
+|---|---|---|---|
+| 值变更 (3500→4500) | 64.1s | **2.37s** | **27x** |
+| 值变更 (4500→3500) | — | 2.34s | — |
+| 同值重复 (3500→3500) | 64.1s | **0.20s** | **328x** |
 
-4. **启用 perf 开关**：在项目 5 的 project_settings 中写入 `perf.use_duckdb_compute = true`，至少加速 `num_base_framework.def_reduction/hp` 这种同表纯四则公式。
+### 逐策略生效验证
 
-### 长期
+| 策略 | 验证 |
+|---|---|
+| VLOOKUP 缓存 | `monster_kill_time_actual` 1400ms→75ms (**18x**) |
+| 写前值对比 | 值变更场景仅写 10134 行（而非全量计算行数） |
+| DAG skip | 同值场景 4/13 执行 (**9 个 upstream_unchanged 跳过**) |
+| 按需 commit | 同值场景 4 种子 rows_changed=0，无 commit |
 
-5. **DAG 增量重算**：只重算值真正发生变化的节点（当前是拓扑一律重算）。
-6. **DuckDB B3 支持 VLOOKUP/CONCAT**：将 VLOOKUP 翻译为 DuckDB JOIN。
+### 残留瓶颈（通往 <1s 的路径）
+
+当前值变更仍需 2.3s，主要耗时仍集中在 3 个 player_model 公式：
+
+| 节点 | 行数 | 跨表 | 预估仍有 ~500ms/个 | 可优化手段 |
+|---|---|---|---|---|
+| player_model_paid.hp | 2000 | 8 | ~800ms | 拆分子系统中间列，消除嵌套 IF 中的冗余 VLOOKUP |
+| player_model_standard.hp | 2000 | 8 | ~400ms | 同上 |
+| player_model_free.hp | 2000 | 8 | ~400ms | 同上 |
+| monster_verification.player_kill_time_actual | 600 | 3 | ~80ms | VLOOKUP 缓存已优化，剩余为 CONCAT 行级拼接开销 |
+| monster_verification.monster_kill_time_actual | 600 | 3 | ~80ms | 同上 |
+| equip_base.hp | 6000 | 3 | ~100ms | 6k 行同表四则已很快 |
+
+#### 进一步优化建议
+
+1. **拆分超级公式（预估收益 ~1s）**：
+   - `player_model_paid.hp` 当前是单条嵌套 IF 分 9 个分支，每分支重复 VLOOKUP
+   - 拆为 `player_model_equip_power.hp` / `player_model_partner_power.hp` 等中间列
+   - def_k_constant 变更时，equip/partner 中间列的上游不变 → DAG skip 跳过
+   - player_model 只需 IF(sub_system, ...引用中间列)，无 VLOOKUP
+
+2. **CONCAT 预计算列（预估收益 ~100ms）**：
+   - `monster_verification` 的 VLOOKUP(CONCAT(level, monster_type), ...) 每行重复拼字符串
+   - 加一个 `row_key` 列预存拼接结果，VLOOKUP 直接用
+
+3. **DuckDB 介入（预估收益 ~200ms）**：
+   - 即使 VLOOKUP 不进白名单，同表纯四则 (`num_base_framework.*`, `equip_base.hp` 6k 行) 可用
+   - 需在 project_settings 写入 `perf.use_duckdb_compute = true`
+
+4. **并行执行无依赖节点（预估收益 ~0.5s）**：
+   - DAG 拓扑排序后同一层的节点无互相依赖，可并行
+   - 4 个 seed 节点和 4 个深度2节点无互相依赖
 
 ---
 
-生成时间：2026-05-07  
+生成时间：2026-05-07，更新于 2026-05-07（优化后实测）  
 数据来源：`/www/wwwroot/numflow/data/projects/5/project.db` 中 `_perf_log`、`_formula_registry`、`_dependency_graph` 表
