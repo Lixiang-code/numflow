@@ -310,6 +310,20 @@ JOIN player_model_equip_summary ON ...
 | V1 | `bf46c79` | 缓存+对比+skip | 2.37s | 0.20s | 0/13 | **27x** |
 | V2 | `a82ffc9` | DuckDB B3 VLOOKUP+CONCAT | 2.46s | 0.20s | 8/13 | 27x |
 | V3 | `50dd4b1` | DuckDB B4 跨表@ref | **1.02s** | **0.21s** | **13/13** | **63x** |
+| V4 | `d00ce64` | DAG级表缓存 | **1.09s** | **0.20s** | 13/13 | 59x (⚠ 回归) |
+
+### V4 回归分析（commit `d00ce64`）
+
+V4 为 DAG 添加了 Python 层 DataFrame 共享缓存（`TableFrameCache`），但实测比 V3 慢了 ~7%。
+
+**根因**：
+
+1. `load_table_df` 缓存路径首载强制 `SELECT *`，而无缓存时按需 `SELECT wanted_columns` — 对大表（如 equip_base 6k 行）全表加载反而更重
+2. `_select_cached_columns` 每次 `.copy()` 完整子集，13 节点累计大量冗余拷贝
+3. `_sync_table_cache` 逐行 `.iat` 更新 10134 行变更
+4. DuckDB 路径本身已有 `ref_frames` 内部缓存（`duckdb_compute.py:382`），Python 层缓存是重复造轮子
+
+**建议**：回退 V4 或限定仅对 Pandas 路径启用缓存（DuckDB 路径跳过）。
 
 ### 残留开销分析
 
