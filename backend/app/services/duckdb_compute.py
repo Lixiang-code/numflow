@@ -16,14 +16,16 @@ B1 白名单（首版）
 - 表达式只能由：标识符替换、整数/浮点字面量、`+ - * / ( ) **/^`、
   `min(...)/max(...)/abs(...)/round(x[,n])` 构成。
 
-B2 白名单扩展
-=============
+B2/B3 白名单扩展
+================
 - 支持 `@@table[col]` 整列引用（跨表加载为 DuckDB list）
 - 支持 `INDEX(arr, idx)` → `list_element(arr, idx)`（1-indexed 对齐）
 - 支持 `MATCH(lookup, arr, 0)` → `list_position(arr, lookup)`（精确匹配）
 - 支持 `IF(cond, a, b)` → `CASE WHEN cond THEN a ELSE b END`
+- 支持 `CONCAT(a, b, ...)` → `concat(a, b, ...)`
+- 支持精确匹配 `VLOOKUP/XLOOKUP`
 - 支持同表 `@table[col]` 和常量四则运算 + min/max/abs/round/sqrt/const_value
-- 禁用：PIECEWISE/call_calculator/cumsum_*/vlookup/xlookup 等
+- 禁用：PIECEWISE/call_calculator/cumsum_* 等高级函数
 """
 
 from __future__ import annotations
@@ -54,14 +56,14 @@ def is_enabled(conn: sqlite3.Connection) -> bool:
 _REF_PATTERN = re.compile(r"(?<!@)@(?!@)(\w+)\[(\w+)\]")
 _AAREF_PATTERN = re.compile(r"@@(\w+)\[(\w+)\]")
 _DISALLOWED_TOKENS = re.compile(
-    r"\b(call_calculator|cumsum_to_here|cumsum_prev|vlookup|xlookup|"
+    r"\b(call_calculator|cumsum_to_here|cumsum_prev|"
     r"piecewise|interp|coalesce|ifnull|sum_arr|average_arr|count_arr|"
     r"counta_arr|lookup|text|num|bitand_concat)\b",
     re.IGNORECASE,
 )
 _ALLOWED_FUNCS = {
     "min", "max", "abs", "round", "sqrt", "const_value", "floor", "ceil",
-    "list_element", "list_position", "if", "least", "greatest",
+    "list_element", "list_position", "if", "least", "greatest", "concat",
 }
 _SQL_KEYWORDS = {"case", "when", "then", "else", "end", "is", "not", "null", "and", "or", "true", "false", "in", "cast", "as", "integer", "double", "varchar", "between", "like", "bigint", "int"}
 _NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -237,6 +239,39 @@ def _check_whitelist(
 
     rewritten = _replace_function_calls(rewritten, "INDEX", _replace_index)
 
+    def _exact_lookup_expr(
+        lookup_expr: str,
+        lookup_arr_expr: str,
+        return_arr_expr: str,
+        if_not_found_expr: str,
+    ) -> str:
+        match_expr = f"list_position({lookup_arr_expr}, {lookup_expr})"
+        index_expr = f"list_element({return_arr_expr}, CAST({match_expr} AS BIGINT))"
+        return f"(CASE WHEN {match_expr} IS NULL THEN {if_not_found_expr} ELSE {index_expr} END)"
+
+    def _replace_vlookup(inner: str) -> str:
+        params = _split_if_args(inner)
+        if len(params) not in (3, 4):
+            raise NotSupported(f"VLOOKUP 参数数量错误：{len(params)}")
+        lookup_expr, lookup_arr_expr, return_arr_expr = params[:3]
+        if len(params) == 4:
+            exact_flag = params[3].strip().lower()
+            if exact_flag not in {"0", "0.0", "+0", "+0.0", "false"}:
+                raise NotSupported("DuckDB 路径仅支持 VLOOKUP(..., ..., ..., 0/FALSE) 精确匹配")
+        return _exact_lookup_expr(lookup_expr, lookup_arr_expr, return_arr_expr, "NULL")
+
+    rewritten = _replace_function_calls(rewritten, "VLOOKUP", _replace_vlookup)
+
+    def _replace_xlookup(inner: str) -> str:
+        params = _split_if_args(inner)
+        if len(params) not in (3, 4):
+            raise NotSupported(f"XLOOKUP 参数数量错误：{len(params)}")
+        lookup_expr, lookup_arr_expr, return_arr_expr = params[:3]
+        if_not_found_expr = params[3] if len(params) == 4 else "NULL"
+        return _exact_lookup_expr(lookup_expr, lookup_arr_expr, return_arr_expr, if_not_found_expr)
+
+    rewritten = _replace_function_calls(rewritten, "XLOOKUP", _replace_xlookup)
+
     # 安全检查
     scan = re.sub(r'\'[^\']*\'', '', rewritten)  # 单引号字符串
     scan = re.sub(r'"[^"]*"', '', scan)            # 双引号列名
@@ -256,6 +291,27 @@ def _check_whitelist(
     rewritten = re.sub(r"\bMAX\b", "GREATEST", rewritten, flags=re.IGNORECASE)
 
     return used_cols, rewritten, aref_map
+
+
+def _normalize_array_values(values: List[Any]) -> List[Any]:
+    non_null = [v for v in values if v is not None]
+    if not non_null:
+        return values
+
+    numeric_values: List[Any] = []
+    numeric_ok = True
+    for value in values:
+        if value is None:
+            numeric_values.append(None)
+            continue
+        try:
+            numeric_values.append(float(value))
+        except (TypeError, ValueError):
+            numeric_ok = False
+            break
+    if numeric_ok:
+        return numeric_values
+    return [None if value is None else str(value) for value in values]
 
 
 def compute_column_via_duckdb(
@@ -306,14 +362,7 @@ def compute_column_via_duckdb(
         except Exception as exc:
             raise NotSupported(f"加载 @@{src_tbl}[{src_col}] 失败：{exc}") from exc
         sorted_rows = sorted(rows, key=lambda r: _row_sort_key(r[1], int(r[0])))
-        vals: List[Any] = []
-        for r in sorted_rows:
-            v = r[2]
-            try:
-                v = float(v) if v is not None else 0.0
-            except (TypeError, ValueError):
-                v = 0.0
-            vals.append(v)
+        vals = _normalize_array_values([r[2] for r in sorted_rows])
         array_dfs[f"__t_a{idx}"] = pd.DataFrame({"arr": [vals]})
 
     # 构建 SQL：将 @@ 引用替换为 (SELECT arr FROM __t_aN) 形式的 list 访问

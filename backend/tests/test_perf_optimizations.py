@@ -388,6 +388,25 @@ def test_b2_whitelist_translates_index_match_if_and_minmax():
     assert "list_element(__a0, CAST(list_position(__a1, \"k\") AS BIGINT))" in sql
 
 
+def test_b3_whitelist_translates_vlookup_xlookup_and_concat():
+    used, sql, aref = duckdb_compute._check_whitelist(
+        "IF(@t[level] > 0, VLOOKUP(CONCAT(@t[level], '_', @t[kind]), @@src[row_id], @@src[value], 0), XLOOKUP(@t[level], @@src_num[key], @@src_num[value], 0))",
+        "t",
+        {"row_id", "level", "kind", "out"},
+    )
+    assert used == {"level", "kind"}
+    assert aref == {
+        ("src", "row_id"): 0,
+        ("src", "value"): 1,
+        ("src_num", "key"): 2,
+        ("src_num", "value"): 3,
+    }
+    assert "CONCAT(\"level\", '_', \"kind\")" in sql
+    assert "list_position(__a0, CONCAT(\"level\", '_', \"kind\"))" in sql
+    assert "list_element(__a1, CAST(list_position(__a0, CONCAT(\"level\", '_', \"kind\")) AS BIGINT))" in sql
+    assert "list_element(__a3, CAST(list_position(__a2, \"level\") AS BIGINT))" in sql
+
+
 def test_b2_whitelist_rejects_unclosed_if_quote():
     conn = _new_conn()
     _make_table(conn, "t", "a", "out")
@@ -489,6 +508,93 @@ def test_b2_execute_formula_supports_if_and_minmax_via_duckdb():
         "r1": 1.0,
         "r2": 4.0,
         "r3": 5.0,
+    }
+
+
+def test_b3_execute_formula_supports_vlookup_concat_via_duckdb():
+    conn = _new_conn()
+    _make_table(conn, "src", "value")
+    conn.executemany(
+        'INSERT INTO "src" (row_id, "value") VALUES (?, ?)',
+        [("1_atk", 10.0), ("1_def", 20.0), ("2_atk", 30.0)],
+    )
+    conn.execute('CREATE TABLE "t" (row_id TEXT PRIMARY KEY, "level" INTEGER, "kind" TEXT, "out" REAL)')
+    conn.execute(
+        "INSERT INTO _table_registry (table_name, layer) VALUES (?, 'dynamic')",
+        ("t",),
+    )
+    conn.executemany(
+        'INSERT INTO "t" (row_id, "level", "kind", "out") VALUES (?, ?, ?, ?)',
+        [("r1", 1, "atk", 0.0), ("r2", 1, "def", 0.0), ("r3", 2, "atk", 0.0)],
+    )
+    conn.commit()
+    register_formula(conn, "t", "out", "VLOOKUP(CONCAT(@t[level], '_', @t[kind]), @@src[row_id], @@src[value], 0)", defer=True)
+    _set_perf(conn, use_duckdb_compute=True)
+
+    out = execute_formula_on_column(conn, "t", "out")
+
+    assert out["ok"] is True
+    assert out["engine"] == "duckdb"
+    assert dict(conn.execute('SELECT row_id, out FROM t ORDER BY row_id').fetchall()) == {
+        "r1": 10.0,
+        "r2": 20.0,
+        "r3": 30.0,
+    }
+
+
+def test_b3_execute_formula_supports_xlookup_via_duckdb():
+    conn = _new_conn()
+    _make_table(conn, "src", "key", "value")
+    conn.executemany(
+        'INSERT INTO "src" (row_id, "key", "value") VALUES (?, ?, ?)',
+        [("r1", 1.0, 10.0), ("r2", 2.0, 20.0), ("r3", 3.0, 30.0)],
+    )
+    _make_table(conn, "t", "k", "out")
+    _insert_rows(
+        conn,
+        "t",
+        [
+            {"row_id": "r1", "k": 2.0, "out": 0.0},
+            {"row_id": "r2", "k": 1.0, "out": 0.0},
+            {"row_id": "r3", "k": 3.0, "out": 0.0},
+        ],
+    )
+    register_formula(conn, "t", "out", "XLOOKUP(@t[k], @@src[key], @@src[value], 0)", defer=True)
+    _set_perf(conn, use_duckdb_compute=True)
+
+    out = execute_formula_on_column(conn, "t", "out")
+
+    assert out["ok"] is True
+    assert out["engine"] == "duckdb"
+    assert dict(conn.execute('SELECT row_id, out FROM t ORDER BY row_id').fetchall()) == {
+        "r1": 20.0,
+        "r2": 10.0,
+        "r3": 30.0,
+    }
+
+
+def test_b3_execute_text_concat_formula_via_duckdb():
+    conn = _new_conn()
+    conn.execute('CREATE TABLE "t" (row_id TEXT PRIMARY KEY, "prefix" TEXT, "kind" TEXT, "note" TEXT)')
+    conn.execute(
+        "INSERT INTO _table_registry (table_name, layer) VALUES (?, 'dynamic')",
+        ("t",),
+    )
+    conn.executemany(
+        'INSERT INTO "t" (row_id, "prefix", "kind", "note") VALUES (?, ?, ?, ?)',
+        [("r1", "hero", "atk", ""), ("r2", "monster", "def", "")],
+    )
+    conn.commit()
+    register_formula(conn, "t", "note", "CONCAT(@t[prefix], '_', @t[kind])", defer=True)
+    _set_perf(conn, use_duckdb_compute=True)
+
+    out = execute_formula_on_column(conn, "t", "note")
+
+    assert out["ok"] is True
+    assert out["engine"] == "duckdb"
+    assert dict(conn.execute('SELECT row_id, note FROM t ORDER BY row_id').fetchall()) == {
+        "r1": "hero_atk",
+        "r2": "monster_def",
     }
 
 
