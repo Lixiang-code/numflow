@@ -190,5 +190,98 @@ def_k_constant 变更
 
 ---
 
-生成时间：2026-05-07，更新于 2026-05-07（优化后实测）  
+生成时间：2026-05-07，更新于 2026-05-08（DuckDB B3 实测 + B4 方案）
+
+---
+
+## DuckDB B3 实测（commit `a82ffc9`，2026-05-08）
+
+### 变更内容
+
+- VLOOKUP/XLOOKUP 精确匹配进入 DuckDB 白名单
+- CONCAT 进入 DuckDB 白名单
+- 数组值规范化（自动检测数值/文本类型）
+
+### 命中情况
+
+DuckDB 命中 8/13 节点，全为同表 `@self[col]` + 全表 `@@other[col]` 引用型公式：
+
+| DuckDB 命中节点 | 原始 | V1(缓存) | B3(DuckDB) | 累计加速 |
+|---|---|---|---|---|
+| player_model_equip_summary.hp | 1700ms | 1700ms | **2.2ms** | **770x** |
+| monster_verification.player_kill_time_actual | 1700ms | 75ms | **3.7ms** | **460x** |
+| monster_verification.monster_kill_time_actual | 1400ms | 75ms | **3.6ms** | **390x** |
+| monster_verification.monster_kill_deviation | 190ms | 190ms | **3.5ms** | **54x** |
+| monster_verification.player_kill_deviation | 190ms | 190ms | **3.7ms** | **51x** |
+| monster_verification.verdict | 18ms | 18ms | **2.6ms** | **7x** |
+| num_base_framework.hp | 18ms | 18ms | **5.6ms** | **3x** |
+| num_base_framework.def_reduction | 5.6ms | 5.6ms | **2.2ms** | **2.5x** |
+
+### 未命中 5 节点（瓶颈转移）
+
+| 未命中节点 | 行数 | B3 耗时 | 根因 |
+|---|---|---|---|
+| player_model_paid.hp | 2000 | 811ms | 含跨表 `@hero_base[hp]` |
+| player_model_standard.hp | 2000 | 580ms | 同上 |
+| player_model_free.hp | 2000 | 503ms | 同上 |
+| equip_base.hp | 6000 | 185ms | 含跨表 `@num_base_framework[hp]` |
+| hero_base.hp | 200 | 7ms | 同上（可忽略） |
+
+全部卡在同一行：`duckdb_compute.py:201`
+```python
+if tbl != table_name:
+    raise NotSupported(f"B2 暂不支持跨表 @{tbl}[{col}]（请用 @@ + INDEX）")
+```
+
+### 三版本汇总
+
+| 版本 | Commit | 策略 | 值变更 | 同值 | 累计提升 |
+|---|---|---|---|---|---|
+| 原始 | `—` | 无 | 64.1s | 64.1s | — |
+| V1 | `bf46c79` | 缓存+对比+skip | 2.37s | 0.20s | **27x** |
+| V2 | `a82ffc9` | DuckDB B3 | 2.46s | 0.20s | —（瓶颈转移） |
+
+---
+
+## DuckDB B4：跨表 @ref 支持（推荐下一步，直通 <1s）
+
+### 原理
+
+放开 `duckdb_compute.py:201` 的跨表 `@table[col]` 限制。在 SQL 翻译阶段，将 `@other_table[col]` 转为对该表的 JOIN + 列选择。
+
+`player_model_paid.hp` 引用 8 张表，一条 DuckDB SQL 完成多表 JOIN：
+
+```sql
+SELECT ... FROM main_table
+JOIN hero_base ON main.row_id = hero_base.row_id
+JOIN player_model_equip_summary ON ...
+-- ...
+```
+
+### 预期收益
+
+| 节点 | 当前(pandas) | DuckDB 预估 | 收益 |
+|---|---|---|---|
+| player_model_paid.hp | 811ms | ~50ms | **16x** |
+| player_model_standard.hp | 580ms | ~50ms | **12x** |
+| player_model_free.hp | 503ms | ~50ms | **10x** |
+| equip_base.hp | 185ms | ~10ms | **18x** |
+| hero_base.hp | 7ms | ~2ms | 3x |
+| **DAG 总耗时** | **2.4s** | **~300ms** | **✓ < 1s** |
+
+### 为什么选 B4 而非拆分公式
+
+| 维度 | DuckDB B4 | 拆分公式 |
+|---|---|---|
+| 覆盖面 | 一次实现，全项目受益 | 逐项目改公式 |
+| 维护成本 | 零（不动公式） | 公式膨胀、中间列增多 |
+| 预估总耗时 | **< 1s** | ~1.4s（仅 partner 分支可 skip） |
+| 通用性 | **高** | 低 |
+
+### 实现注意事项
+
+- **简单 case 优先**：同 `row_id` JOIN 覆盖 `hero_base.hp` / `equip_base.hp` 场景
+- **复杂 case**：player_model 按 `sub_system` 匹配不同子表，需条件 JOIN
+- **保底方案**：标量子查询 `(SELECT col FROM other_table WHERE row_id = main.row_id)` 兼容所有场景
+
 数据来源：`/www/wwwroot/numflow/data/projects/5/project.db` 中 `_perf_log`、`_formula_registry`、`_dependency_graph` 表
