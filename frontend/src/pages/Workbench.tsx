@@ -2079,26 +2079,27 @@ export default function Workbench() {
             </span>
             {formulaBarCol && (
               <>
-                {!showEnNames && formulaBarText ? (
-                  <span className="wb-formula-translated" style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 600, marginBottom: 3, display: 'block', color: '#333' }}>
+                {!showEnNames ? (
+                  <span className="wb-formula-translated" style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 600, color: '#333', padding: '4px 0' }}>
                     {(() => {
                       const meta = tableColMetaCacheRef.current.get(selected ?? '') || []
                       const constMap = new Map(allConstants.map((c: any) => [c.name_en, c]))
-                      return translateFormulaDisplay(formulaBarText, meta, constMap, tableDispMap)
+                      return translateFormulaDisplay(formulaBarText || columnFormulas[formulaBarCol]?.formula || '', meta, constMap, tableDispMap)
                     })()}
                   </span>
-                ) : null}
-                <input
-                  className="wb-formula-bar-input"
-                  value={formulaBarText}
-                  onChange={(e) => { setFormulaBarText(e.target.value); setFormulaBarDirty(true) }}
-                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void saveColumnFormula() } }}
-                  placeholder="输入公式，例如: @delta_val * (1 - @blend_weight)"
-                  disabled={!canWrite || readOnly}
-                  spellCheck={false}
-                />
-                {canWrite && !readOnly && (
+                ) : (
                   <>
+                    <input
+                      className="wb-formula-bar-input"
+                      value={formulaBarText}
+                      onChange={(e) => { setFormulaBarText(e.target.value); setFormulaBarDirty(true) }}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void saveColumnFormula() } }}
+                      placeholder="输入公式，例如: @delta_val * (1 - @blend_weight)"
+                      disabled={!canWrite || readOnly}
+                      spellCheck={false}
+                    />
+                    {canWrite && !readOnly && (
+                      <>
                     <button
                       type="button"
                       className="btn tiny primary"
@@ -2132,7 +2133,9 @@ export default function Workbench() {
                 )}
               </>
             )}
-            {formulaCols.length > 0 && !formulaBarCol && (
+            </>
+          )}
+          {formulaCols.length > 0 && !formulaBarCol && (
               <span className="muted small" style={{ marginLeft: '0.5rem' }}>
                 {formulaCols.length} 个公式列
               </span>
