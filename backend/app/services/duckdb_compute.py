@@ -72,6 +72,20 @@ _NUMERIC_ROW_ID = re.compile(r"^-?\d+$")
 _SUFFIX_NUMERIC_ROW_ID = re.compile(r"^(.*?)(-?\d+)$")
 
 
+def _cross_ref_aliases(formula: str, table_name: str) -> Dict[Tuple[str, str], str]:
+    aliases: Dict[Tuple[str, str], str] = {}
+    idx = 0
+    for tbl, col in _REF_PATTERN.findall(formula):
+        if tbl == table_name:
+            continue
+        key = (tbl, col)
+        if key in aliases:
+            continue
+        aliases[key] = f"__r{idx}"
+        idx += 1
+    return aliases
+
+
 def _split_if_args(inner: str) -> List[str]:
     """按逗号分割 IF 的三个参数，正确处理嵌套括号和引号。"""
     args: List[str] = []
@@ -192,18 +206,24 @@ def _check_whitelist(
         arr_name = f"__a{aref_map[key]}"
         rewritten = rewritten.replace(token, arr_name)
 
-    # 替换同表 @table[col] → "col"（DuckDB 列引用）
+    cross_ref_map = _cross_ref_aliases(formula, table_name)
+
+    # 替换同表 @table[col] / 跨表 @table[col] → DuckDB 列引用
     used_cols: Set[str] = set()
     for tbl, col in _REF_PATTERN.findall(rewritten):
         token = f"@{tbl}[{col}]"
         if token not in rewritten:
             continue
-        if tbl != table_name:
-            raise NotSupported(f"B2 暂不支持跨表 @{tbl}[{col}]（请用 @@ + INDEX）")
-        if col not in columns_in_table:
-            raise NotSupported(f"引用列不存在：{col}")
-        used_cols.add(col)
-        rewritten = rewritten.replace(token, f'"{col}"')
+        if tbl == table_name:
+            if col not in columns_in_table:
+                raise NotSupported(f"引用列不存在：{col}")
+            used_cols.add(col)
+            rewritten = rewritten.replace(token, f'"{col}"')
+            continue
+        alias = cross_ref_map.get((tbl, col))
+        if not alias:
+            raise NotSupported(f"跨表引用解析失败：@{tbl}[{col}]")
+        rewritten = rewritten.replace(token, f'"{alias}"')
 
     rewritten = rewritten.replace("^", "**")
 
@@ -280,7 +300,7 @@ def _check_whitelist(
             continue
         if name.lower() in _SQL_KEYWORDS:
             continue
-        if re.match(r"^__a\d+$", name):
+        if re.match(r"^__(?:a|r)\d+$", name):
             continue
         raise NotSupported(f"不支持的标识符：{name}")
 
@@ -341,16 +361,35 @@ def compute_column_via_duckdb(
         raise NotSupported("表缺少 row_id 列")
 
     used_cols, sql_expr, aref_map = _check_whitelist(formula, table_name, existing_cols)
+    cross_ref_map = _cross_ref_aliases(formula, table_name)
+
+    from app.services.formula_engine import _align_scalar_series
+    from app.services.formula_exec import _join_hint_columns, load_table_df
 
     # 加载主表
-    wanted: List[str] = ["row_id"] + sorted(used_cols)
-    extra_level = (level_column or ("level" if (level_min is not None) else None))
-    if extra_level and extra_level in existing_cols and extra_level not in wanted:
-        wanted.append(extra_level)
-    cols_sql = ", ".join(f'"{c}"' for c in wanted)
-    df = pd.read_sql_query(f'SELECT {cols_sql} FROM "{table_name}"', conn)
+    if cross_ref_map:
+        df = load_table_df(conn, table_name)
+    else:
+        wanted = sorted(set(used_cols) | _join_hint_columns(conn, table_name))
+        extra_level = (level_column or ("level" if (level_min is not None) else None))
+        if extra_level and extra_level in existing_cols:
+            wanted.append(extra_level)
+        df = load_table_df(conn, table_name, wanted)
     if df.empty:
         return []
+
+    ref_frames: Dict[str, pd.DataFrame] = {}
+    for (src_tbl, src_col), alias in cross_ref_map.items():
+        ref_df = ref_frames.get(src_tbl)
+        if ref_df is None:
+            ref_df = load_table_df(conn, src_tbl)
+            ref_frames[src_tbl] = ref_df
+        if src_col not in ref_df.columns:
+            raise NotSupported(f"跨表引用列不存在：{src_tbl}.{src_col}")
+        aligned = _align_scalar_series(df, ref_df, src_col)
+        if aligned is None:
+            raise NotSupported(f"无法对齐跨表引用 @{src_tbl}[{src_col}]")
+        df[alias] = aligned.tolist()
 
     # 加载 @@ 整列引用到 pandas DataFrame 以便 DuckDB 使用
     array_dfs: Dict[str, pd.DataFrame] = {}
@@ -373,6 +412,7 @@ def compute_column_via_duckdb(
 
     where_clauses: List[str] = []
     params: List[Any] = []
+    extra_level = (level_column or ("level" if (level_min is not None) else None))
     if level_min is not None and level_max is not None:
         if extra_level and extra_level in df.columns:
             where_clauses.append(f'CAST("{extra_level}" AS DOUBLE) BETWEEN ? AND ?')

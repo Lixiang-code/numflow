@@ -28,6 +28,7 @@ from app.services.formula_exec import (
 )
 from app.services.perf_flags import perf_flag, perf_status
 from app.services.recalc_lock import try_acquire_recalc_lock
+from app.services.table_ops import create_3d_table
 
 
 def _new_conn() -> sqlite3.Connection:
@@ -352,17 +353,15 @@ def test_b1_complex_formula_falls_back():
     assert conn.execute("SELECT out FROM t WHERE row_id='r1'").fetchone()[0] == 99.0
 
 
-def test_b1_whitelist_check_rejects_cross_table():
-    conn = _new_conn()
-    _make_table(conn, "t", "a", "b")
-    _insert_rows(conn, "t", [{"row_id": "r1", "a": 1.0, "b": 0.0}])
-    try:
-        duckdb_compute._check_whitelist(
-            "@t[a] + @other[a]", "t", {"row_id", "a", "b"}
-        )
-    except duckdb_compute.NotSupported:
-        return
-    raise AssertionError("应拒绝跨表引用")
+def test_b4_whitelist_accepts_cross_table_refs_with_alias_columns():
+    used, sql, aref = duckdb_compute._check_whitelist(
+        "@t[a] + @other[a]",
+        "t",
+        {"row_id", "a", "b"},
+    )
+    assert used == {"a"}
+    assert aref == {}
+    assert '"__r0"' in sql
 
 
 def test_b1_whitelist_accepts_simple_arithmetic():
@@ -595,6 +594,96 @@ def test_b3_execute_text_concat_formula_via_duckdb():
     assert dict(conn.execute('SELECT row_id, note FROM t ORDER BY row_id').fetchall()) == {
         "r1": "hero_atk",
         "r2": "monster_def",
+    }
+
+
+def test_b4_execute_formula_supports_cross_table_refs_via_duckdb():
+    conn = _new_conn()
+    _make_table(conn, "src", "level", "value")
+    _insert_rows(
+        conn,
+        "src",
+        [
+            {"row_id": "s1", "level": 1.0, "value": 10.0},
+            {"row_id": "s2", "level": 2.0, "value": 20.0},
+            {"row_id": "s3", "level": 3.0, "value": 30.0},
+        ],
+    )
+    _make_table(conn, "t", "level", "base", "out")
+    _insert_rows(
+        conn,
+        "t",
+        [
+            {"row_id": "t1", "level": 1.0, "base": 1.0, "out": 0.0},
+            {"row_id": "t2", "level": 2.0, "base": 2.0, "out": 0.0},
+            {"row_id": "t3", "level": 3.0, "base": 3.0, "out": 0.0},
+        ],
+    )
+    register_formula(conn, "t", "out", "@t[base] + @src[value]", defer=True)
+    _set_perf(conn, use_duckdb_compute=True)
+
+    out = execute_formula_on_column(conn, "t", "out")
+
+    assert out["ok"] is True
+    assert out["engine"] == "duckdb"
+    assert dict(conn.execute('SELECT row_id, out FROM t ORDER BY row_id').fetchall()) == {
+        "t1": 11.0,
+        "t2": 22.0,
+        "t3": 33.0,
+    }
+
+
+def test_b4_execute_formula_supports_cross_table_refs_with_3d_dim_alignment_via_duckdb():
+    conn = _new_conn()
+    create_3d_table(
+        conn,
+        table_name="src_3d",
+        display_name="来源3D",
+        dim1={
+            "col_name": "tier",
+            "display_name": "阶",
+            "keys": [{"key": "1", "display_name": "1"}, {"key": "2", "display_name": "2"}],
+        },
+        dim2={
+            "col_name": "kind",
+            "display_name": "类",
+            "keys": [{"key": "atk", "display_name": "攻"}, {"key": "def", "display_name": "防"}],
+        },
+        cols=[{"key": "value", "display_name": "值"}],
+    )
+    conn.executemany(
+        'UPDATE "src_3d" SET "value" = ? WHERE row_id = ?',
+        [(10.0, "1_atk"), (20.0, "1_def"), (30.0, "2_atk"), (40.0, "2_def")],
+    )
+    create_3d_table(
+        conn,
+        table_name="dst_3d",
+        display_name="目标3D",
+        dim1={
+            "col_name": "level_band",
+            "display_name": "阶",
+            "keys": [{"key": "1", "display_name": "1"}, {"key": "2", "display_name": "2"}],
+        },
+        dim2={
+            "col_name": "damage_kind",
+            "display_name": "类",
+            "keys": [{"key": "atk", "display_name": "攻"}, {"key": "def", "display_name": "防"}],
+        },
+        cols=[{"key": "out", "display_name": "输出"}],
+    )
+    conn.commit()
+    register_formula(conn, "dst_3d", "out", "@src_3d[value]", defer=True)
+    _set_perf(conn, use_duckdb_compute=True)
+
+    out = execute_formula_on_column(conn, "dst_3d", "out")
+
+    assert out["ok"] is True
+    assert out["engine"] == "duckdb"
+    assert dict(conn.execute('SELECT row_id, out FROM "dst_3d" ORDER BY row_id').fetchall()) == {
+        "1_atk": 10.0,
+        "1_def": 20.0,
+        "2_atk": 30.0,
+        "2_def": 40.0,
     }
 
 
