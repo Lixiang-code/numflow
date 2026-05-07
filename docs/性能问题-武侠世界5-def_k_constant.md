@@ -333,10 +333,38 @@ V5 修复（`5da1bd9`）：
 | SQLite 写入 (批量) | ~10% | 10134 行变更写入 |
 | DuckDB 引擎计算 | ~10% | 纯计算仅 ~90ms |
 
-### 进一步优化方向（可选项）
+### 进一步优化方向
 
-1. **DAG 级跨表缓存**：预先一次性加载所有涉及的表到内存，13 个节点共享 → 预计 ~300ms（当前已 <1.1s，优先级低）
-2. **DuckDB 原生表注册**：直接注册 SQLite 表到 DuckDB，零拷贝 → 预计 ~200ms
+#### V6: DuckDB SQLite Scanner（推荐，预估 0.98s → 200~400ms）
+
+**当前瓶颈**：每个公式独立执行 `compute_column_via_duckdb`，各自 `load_table_df` 加载表 → pandas DataFrame → DuckDB 注册 → 计算。13 个公式 = 13 次连接 + 13 轮 SQLite→DuckDB 数据搬运，占 ~85% 耗时。
+
+**方案**：DuckDB 原生支持 `sqlite_scanner` 扩展，可直接 attach SQLite 文件：
+
+```sql
+INSTALL sqlite;
+LOAD sqlite;
+ATTACH 'project.db' AS db (TYPE sqlite);
+
+-- 无需 DataFrame 加载，直接查 SQLite
+SELECT ... FROM db.num_base_framework t1
+JOIN db.hero_base t2 ON t1.row_id = t2.row_id;
+```
+
+**架构改动**：
+1. `recalculate_downstream_dag` 入口创建 1 个 DuckDB 连接，ATTACH SQLite
+2. 13 个公式全部在这个连接内跑 SQL，共享表元数据
+3. 回写统一批量执行
+
+**关键**：省掉全部 `load_table_df` → DataFrame → DuckDB register 链路。
+
+#### 其他备选
+
+| 方向 | 预估收益 | 投入 | 说明 |
+|---|---|---|---|
+| DuckDB 原生 SQLite Scanner | 0.98s→200~400ms | 中 | 重构 compute_column_via_duckdb |
+| Pandas 路径并行化 | ~50ms | 高 | 同层无依赖节点可并跑，但收益小 |
+| SQLite WAL 调优 | ~30ms | 低 | `PRAGMA synchronous=NORMAL` 等 |
 
 ---
 
