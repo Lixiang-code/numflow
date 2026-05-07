@@ -280,8 +280,53 @@ JOIN player_model_equip_summary ON ...
 
 ### 实现注意事项
 
-- **简单 case 优先**：同 `row_id` JOIN 覆盖 `hero_base.hp` / `equip_base.hp` 场景
-- **复杂 case**：player_model 按 `sub_system` 匹配不同子表，需条件 JOIN
-- **保底方案**：标量子查询 `(SELECT col FROM other_table WHERE row_id = main.row_id)` 兼容所有场景
+- `_cross_ref_aliases` 提取跨表 @ref → 别名 `__r0`, `__r1`...
+- `_align_scalar_series` 按 row_id 对齐跨表列值
+- 每个 DuckDB 公式独立加载其引用的表（未跨节点复用）
+
+---
+
+## DuckDB B4 实测（commit `50dd4b1`，2026-05-08）
+
+### 命中情况
+
+**13/13 全部命中 DuckDB，零错误。**
+
+| 节点 | B3(pandas) | B4(DuckDB) | 加速 |
+|---|---|---|---|
+| player_model_paid.hp | 811ms | **10.3ms** | **79x** |
+| player_model_standard.hp | 580ms | **10.3ms** | **56x** |
+| player_model_free.hp | 503ms | **10.8ms** | **47x** |
+| equip_base.hp | 185ms | **34.8ms** | **5x** |
+| hero_base.hp | 7ms | 2.4ms | 3x |
+| monster_verification.* (5列) | 2~4ms | 2~4ms | 持平 |
+| num_base_framework.* (2列) | 2~6ms | 2ms | 持平 |
+
+### 全版本汇总
+
+| 版本 | Commit | 策略 | 值变更 | 同值 | DuckDB命中 | 累计提升 |
+|---|---|---|---|---|---|---|
+| 原始 | `—` | 无 | 64.1s | 64.1s | 0/13 | — |
+| V1 | `bf46c79` | 缓存+对比+skip | 2.37s | 0.20s | 0/13 | **27x** |
+| V2 | `a82ffc9` | DuckDB B3 VLOOKUP+CONCAT | 2.46s | 0.20s | 8/13 | 27x |
+| V3 | `50dd4b1` | DuckDB B4 跨表@ref | **1.02s** | **0.21s** | **13/13** | **63x** |
+
+### 残留开销分析
+
+逐节点 DuckDB 计算引擎耗时合计仅 ~90ms，总耗时 1.02s 中 ~930ms 为 I/O 开销：
+
+| 开销来源 | 占比 | 说明 |
+|---|---|---|
+| 跨表 DataFrame 加载 | ~70% | 3 个 player_model 公式各加载 8 张表，未跨节点复用 |
+| DAG 编排 (BFS+拓扑+循环) | ~10% | 13 节点拓扑遍历 |
+| SQLite 写入 (批量) | ~10% | 10134 行变更写入 |
+| DuckDB 引擎计算 | ~10% | 纯计算仅 ~90ms |
+
+### 进一步优化方向（可选项）
+
+1. **DAG 级跨表缓存**：预先一次性加载所有涉及的表到内存，13 个节点共享 → 预计 ~300ms（当前已 <1.1s，优先级低）
+2. **DuckDB 原生表注册**：直接注册 SQLite 表到 DuckDB，零拷贝 → 预计 ~200ms
+
+---
 
 数据来源：`/www/wwwroot/numflow/data/projects/5/project.db` 中 `_perf_log`、`_formula_registry`、`_dependency_graph` 表
