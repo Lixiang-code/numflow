@@ -128,6 +128,37 @@ def list_calculators(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     return out
 
 
+def _to_sqlite_param(v: Any) -> Any:
+    """sqlite3 不兼容 pandas/numpy 数值类型（np.int64 等），统一转 Python 原生。"""
+    if v is None:
+        return None
+    if isinstance(v, (int, float, str, bytes)):
+        return v
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return str(v)
+
+
+def _resolve_axis_column(axis: Dict[str, Any], matrix_meta: Optional[Dict[str, Any]] = None) -> str:
+    src = str(axis.get("source") or "")
+    if src == "col_name":
+        return str(axis.get("col_name") or "")
+    if src == "key":
+        key_expr = str(axis.get("key_expr") or "")
+        mm = dict(matrix_meta or {})
+        if mm.get("kind") == "3d_matrix" and key_expr in ("dim1", "dim2"):
+            dim_info = mm.get(key_expr) or {}
+            return str(dim_info.get("col_name") or "")
+        if mm.get("kind") == "matrix_resource" and key_expr in ("row", "col"):
+            return str(mm.get(f"{key_expr}_axis") or "")
+        return key_expr
+    return src
+
+
 def get_calculator_meta(conn: sqlite3.Connection, name: str) -> Optional[Dict[str, Any]]:
     cur = conn.execute(
         "SELECT kind, table_name, axes_json, value_column FROM _calculators WHERE name = ?",
@@ -193,6 +224,8 @@ def call_calculator(
     for a in axes:
         nm = a.get("name")
         src = a.get("source")
+
+        col = _resolve_axis_column(a, mm)
         if nm == "grain":
             grain_value = str(kwargs.get("grain") or a.get("default") or "")
             continue
@@ -202,27 +235,33 @@ def call_calculator(
                 continue
             level_value = kwargs.get("level")
             if level_value is not None and str(level_value) != "":
-                where.append(f'"{src}" = ?')
-                params.append(int(level_value))
+                where.append(f'"{col}" = ?')
+                # 3D lookup 表的 dim 键是字符串，不应强转 int
+                # 同时兼容 pandas/numpy 数值类型（np.int64 不被 sqlite3 原生支持）
+                lv = level_value if kind == "lookup" else int(level_value)
+                params.append(lv)
             continue
         if nm not in kwargs:
             # name 未命中时，再尝试 source 列名作为调用键（兼容 AI 直接用数据库列名调用）
-            if src and src in kwargs:
-                nm = src
+            if col and col in kwargs:
+                nm = col
             else:
                 continue
         v = kwargs.get(nm)
         if v is None or v == "":
             continue
-        where.append(f'"{src}" = ?')
+        where.append(f'"{col}" = ?')
         params.append(v)
 
     sel_col = value_column
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     sql = f'SELECT "{sel_col}" FROM "{table_name}"{where_sql} LIMIT 1'
 
+    # sqlite3 不兼容 pandas/numpy 数值类型，统一转 Python 原生
+    safe_params = [_to_sqlite_param(p) for p in params]
+
     try:
-        rr = conn.execute(sql, params).fetchone()
+        rr = conn.execute(sql, safe_params).fetchone()
     except sqlite3.OperationalError as e:
         return {"ok": False, "error": f"查询失败: {e}", "sql": sql}
 
