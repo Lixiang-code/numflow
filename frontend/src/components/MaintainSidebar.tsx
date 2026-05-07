@@ -28,10 +28,62 @@ interface ChatMessage {
   tool_details?: ToolDetail[]
 }
 
+/** 实时流式事件（SSE 过程中逐条追加） */
+type LiveEvent =
+  | { id: number; type: 'log'; message: string }
+  | { id: number; type: 'tool_call'; name: string; label: string; callId: string; args: string }
+  | { id: number; type: 'tool_result'; name: string; callId: string; result: string }
+  | { id: number; type: 'error'; message: string }
+
 interface Props {
   projectId: number | null
   currentTable: string | null
   cellSelection: string | null
+}
+
+/** 单条实时事件行 */
+const MsLiveEventRow: React.FC<{ ev: LiveEvent }> = ({ ev }) => {
+  const [open, setOpen] = useState(false)
+  if (ev.type === 'log') {
+    return <div className="ms-live-log">📋 {ev.message}</div>
+  }
+  if (ev.type === 'error') {
+    return <div className="ms-live-error">❌ {ev.message}</div>
+  }
+  if (ev.type === 'tool_call') {
+    return (
+      <div className="ms-live-tool-call">
+        <div className="ms-live-tool-head" onClick={() => setOpen((v) => !v)}>
+          <span className="ms-live-tool-icon">🔨</span>
+          <span className="ms-live-tool-name">{ev.label || ev.name}</span>
+          <span className="ms-live-tool-chevron">{open ? '▾' : '▸'}</span>
+        </div>
+        {open && (
+          <pre className="ms-live-tool-body">
+            {(() => {
+              try { return JSON.stringify(JSON.parse(ev.args), null, 2) }
+              catch { return ev.args }
+            })()}
+          </pre>
+        )}
+      </div>
+    )
+  }
+  if (ev.type === 'tool_result') {
+    return (
+      <div className="ms-live-tool-result">
+        <div className="ms-live-tool-head" onClick={() => setOpen((v) => !v)}>
+          <span className="ms-live-tool-icon">📋</span>
+          <span className="ms-live-tool-name">{ev.name} 返回</span>
+          <span className="ms-live-tool-chevron">{open ? '▾' : '▸'}</span>
+        </div>
+        {open && (
+          <pre className="ms-live-tool-body">{ev.result.slice(0, 3000)}</pre>
+        )}
+      </div>
+    )
+  }
+  return null
 }
 
 const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelection }) => {
@@ -40,11 +92,13 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [streamingText, setStreamingText] = useState('')
+  const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [loadingSessions, setLoadingSessions] = useState(false)
   const chatBodyRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const liveEventIdRef = useRef(0)
 
   const headers = React.useMemo(
     () => (projectId ? projectHeaders(projectId) : {}),
@@ -88,11 +142,13 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
     setActiveSessionId(null)
     setMessages([])
     setStreamingText('')
+    setLiveEvents([])
   }
 
   const handleSelectSession = async (sid: number) => {
     setActiveSessionId(sid)
     setStreamingText('')
+    setLiveEvents([])
     await loadSessionMessages(sid)
   }
 
@@ -116,14 +172,15 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
     const userMsg = input.trim()
     setInput('')
     setBusy(true)
+    setLiveEvents([])
+    liveEventIdRef.current = 0
 
     const userChat: ChatMessage = { role: 'user', content: userMsg }
     setMessages((prev) => [...prev, userChat])
 
     let assistantContent = ''
-    let toolDetails: ToolDetail[] = []
-    const assistantMsg: ChatMessage = { role: 'assistant', content: '', tool_details: [] }
-    setMessages((prev) => [...prev, assistantMsg])
+    const toolDetails: ToolDetail[] = []
+    setMessages((prev) => [...prev, { role: 'assistant', content: '', tool_details: [] }])
 
     try {
       const body: Record<string, unknown> = {
@@ -160,13 +217,38 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
           try {
             const ev = JSON.parse(line) as Record<string, unknown>
             const etype = ev.type as string
+
             if (etype === 'token') {
               assistantContent += (ev.text as string) || ''
               setStreamingText(assistantContent)
+
             } else if (etype === 'tool_call') {
-              toolDetails.push({ type: 'tool_call', name: (ev.name as string) || '', arguments: (ev.arguments as string) || '{}' })
+              const eid = liveEventIdRef.current++
+              const name = (ev.name as string) || ''
+              const label = (ev.label as string) || name
+              const callId = (ev.call_id as string) || String(eid)
+              const args = (ev.arguments as string) || '{}'
+              setLiveEvents((prev) => [...prev, { id: eid, type: 'tool_call', name, label, callId, args }])
+              toolDetails.push({ type: 'tool_call', name, arguments: args })
+
             } else if (etype === 'tool_result') {
-              toolDetails.push({ type: 'tool_result', name: (ev.name as string) || '', result: (ev.result as string) || '' })
+              const eid = liveEventIdRef.current++
+              const name = (ev.name as string) || ''
+              const callId = (ev.call_id as string) || String(eid)
+              const result = (ev.result as string) || ''
+              setLiveEvents((prev) => [...prev, { id: eid, type: 'tool_result', name, callId, result }])
+              toolDetails.push({ type: 'tool_result', name, result })
+
+            } else if (etype === 'log') {
+              const eid = liveEventIdRef.current++
+              const message = (ev.message as string) || ''
+              setLiveEvents((prev) => [...prev, { id: eid, type: 'log', message }])
+
+            } else if (etype === 'error') {
+              const eid = liveEventIdRef.current++
+              const message = (ev.message as string) || ''
+              setLiveEvents((prev) => [...prev, { id: eid, type: 'error', message }])
+
             } else if (etype === 'done') {
               setMessages((prev) => {
                 const copy = [...prev]
@@ -178,6 +260,7 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
                 return copy
               })
               setStreamingText('')
+              setLiveEvents([])
               if (!activeSessionId) { loadSessions() }
             }
           } catch { /* ignore */ }
@@ -193,6 +276,7 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
         return copy
       })
       setStreamingText('')
+      setLiveEvents([])
     } finally { setBusy(false) }
   }
 
@@ -211,7 +295,7 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
 
   useEffect(() => {
     if (chatBodyRef.current) chatBodyRef.current.scrollTop = chatBodyRef.current.scrollHeight
-  }, [messages, streamingText])
+  }, [messages, streamingText, liveEvents])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -283,7 +367,7 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
           </div>
 
           <div className="ms-chat-body" ref={chatBodyRef}>
-            {messages.length === 0 && !streamingText && (
+            {messages.length === 0 && !streamingText && liveEvents.length === 0 && (
               <div className="ms-empty">
                 <p>维护 Agent 帮助修改已有数值表。</p>
                 <p>输入你的需求，例如：</p>
@@ -316,13 +400,31 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
                 </div>
               </div>
             ))}
-            {streamingText && (
+
+            {/* 实时流式区域（执行过程中逐条展示） */}
+            {busy && (streamingText || liveEvents.length > 0) && (
               <div className="ms-msg ms-msg-assistant">
-                <div className="ms-msg-role">🤖 维护 Agent</div>
-                <div className="ms-msg-content">{streamingText}</div>
+                <div className="ms-msg-role">
+                  🤖 维护 Agent
+                  <span className="ms-busy-dot" />
+                </div>
+                <div className="ms-msg-content">
+                  {streamingText && (
+                    <div className="ms-stream-text">{streamingText}</div>
+                  )}
+                  {liveEvents.length > 0 && (
+                    <div className="ms-live-events">
+                      {liveEvents.map((ev) => (
+                        <MsLiveEventRow key={ev.id} ev={ev} />
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
-            {busy && !streamingText && <div className="ms-thinking">思考中…</div>}
+            {busy && !streamingText && liveEvents.length === 0 && (
+              <div className="ms-thinking">思考中…</div>
+            )}
           </div>
 
           <form className="ms-footer" onSubmit={handleSend}>
@@ -349,6 +451,7 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
       )}
     </>
   )
+
 }
 
 export default MaintainSidebar

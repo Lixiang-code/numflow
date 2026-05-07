@@ -336,3 +336,101 @@
 .ms-input:disabled {
   opacity: 0.5;
 }
+
+/* ── 实时流式事件区域 ── */
+.ms-live-events {
+  margin-top: 6px;
+  border-top: 1px solid #333;
+  padding-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.ms-stream-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 日志行 */
+.ms-live-log {
+  font-size: 11px;
+  color: #888;
+  padding: 2px 4px;
+  border-left: 2px solid #444;
+  background: #1a1a28;
+  border-radius: 0 3px 3px 0;
+}
+
+/* 错误行 */
+.ms-live-error {
+  font-size: 11px;
+  color: #e08080;
+  padding: 2px 4px;
+  border-left: 2px solid #8a3030;
+  background: #2a1a1a;
+  border-radius: 0 3px 3px 0;
+}
+
+/* 工具调用 / 工具结果共同样式 */
+.ms-live-tool-call,
+.ms-live-tool-result {
+  border-radius: 4px;
+  overflow: hidden;
+}
+.ms-live-tool-call {
+  border: 1px solid #2a5a8e;
+  background: #111e30;
+}
+.ms-live-tool-result {
+  border: 1px solid #2a6a3e;
+  background: #111e18;
+}
+.ms-live-tool-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 11px;
+}
+.ms-live-tool-call .ms-live-tool-head {
+  color: #7eb8ff;
+}
+.ms-live-tool-result .ms-live-tool-head {
+  color: #7ecf90;
+}
+.ms-live-tool-head:hover {
+  filter: brightness(1.2);
+}
+.ms-live-tool-icon { flex-shrink: 0; }
+.ms-live-tool-name { flex: 1; font-weight: 600; }
+.ms-live-tool-chevron { font-size: 10px; color: #666; }
+.ms-live-tool-body {
+  font-size: 11px;
+  color: #aaa;
+  background: #0d0d1e;
+  padding: 6px 8px;
+  margin: 0;
+  max-height: 180px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border-top: 1px solid #222;
+}
+
+/* 忙碌脉冲点 */
+.ms-busy-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4caf50;
+  margin-left: 5px;
+  vertical-align: middle;
+  animation: ms-busy-pulse 1s infinite;
+}
+@keyframes ms-busy-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.25; }
+}

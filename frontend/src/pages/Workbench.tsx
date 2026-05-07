@@ -2694,7 +2694,8 @@ export default function Workbench() {
         </aside>
       </div>
 
-      <footer className={`wb-agent${agentOpen ? '' : ' wb-agent--collapsed'}`}>
+      {/* 底部初始化 Agent 面板已弃用，维护 Agent 请使用右侧 MaintainSidebar */}
+      <footer className={`wb-agent${agentOpen ? '' : ' wb-agent--collapsed'}`} style={{ display: 'none' }}>
         {/* 面板头部：标题 + 阶段指示 + 操作按钮 */}
         <div className="wb-agent-header">
           <span className="wb-agent-title">
