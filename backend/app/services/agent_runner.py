@@ -6,7 +6,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Generator, Iterable, List, Optional
+from typing import Any, Callable, Dict, Generator, Iterable, List, Optional, Tuple
 
 from app.config import QWEN_MODEL
 from app.db.project_schema import get_pipeline_state
@@ -949,6 +949,43 @@ def _make_state_anchor(
     )
 
 
+def _sanitize_tool_call_pairing(messages: List[Dict[str, Any]]) -> None:
+    """清理历史消息中孤立的 tool_calls，避免 OpenAI API 400 错误。
+
+    API 要求每个含 tool_calls 的 assistant 消息后必须紧跟对应 tool 结果。
+    若会话在工具执行中中断，恢复时 messages 里会残留无 tool 结果的 assistant
+    消息，导致 "insufficient tool messages following tool_calls message"。
+    """
+    i = len(messages) - 1
+    while i >= 0:
+        m = messages[i]
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            tool_calls = m["tool_calls"]
+            expected_ids = {tc.get("id") for tc in tool_calls}
+            # 统计后续连续的 tool 消息中已覆盖的 call_id
+            covered: set = set()
+            j = i + 1
+            while j < len(messages):
+                tm = messages[j]
+                if tm.get("role") != "tool":
+                    break
+                tool_call_id = tm.get("tool_call_id")
+                if tool_call_id:
+                    covered.add(tool_call_id)
+                j += 1
+            if covered != expected_ids:
+                # 孤儿 tool_calls：剥离 tool_calls，保留文字内容作为普通消息
+                text = m.get("content") or ""
+                if not text:
+                    # 无文字内容 → 直接删除该消息
+                    del messages[i]
+                else:
+                    # 保留文字，移除 tool_calls
+                    messages[i] = {k: v for k, v in m.items() if k != "tool_calls"}
+            break  # 只检查最后一组含 tool_calls 的 assistant 消息
+        i -= 1
+
+
 def _inject_tool_warning_prompt(
     messages: List[Dict[str, Any]],
     tool_name: str,
@@ -959,29 +996,71 @@ def _inject_tool_warning_prompt(
     相比 system 提示词，user 角色的消息在 LLM attention 中权重更高，
     对纠偏效果更强。
     """
-    try:
-        data = json.loads(result_json) if isinstance(result_json, str) else result_json
-    except (json.JSONDecodeError, TypeError):
+    warn_text = _extract_warnings_text(result_json)
+    if not warn_text:
         return
-    if not isinstance(data, dict):
-        return
-    warnings = data.get("warnings") or []
-    if isinstance(warnings, list):
-        warnings = [w for w in warnings if w]
-    if not warnings:
-        return
-    warn_text = "\n".join(f"  - {w}" for w in warnings[:10])
     messages.append(
         {
             "role": "user",
             "content": (
-                f"STOP — 工具 `{tool_name}` 返回了 {len(warnings)} 条警告：\n\n"
+                f"STOP — 工具 `{tool_name}` 返回了警告：\n\n"
                 f"{warn_text}\n\n"
                 "请自诉对警告的理解，说明是否需要处理及理由，若需要则立即修正。"
                 "警告未处理前禁止结束任务。"
             ),
         }
     )
+
+
+_WARN_BUF: List[Tuple[str, str]] = []
+
+
+def _collect_tool_warnings(tool_name: str, result_json: str) -> None:
+    """收集本轮工具调用中的警告（延迟到所有 tool 结果追加完毕后再注入）。"""
+    warn_text = _extract_warnings_text(result_json)
+    if warn_text:
+        _WARN_BUF.append((tool_name, warn_text))
+
+
+def _flush_tool_warnings(messages: List[Dict[str, Any]]) -> None:
+    """将本轮收集到的所有警告合并为一条 USER 消息注入。
+
+    注入时机在所有 tool 结果之后，确保不破坏 API 要求的
+    assistant(tool_calls) → tool → tool → ... 连续性。
+    """
+    if not _WARN_BUF:
+        return
+    parts = []
+    for tool_name, warn_text in _WARN_BUF:
+        parts.append(f"【{tool_name}】\n{warn_text}")
+    _WARN_BUF.clear()
+    messages.append(
+        {
+            "role": "user",
+            "content": (
+                f"STOP — 本轮 {len(parts)} 个工具返回了警告，你必须立即处理：\n\n"
+                + "\n".join(parts)
+                + "\n\n请自诉对警告的理解，说明是否需要处理及理由，若需要则立即修正。"
+                "警告未处理前禁止结束任务。"
+            ),
+        }
+    )
+
+
+def _extract_warnings_text(result_json: str) -> str:
+    """从工具返回 JSON 中提取警告文本，无警告返回空字符串。"""
+    try:
+        data = json.loads(result_json) if isinstance(result_json, str) else result_json
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    warnings = data.get("warnings") or []
+    if isinstance(warnings, list):
+        warnings = [w for w in warnings if w]
+    if not warnings:
+        return ""
+    return "\n".join(f"  - {w}" for w in warnings[:10])
 
 
 # ---------- gather phase ----------
@@ -1311,6 +1390,7 @@ def _resume_agent_sse(
             })
             
             # 注入之前 execute 阶段的所有对话历史（跳过旧的 system prompt，保留 user/assistant/tool 消息）
+            _sanitize_tool_call_pairing(_previous_execute_history)
             for m in _previous_execute_history:
                 role = m.get("role", "")
                 if role in ("user", "assistant", "tool"):
@@ -1496,10 +1576,12 @@ def _resume_agent_sse(
                         exec_text_results.append(f"[{name}]\n{result}")
                     else:
                         execute_messages.append({"role": "tool", "tool_call_id": call_id, "content": result})
-                        _inject_tool_warning_prompt(execute_messages, name, result)
+                        _collect_tool_warnings(name, result)
                 
                 if _text_fallback and exec_text_results:
                     execute_messages.append({"role": "user", "content": "[工具调用结果]\n" + "\n---\n".join(exec_text_results)})
+                
+                _flush_tool_warnings(execute_messages)
                 
                 # 错误后注入状态锚点
                 if consec_errors == 1:
@@ -2044,9 +2126,11 @@ def run_agent_sse(
                             "content": result,
                         }
                     )
-                    _inject_tool_warning_prompt(execute_messages, name, result)
+                    _collect_tool_warnings(name, result)
             if _text_fallback and exec_text_results:
                 execute_messages.append({"role": "user", "content": "[工具调用结果]\n" + "\n---\n".join(exec_text_results)})
+            # ── 批量警告注入：所有 tool 结果追加完毕后再注入 user 消息，避免破坏 API 要求的 tool_calls↔tool 连续性 ──
+            _flush_tool_warnings(execute_messages)
             # ---- 错误后立即注入状态锚点（首次错误时触发）----
             if consec_errors == 1:
                 anchor = _make_state_anchor(round_i, user_message, total_success, total_errors, is_after_error=True)
