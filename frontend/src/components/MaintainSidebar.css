@@ -211,6 +211,9 @@
   align-items: center;
   margin-top: 6px;
 }
+.ms-opt-delete {
+  color: #c04040;
+}
 
 /* 聊天正文 */
 .ms-chat-body {

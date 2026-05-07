@@ -98,6 +98,7 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
   const [loadingSessions, setLoadingSessions] = useState(false)
   const chatBodyRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const sessionSelectRef = useRef<HTMLSelectElement>(null)
   const liveEventIdRef = useRef(0)
 
   const headers = React.useMemo(
@@ -366,7 +367,13 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
         <div className="ms-sidebar">
           <div className="ms-header">
             <div className="ms-header-top">
-              <h3 className="ms-title">维护 Agent</h3>
+              <h3 className="ms-title">
+                {(() => {
+                  if (!activeSessionId) return '新会话'
+                  const s = sessions.find((x) => x.id === activeSessionId)
+                  return s?.session_name || `会话 #${activeSessionId}`
+                })()}
+              </h3>
               <div className="ms-header-actions">
                 <button className="ms-btn ms-btn-new" onClick={handleNewSession} disabled={busy} title="新建会话">
                   ＋新会话
@@ -379,10 +386,16 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
             {sessions.length > 0 && (
               <div className="ms-session-row">
                 <select
+                  ref={sessionSelectRef}
                   className="ms-session-select"
-                  value={activeSessionId ?? ''}
+                  value={String(activeSessionId ?? '')}
                   onChange={(e) => {
                     const v = e.target.value
+                    if (v === '__delete__') {
+                      if (activeSessionId) handleDeleteSession(activeSessionId)
+                      if (sessionSelectRef.current) sessionSelectRef.current.value = String(activeSessionId ?? '')
+                      return
+                    }
                     if (v === '') handleNewSession()
                     else handleSelectSession(Number(v))
                   }}
@@ -390,21 +403,14 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
                 >
                   <option value="">-- 切换会话 --</option>
                   {sessions.map((s) => (
-                    <option key={s.id} value={s.id}>
+                    <option key={s.id} value={String(s.id)}>
                       {s.session_name || `会话 #${s.id}`} ({s.updated_at?.slice(0, 10)})
                     </option>
                   ))}
+                  {activeSessionId && (
+                    <option value="__delete__" className="ms-opt-delete">🗑 删除当前会话</option>
+                  )}
                 </select>
-                {activeSessionId && (
-                  <button
-                    className="ms-btn ms-btn-delete"
-                    onClick={() => handleDeleteSession(activeSessionId)}
-                    disabled={busy}
-                    title="删除当前会话"
-                  >
-                    删除
-                  </button>
-                )}
               </div>
             )}
             {loadingSessions && <div className="ms-loading-hint">加载中…</div>}
