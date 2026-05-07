@@ -31,10 +31,12 @@ from app.services.formula_engine import (
 from app.services.perf_flags import PerfTimer, perf_flag
 
 Node = Tuple[str, str]
-TableFrameCache = Dict[str, pd.DataFrame]
+TableCacheKey = Tuple[str, Tuple[str, ...]]
+TableFrameCache = Dict[TableCacheKey, pd.DataFrame]
 DuckDBSession = Dict[str, Any]
 
 _FLOAT_TOLERANCE = 1e-9
+_ALL_COLUMNS_CACHE_KEY = "__all__"
 
 
 def _is_null_like(v: Any) -> bool:
@@ -91,25 +93,31 @@ def _copy_df_with_attrs(df: pd.DataFrame) -> pd.DataFrame:
     return copied
 
 
-def _select_cached_columns(df: pd.DataFrame, columns: Optional[Iterable[str]]) -> pd.DataFrame:
+def _table_cache_key(
+    *,
+    table_name: str,
+    existing_columns: Set[str],
+    columns: Optional[Iterable[str]],
+) -> TableCacheKey:
     if columns is None:
-        return _copy_df_with_attrs(df)
-    wanted: List[str] = []
-    seen: Set[str] = set()
-    if "row_id" in df.columns:
-        wanted.append("row_id")
-        seen.add("row_id")
+        return (table_name, (_ALL_COLUMNS_CACHE_KEY,))
+    wanted: Set[str] = set()
+    if "row_id" in existing_columns:
+        wanted.add("row_id")
     for col in columns:
-        if not col or col in seen:
-            continue
-        if col in df.columns:
-            wanted.append(col)
-            seen.add(col)
+        if col and col in existing_columns:
+            wanted.add(col)
     if not wanted:
-        return _copy_df_with_attrs(df)
-    sliced = df.loc[:, wanted].copy()
-    sliced.attrs = dict(df.attrs)
-    return sliced
+        return (table_name, (_ALL_COLUMNS_CACHE_KEY,))
+    ordered = tuple(["row_id", *sorted(col for col in wanted if col != "row_id")])
+    return (table_name, ordered)
+
+
+def _cache_key_columns(cache_key: TableCacheKey) -> Optional[Tuple[str, ...]]:
+    columns = cache_key[1]
+    if columns == (_ALL_COLUMNS_CACHE_KEY,):
+        return None
+    return columns
 
 
 def _sync_table_cache(
@@ -119,19 +127,20 @@ def _sync_table_cache(
     column_name: str,
     pairs: Sequence[Tuple[Any, Any]],
 ) -> None:
-    if not table_cache or table_name not in table_cache or not pairs:
+    if not table_cache or not pairs:
         return
-    cached_df = table_cache[table_name]
-    if "row_id" not in cached_df.columns:
-        return
-    if column_name not in cached_df.columns:
-        cached_df[column_name] = None
-    row_index = {str(rid): idx for idx, rid in enumerate(cached_df["row_id"].tolist())}
-    for value, row_id in pairs:
-        idx = row_index.get(str(row_id))
-        if idx is None:
+    for cache_key, cached_df in list(table_cache.items()):
+        if cache_key[0] != table_name:
             continue
-        cached_df.iat[idx, cached_df.columns.get_loc(column_name)] = value
+        if "row_id" not in cached_df.columns or column_name not in cached_df.columns:
+            continue
+        row_index = {str(rid): idx for idx, rid in enumerate(cached_df["row_id"].tolist())}
+        col_idx = cached_df.columns.get_loc(column_name)
+        for value, row_id in pairs:
+            idx = row_index.get(str(row_id))
+            if idx is None:
+                continue
+            cached_df.iat[idx, col_idx] = value
 
 
 def _invalidate_table_cache(
@@ -141,7 +150,8 @@ def _invalidate_table_cache(
 ) -> None:
     if not table_cache:
         return
-    table_cache.pop(table_name, None)
+    for cache_key in [key for key in table_cache if key[0] == table_name]:
+        table_cache.pop(cache_key, None)
 
 
 def _filter_changed_pairs(
@@ -357,6 +367,7 @@ def load_table_df(
     columns: Optional[Iterable[str]] = None,
     *,
     table_cache: Optional[TableFrameCache] = None,
+    copy_result: bool = True,
 ) -> pd.DataFrame:
     """从业务表加载 DataFrame。
 
@@ -391,34 +402,26 @@ def load_table_df(
             pass
         return df
 
-    if table_cache is not None:
-        cached = table_cache.get(table)
-        if cached is None:
-            cached = _attach_meta(pd.read_sql_query(f'SELECT * FROM "{table}"', conn))
-            table_cache[table] = cached
-        return _select_cached_columns(cached, columns)
-    if columns is None:
-        return _attach_meta(pd.read_sql_query(f'SELECT * FROM "{table}"', conn))
     try:
         existing = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
     except Exception:  # noqa: BLE001
         existing = set()
-    wanted: List[str] = []
-    seen: Set[str] = set()
-    if "row_id" in existing:
-        wanted.append("row_id")
-        seen.add("row_id")
-    for c in columns:
-        if not c or c in seen:
-            continue
-        if c in existing:
-            wanted.append(c)
-            seen.add(c)
-    if not wanted:
-        # 没有任何已知列，回退全表加载以保留旧行为
-        return _attach_meta(pd.read_sql_query(f'SELECT * FROM "{table}"', conn))
-    cols_sql = ", ".join(f'"{c}"' for c in wanted)
-    return _attach_meta(pd.read_sql_query(f'SELECT {cols_sql} FROM "{table}"', conn))
+    cache_key = _table_cache_key(table_name=table, existing_columns=existing, columns=columns)
+    cached: Optional[pd.DataFrame] = None
+    if table_cache is not None:
+        cached = table_cache.get(cache_key)
+        if cached is not None:
+            return _copy_df_with_attrs(cached) if copy_result else cached
+
+    cache_cols = _cache_key_columns(cache_key)
+    if cache_cols is None:
+        df = _attach_meta(pd.read_sql_query(f'SELECT * FROM "{table}"', conn))
+    else:
+        cols_sql = ", ".join(f'"{c}"' for c in cache_cols)
+        df = _attach_meta(pd.read_sql_query(f'SELECT {cols_sql} FROM "{table}"', conn))
+    if table_cache is not None:
+        table_cache[cache_key] = df
+    return _copy_df_with_attrs(df) if copy_result else df
 
 
 def _columns_for_table(
@@ -602,7 +605,7 @@ def execute_formula_on_column(
                 level_column=level_column,
                 level_min=level_min,
                 level_max=level_max,
-                table_cache=None,
+                table_cache=table_cache,
                 duckdb_conn=(duckdb_session or {}).get("conn"),
                 sqlite_schema=(duckdb_session or {}).get("sqlite_schema"),
             )
@@ -693,18 +696,42 @@ def execute_formula_on_column(
                 extra=list(main_extra) + sorted(_join_hint_columns(conn, table_name)),
             )
             frames: Dict[str, pd.DataFrame] = {
-                table_name: load_table_df(conn, table_name, main_cols, table_cache=table_cache)
+                table_name: load_table_df(
+                    conn,
+                    table_name,
+                    main_cols,
+                    table_cache=table_cache,
+                    copy_result=False,
+                )
             }
         else:
-            frames = {table_name: load_table_df(conn, table_name, table_cache=table_cache)}
+            frames = {
+                table_name: load_table_df(
+                    conn,
+                    table_name,
+                    table_cache=table_cache,
+                    copy_result=False,
+                )
+            }
         for rt, _rc in refs:
             if rt in frames:
                 continue
             if use_min_cols:
                 ref_cols = _columns_for_table(refs, rt, extra=sorted(_join_hint_columns(conn, rt)))
-                frames[rt] = load_table_df(conn, rt, ref_cols, table_cache=table_cache)
+                frames[rt] = load_table_df(
+                    conn,
+                    rt,
+                    ref_cols,
+                    table_cache=table_cache,
+                    copy_result=False,
+                )
             else:
-                frames[rt] = load_table_df(conn, rt, table_cache=table_cache)
+                frames[rt] = load_table_df(
+                    conn,
+                    rt,
+                    table_cache=table_cache,
+                    copy_result=False,
+                )
         try:
             formula = preprocess_formula(formula)
             with _formula_call_calculator_context(conn):
@@ -1320,9 +1347,20 @@ def execute_row_formula(
         available_cols = existing_cols
         refs = parse_row_refs(raw_formula)
         wanted = (refs & existing_cols) | {column_name}
-        df = load_table_df(conn, table_name, wanted, table_cache=table_cache)
+        df = load_table_df(
+            conn,
+            table_name,
+            wanted,
+            table_cache=table_cache,
+            copy_result=False,
+        )
     else:
-        df = load_table_df(conn, table_name, table_cache=table_cache)
+        df = load_table_df(
+            conn,
+            table_name,
+            table_cache=table_cache,
+            copy_result=False,
+        )
         available_cols = set(df.columns) - {"row_id"}
         refs = parse_row_refs(raw_formula)
     external_refs = refs - available_cols

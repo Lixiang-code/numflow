@@ -378,6 +378,10 @@ def _load_sqlite_extension(dcon: Any) -> bool:
 
 
 def _attach_sqlite_database(dcon: Any, conn: sqlite3.Connection) -> Optional[str]:
+    from app.services.perf_flags import perf_flag
+
+    if not perf_flag(conn, "use_duckdb_sqlite_scanner"):
+        return None
     db_path = _sqlite_db_path(conn)
     if not db_path:
         return None
@@ -399,11 +403,7 @@ def open_duckdb_session(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
     except Exception:  # noqa: BLE001
         return None
     dcon = duckdb.connect(database=":memory:")
-    sqlite_schema = _attach_sqlite_database(dcon, conn)
-    if not sqlite_schema:
-        dcon.close()
-        return None
-    return {"conn": dcon, "sqlite_schema": sqlite_schema}
+    return {"conn": dcon, "sqlite_schema": _attach_sqlite_database(dcon, conn)}
 
 
 def close_duckdb_session(session: Optional[Dict[str, Any]]) -> None:
@@ -491,6 +491,26 @@ def _resolve_join_pairs_for_scanner(
             continue
         return join_pairs
     return None
+
+
+def _alignment_projection_columns(
+    conn: sqlite3.Connection,
+    *,
+    target_table: str,
+    ref_table: str,
+    ref_col: str,
+) -> Tuple[Set[str], Set[str]]:
+    from app.services.formula_engine import _candidate_join_columns
+
+    target_df = _empty_table_frame(conn, target_table)
+    ref_df = _empty_table_frame(conn, ref_table)
+    target_cols: Set[str] = set()
+    ref_cols: Set[str] = {ref_col}
+    for join_pairs in _candidate_join_columns(target_df, ref_df):
+        for left, right in join_pairs:
+            target_cols.add(left)
+            ref_cols.add(right)
+    return target_cols, ref_cols
 
 
 def _row_order_sql(*, row_id_expr: str, row_num_expr: str) -> str:
@@ -661,15 +681,30 @@ def compute_column_via_duckdb(
         except Exception:  # noqa: BLE001
             pass
 
-    # 加载主表
+    extra_level = (level_column or ("level" if (level_min is not None) else None))
+    ref_projection_cols: Dict[str, Set[str]] = {}
+    main_projection_cols: Set[str] = set(used_cols)
     if cross_ref_map:
-        df = load_table_df(conn, table_name, table_cache=table_cache)
+        for (src_tbl, src_col), _alias in cross_ref_map.items():
+            target_cols, ref_cols = _alignment_projection_columns(
+                conn,
+                target_table=table_name,
+                ref_table=src_tbl,
+                ref_col=src_col,
+            )
+            main_projection_cols.update(target_cols)
+            ref_projection_cols.setdefault(src_tbl, set()).update(ref_cols)
     else:
-        wanted = sorted(set(used_cols) | _join_hint_columns(conn, table_name))
-        extra_level = (level_column or ("level" if (level_min is not None) else None))
-        if extra_level and extra_level in existing_cols:
-            wanted.append(extra_level)
-        df = load_table_df(conn, table_name, wanted, table_cache=table_cache)
+        main_projection_cols.update(_join_hint_columns(conn, table_name))
+    if extra_level and extra_level in existing_cols:
+        main_projection_cols.add(extra_level)
+    df = load_table_df(
+        conn,
+        table_name,
+        sorted(main_projection_cols) if main_projection_cols else None,
+        table_cache=table_cache,
+        copy_result=True,
+    )
     if df.empty:
         return []
 
@@ -677,7 +712,14 @@ def compute_column_via_duckdb(
     for (src_tbl, src_col), alias in cross_ref_map.items():
         ref_df = ref_frames.get(src_tbl)
         if ref_df is None:
-            ref_df = load_table_df(conn, src_tbl, table_cache=table_cache)
+            wanted_ref_cols = sorted(ref_projection_cols.get(src_tbl) or {src_col})
+            ref_df = load_table_df(
+                conn,
+                src_tbl,
+                wanted_ref_cols,
+                table_cache=table_cache,
+                copy_result=False,
+            )
             ref_frames[src_tbl] = ref_df
         if src_col not in ref_df.columns:
             raise NotSupported(f"跨表引用列不存在：{src_tbl}.{src_col}")
