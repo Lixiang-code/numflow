@@ -639,7 +639,7 @@ export default function ThreeDimTableEditor({
             <span key={name} style={{ display: 'inline-flex' }}>
               {isEditing ? (
                 <span className="matrix-const-chip-edit-row">
-                  <code className="matrix-const-chip-name">{name}</code>
+                  <code className="matrix-const-chip-name">{showEnNames ? name : (c?.name_zh || name)}</code>
                   <input
                     className="matrix-const-chip-input"
                     value={editingConstValue}
@@ -658,7 +658,7 @@ export default function ThreeDimTableEditor({
                   onClick={() => startConstEdit(name)}
                   title={c ? `当前值: ${c.value ?? c.formula ?? '未设置'}${c.brief ? ' — ' + c.brief : ''}` : '未找到常量'}
                 >
-                  <code>{name}</code>
+                  <code>{showEnNames ? name : (c?.name_zh || name)}</code>
                   <span className="matrix-const-chip-val">{c?.value != null ? String(c.value) : c?.formula || '?'}</span>
                 </button>
               )}
@@ -951,8 +951,8 @@ export default function ThreeDimTableEditor({
                 >
                   <div className="matrix-formula-item-header">
                     <span className="matrix-formula-col-name">
-                      {col.display_name || col.key}
-                      <code className="muted small" style={{ marginLeft: 6 }}>{col.key}</code>
+                      {showEnNames ? col.key : (col.display_name || col.key)}
+                      {showEnNames && <code className="muted small" style={{ marginLeft: 6 }}>{col.key}</code>}
                     </span>
                     <span className={`matrix-formula-type-badge matrix-formula-type-${formula.type}`}>
                       {formula.type === 'row' ? '行公式' : formula.type === 'row_template' ? '运行时模板' : formula.type}

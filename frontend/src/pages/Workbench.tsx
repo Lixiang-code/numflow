@@ -559,6 +559,7 @@ export default function Workbench() {
     [tables],
   )
   const [showEnNames, setShowEnNames] = useState(false)  // false=显示中文，true=显示英文
+  const [showValDetail, setShowValDetail] = useState(false)
 
   /** 全部常量（用于"📐 常量"专属页） */
   const [allConstants, setAllConstants] = useState<Array<{
@@ -1803,7 +1804,7 @@ export default function Workbench() {
           </select>
           {modelSwitching && <span style={{ marginLeft: 4, fontSize: '0.7rem' }}>切换中…</span>}
         </span>
-        <label style={{ fontSize: '0.78rem', cursor: 'pointer', userSelect: 'none', marginLeft: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        <label style={{ fontSize: '0.78rem', cursor: 'pointer', userSelect: 'none', marginLeft: 12, display: 'inline-flex', alignItems: 'center', gap: 4, color: '#fff', whiteSpace: 'nowrap' }}>
           <input type="checkbox" checked={showEnNames} onChange={e => setShowEnNames(e.target.checked)} />
           英文名
         </label>
@@ -1816,8 +1817,8 @@ export default function Workbench() {
         )
         const showFailedOnly = failed.length > 0 && failed.length < allSummaries.length
         return (
-          <details className="wb-rule-sum muted small" style={{ margin: '0 1rem 0.5rem' }}>
-            <summary>
+          <details className="wb-rule-sum muted small" style={{ margin: '0 1rem 0.5rem' }} open={showValDetail}>
+            <summary onClick={e => { e.preventDefault(); setShowValDetail(!showValDetail) }}>
               校验明细（共 {allSummaries.length} 条规则
               {failed.length > 0 ? `，未通过 ${failed.length} 条` : '，全部通过'}）
             </summary>
