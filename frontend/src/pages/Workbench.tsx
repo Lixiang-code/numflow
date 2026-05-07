@@ -552,6 +552,7 @@ export default function Workbench() {
   }>>([])
   const [showConstEn, setShowConstEn] = useState(false)
   const [kindFilter, setKindFilter] = useState<string>('all')  // all / config / compute
+  const [columnKinds, setColumnKinds] = useState<Record<string, string>>({})
 
   /** 全部常量（用于"📐 常量"专属页） */
   const [allConstants, setAllConstants] = useState<Array<{
@@ -1087,7 +1088,9 @@ export default function Workbench() {
         try {
           const dataStartRow = 3  // skip header rows
           const dataEndRow = matrix.length - 1
-          if (dataEndRow >= dataStartRow) {
+          const kindKeys = Object.keys(columnKinds)
+          console.log('[columnKinds]', kindKeys.length, 'classified columns', JSON.stringify(columnKinds))
+          if (dataEndRow >= dataStartRow && kindKeys.length > 0) {
             for (let ci = 0; ci < numCols; ci++) {
               const colName = cols[ci] || ''
               const kind = columnKinds[colName] || ''
@@ -1284,6 +1287,7 @@ export default function Workbench() {
         setValidationRulesDraft(JSON.stringify(vr, null, 2))
         setColumnFormulas(cf)
         setRelatedConstants(Array.isArray(desc.related_constants) ? desc.related_constants : [])
+        setColumnKinds(desc.column_kinds || {})
 
         // 写入 Univer 并切换到该 sheet（2D/3D matrix 专用视图不需要写入 Univer）
         if (!isMatrix && !is3DMatrix && !is3DMatrixFromMeta) {
@@ -1328,7 +1332,7 @@ export default function Workbench() {
       const colMeta = tableColMetaCacheRef.current.get(selected) || []
       setRows(normalized)
       setActiveCols(cols)
-      populateSheet(selected, normalized, cols, formulas, colMeta, activeDisplayName)
+      populateSheet(selected, normalized, cols, formulas, colMeta, activeDisplayName, columnKinds)
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     }
@@ -1396,7 +1400,7 @@ export default function Workbench() {
                   tableRowsCacheRef.current.set(tn, normalized2)
                   if (tn === activeTableRef.current) {
                     setRows(normalized2)
-                    populateSheet(tn, normalized2, cols2, tf, colMeta2, dn2)
+                    populateSheet(tn, normalized2, cols2, tf, colMeta2, dn2, columnKinds)
                   }
                 } catch { /* 重算失败不影响写入 */ }
               }
