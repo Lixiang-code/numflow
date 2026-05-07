@@ -209,6 +209,10 @@ def ensure_project_migrations(conn: sqlite3.Connection) -> None:
     # 第四轮优化：表标签系统（每张表必须 ≥1 标签；用于相关常数筛选）
     _add_column_if_missing(conn, "_table_registry", "tags", "TEXT NOT NULL DEFAULT '[]'")
 
+    # 表分类系统：配置表/计算表/混合表 + 混合表逐列标注
+    _add_column_if_missing(conn, "_table_registry", "table_kind", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "_table_registry", "column_kinds_json", "TEXT NOT NULL DEFAULT '{}'")
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS _calculators (

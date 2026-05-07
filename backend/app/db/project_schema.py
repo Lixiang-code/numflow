@@ -19,7 +19,9 @@ def init_project_db(conn: sqlite3.Connection, *, seed_readme: bool = True) -> No
             purpose TEXT,
             readme TEXT,
             schema_json TEXT,
-            validation_status TEXT NOT NULL DEFAULT 'unknown'
+            validation_status TEXT NOT NULL DEFAULT 'unknown',
+            table_kind TEXT NOT NULL DEFAULT '',
+            column_kinds_json TEXT NOT NULL DEFAULT '{}'
         );
 
         CREATE TABLE IF NOT EXISTS _dependency_graph (

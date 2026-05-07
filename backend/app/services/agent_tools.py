@@ -56,8 +56,14 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_table_list",
-            "description": "列出业务表最小清单（仅返回 table_name、display_name、view_slice_only）。当表总行数 > 300 时，view_slice_only=true，表示该表只能查看切片，禁止默认全表读取。",
-            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            "description": "列出业务表最小清单（含 table_name、display_name、table_kind、view_slice_only）。可按 kind_filter='config'/'compute' 筛选。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind_filter": {"type": "string", "enum": ["config", "compute", ""], "description": "可选筛选：config=配置表+混合表, compute=计算表+混合表, 空=全部"}
+                },
+                "additionalProperties": False
+            },
         },
     },
     {
@@ -354,7 +360,8 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "  columns[].display_name：中文列名，用于表头展示，必填，如「攻击力」\n"
                 "columns 每项含：name / sql_type(TEXT|REAL|INTEGER) / display_name / dtype / number_format\n"
                 "number_format 格式说明见下方参数描述。\n"
-                "★ row_id 是系统自动列（TEXT 主键），无需在 columns 中声明，重复声明会报错。"
+                "★ row_id 是系统自动列（TEXT 主键），无需在 columns 中声明，重复声明会报错。\n"
+                "★ 建表完成后必须用 classify_table 标注表类型（config/compute/mixed）。"
             ),
             "parameters": {
                 "type": "object",
@@ -1115,6 +1122,39 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "classify_table",
+            "description": (
+                "标注表的类型分类：\n"
+                "★ `config`：配置表（所有列的值均为策划手动设定的配置数据，无常驻公式列）\n"
+                "★ `compute`：计算表（所有列均由公式驱动计算，无需手动维护数据）\n"
+                "★ `mixed`：混合表（部分列为配置值，部分列由公式计算）→ 必须传 column_kinds\n"
+                "★ 混合表时 column_kinds 必填：JSON 映射每列的角色\n"
+                "  'config'＝配置列、'compute'＝计算列、'skip'＝不参与计算（如 id 列/备注列等）\n"
+                "★ 前端按类型筛选表列表，务必在创建完成后首次标注（可后续再调整）"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string"},
+                    "table_kind": {
+                        "type": "string",
+                        "enum": ["config", "compute", "mixed"],
+                        "description": "config=纯配置表 / compute=纯计算表 / mixed=混合表"
+                    },
+                    "column_kinds": {
+                        "type": "object",
+                        "description": "仅 table_kind='mixed' 时必填；key=列名, value='config'|'compute'|'skip'",
+                        "additionalProperties": {"type": "string", "enum": ["config", "compute", "skip"]},
+                    },
+                },
+                "required": ["table_name", "table_kind"],
+                "additionalProperties": False,
+            },
+        },
+    },
     # ─── 第3轮新增：表目录管理 ────────────────────────────────────────
     {
         "type": "function",
@@ -1802,6 +1842,7 @@ _TOOL_TITLE_ZH: Dict[str, str] = {
     "const_list": "列出常量",
     "const_detail": "查询常量详情",
     "const_delete": "删除常量",
+    "classify_table": "标注表类型",
     "list_directories": "查看目录树",
     "set_table_directory": "设置表目录",
     "create_matrix_table": "创建矩阵表",
@@ -1868,6 +1909,7 @@ _TOOL_GROUP_BY_NAME: Dict[str, str] = {
     "const_list": "meta_dictionary",
     "const_detail": "meta_dictionary",
     "const_delete": "meta_dictionary",
+    "classify_table": "meta_dictionary",
     "list_directories": "meta_dictionary",
     "set_table_directory": "meta_dictionary",
     "read_3d_table": "advanced_modeling",
@@ -1939,6 +1981,7 @@ _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "const_list": "列出所有已登记的常量（cols+rows 紧凑格式，含 formula 字段；支持 tags_filter 过滤和 limit/offset 分页）。",
     "const_detail": "按 name_en 列表查询指定常量的全部信息（含 brief 与 design_intent），用于 const_list 省略时补齐详情。",
     "const_delete": "删除一个已登记的常量条目（若有公式常量依赖则报错）。",
+    "classify_table": "标注表为配置表/计算表/混合表；混合表须逐列标注 config/compute/skip。",
     "list_directories": "查看项目业务表的目录树结构。",
     "set_table_directory": "将指定表归入某个目录分类节点。",
     "create_matrix_table": "新建一个矩阵式二维数据表。",
@@ -2115,9 +2158,15 @@ def _safe_table_row_count(conn: sqlite3.Connection, table_name: str) -> int:
         return 0
 
 
-def _build_compact_table_list_rows(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+def _build_compact_table_list_rows(conn: sqlite3.Connection, kind_filter: str = "") -> List[Dict[str, Any]]:
+    where = ""
+    params: List[str] = []
+    if kind_filter == "config":
+        where = "WHERE table_kind IN ('config', 'mixed')"
+    elif kind_filter == "compute":
+        where = "WHERE table_kind IN ('compute', 'mixed')"
     cur = conn.execute(
-        "SELECT table_name, schema_json FROM _table_registry ORDER BY table_name"
+        f"SELECT table_name, schema_json, table_kind FROM _table_registry {where} ORDER BY table_name"
     )
     rows: List[Dict[str, Any]] = []
     for rec in cur.fetchall():
@@ -2127,6 +2176,7 @@ def _build_compact_table_list_rows(conn: sqlite3.Connection) -> List[Dict[str, A
                 "table_name": table_name,
                 "display_name": _schema_display_name(rec["schema_json"]),
                 "view_slice_only": _safe_table_row_count(conn, table_name) > 300,
+                "table_kind": str(rec["table_kind"] or ""),
             }
         )
     return rows
@@ -2196,8 +2246,11 @@ def _get_project_config(conn: sqlite3.Connection) -> Dict[str, Any]:
     return {"settings": _compact_project_settings(settings)}
 
 
-def _get_table_list(conn: sqlite3.Connection) -> Dict[str, Any]:
-    rows_dicts = _build_compact_table_list_rows(conn)
+def _get_table_list(conn: sqlite3.Connection, kind_filter: str = "") -> Dict[str, Any]:
+    if kind_filter and kind_filter in ("config", "compute"):
+        rows_dicts = _build_compact_table_list_rows(conn, kind_filter=kind_filter)
+    else:
+        rows_dicts = _build_compact_table_list_rows(conn)
     if rows_dicts:
         cols = list(rows_dicts[0].keys())
         return {"cols": cols, "rows": [[r[c] for c in cols] for r in rows_dicts], "total": len(rows_dicts)}
@@ -3367,7 +3420,7 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
     if name == "get_project_config":
         out = {**_get_project_config(conn), "can_write": p.can_write}
     elif name == "get_table_list":
-        out = _get_table_list(conn)
+        out = _get_table_list(conn, kind_filter=str(args.get("kind_filter", "")).strip())
     elif name == "get_table_schema":
         out = _get_table_schema(
             conn,
@@ -3763,6 +3816,8 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
         out = _const_detail(conn, args)
     elif name == "const_delete":
         out = _const_delete(conn, args, p.can_write)
+    elif name == "classify_table":
+        out = _classify_table(conn, args, p.can_write)
     elif name == "const_tag_register":
         out = _const_tag_register(conn, args, p.can_write)
     elif name == "const_tag_list":
@@ -5229,6 +5284,42 @@ def _const_delete(conn: sqlite3.Connection, args: Dict[str, Any], can_write: boo
     conn.execute("DELETE FROM _constants WHERE name_en = ?", (name_en,))
     conn.commit()
     return {"ok": True, "name_en": name_en}
+
+
+def _classify_table(conn: sqlite3.Connection, args: Dict[str, Any], can_write: bool) -> Dict[str, Any]:
+    err = _require_write(can_write, "classify_table")
+    if err:
+        return err
+    table_name = str(args.get("table_name", "")).strip()
+    table_kind = str(args.get("table_kind", "")).strip()
+    if table_kind not in ("config", "compute", "mixed"):
+        return {"error": f"table_kind 必须为 config/compute/mixed，当前: {table_kind!r}"}
+
+    cur = conn.execute("SELECT 1 FROM _table_registry WHERE table_name = ?", (table_name,))
+    if not cur.fetchone():
+        return {"error": f"表 {table_name!r} 不存在"}
+
+    column_kinds = {}
+    if table_kind == "mixed":
+        raw_kinds = args.get("column_kinds")
+        if not isinstance(raw_kinds, dict) or not raw_kinds:
+            return {"error": "混合表必须提供 column_kinds：{col_name: 'config'|'compute'|'skip', ...}"}
+        valid_kinds = {"config", "compute", "skip"}
+        # 校验每列的值合法
+        existing_cols = {r[1] for r in conn.execute(f'PRAGMA table_info("{table_name}")')}
+        for col, k in raw_kinds.items():
+            if k not in valid_kinds:
+                return {"error": f"列 {col!r} 的 kind 非法: {k!r}，允许: config/compute/skip"}
+            if col != "row_id" and col not in existing_cols:
+                return {"error": f"列 {col!r} 不存在于表 {table_name}"}
+        column_kinds = {str(k): str(v) for k, v in raw_kinds.items()}
+
+    conn.execute(
+        "UPDATE _table_registry SET table_kind = ?, column_kinds_json = ? WHERE table_name = ?",
+        (table_kind, json.dumps(column_kinds, ensure_ascii=False), table_name),
+    )
+    conn.commit()
+    return {"ok": True, "table_name": table_name, "table_kind": table_kind, "column_kinds": column_kinds if column_kinds else None}
 
 
 def _sparse_sample(conn: sqlite3.Connection, args: Dict[str, Any]) -> Dict[str, Any]:

@@ -201,7 +201,8 @@ def patch_constant(
 @router.get("/tables")
 def get_table_list(p: ProjectDB = Depends(get_project_read)):
     cur = p.conn.execute(
-        "SELECT table_name, layer, purpose, validation_status, schema_json, directory, matrix_meta_json "
+        "SELECT table_name, layer, purpose, validation_status, schema_json, directory, matrix_meta_json, "
+        "table_kind, column_kinds_json "
         "FROM _table_registry ORDER BY directory, table_name"
     )
     rows = []

@@ -616,7 +616,7 @@ def test_get_table_list_returns_cols_rows_format():
 
     result = json.loads(dispatch_tool("get_table_list", {}, p))
     d = result["data"]
-    assert d["cols"] == ["table_name", "display_name", "view_slice_only"]
+    assert d["cols"] == ["table_name", "display_name", "view_slice_only", "table_kind"]
     assert "rows" in d
     assert "total" in d
     assert isinstance(d["rows"], list)

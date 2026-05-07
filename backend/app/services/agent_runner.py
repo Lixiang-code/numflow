@@ -149,6 +149,7 @@ WRITE_TOOLS = {
     "execute_formula",
     "recalculate_downstream",
     "create_validation_rule",
+    "classify_table",
     "register_calculator",
     "update_table_readme",
     "update_global_readme",
@@ -431,6 +432,12 @@ def _base_common_system(mode_norm: str) -> str:
             "【表目录管理】调用 create_table / create_matrix_table 时必须传 directory 参数（"
             "如 '基础/属性'、'分配/玩法属性'、'落地/装备'）以便目录化管理；"
             "可用 list_directories / set_table_directory 查询和移动。",
+            "【表类型标注（classify_table）】每张表创建后必须立即调用 classify_table 标注类型：\n"
+            "  · config（配置表）：全部列均为策划手动设定的配置数据，无常驻公式列\n"
+            "  · compute（计算表）：全部列均由公式驱动计算，无需手动维护\n"
+            "  · mixed（混合表）：部分列为配置值、部分列为公式计算，必须传 column_kinds 逐列标注\n"
+            "  · 混合表每列标注：'config'=配置列、'compute'=计算列、'skip'=不参与计算（如id列/备注列）\n"
+            "  · 标注后前端可按类型筛选表列表，未标注的表不会出现在筛选视图中。",
             "【SKILL 库使用】当前步骤可能已自动暴露默认 SKILL；当你需要核对更细的玩法制作说明时，"
             "应当使用 list_skills / get_skill_detail / render_skill_file 查询，不要凭空补写玩法规则。",
             context_block,

@@ -23,6 +23,7 @@ type TableInfo = {
   is_matrix?: boolean
   is_3d_matrix?: boolean
   matrix_kind?: string
+  table_kind?: string  // config / compute / mixed / ""
 }
 type ColumnMeta = { name: string; sql_type?: string; display_name?: string; dtype?: string; number_format?: string; is_dim?: boolean }
 /** 列公式信息（含类型：sql / row / row_template） */
@@ -331,6 +332,75 @@ function ConstantsPanel({
   )
 }
 
+function InlineConstRow({ c, showEn, canWrite, headers, onRefresh }: {
+  c: { name_en: string; name_zh: string; value: unknown; formula?: string | null }
+  showEn: boolean
+  canWrite: boolean
+  headers: Record<string, string> | undefined
+  onRefresh: () => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const displayValue = (v: unknown) => {
+    if (v === null || v === undefined) return '—'
+    if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+    if (typeof v === 'string') return v
+    try { return JSON.stringify(v) } catch { return String(v) }
+  }
+
+  const startEdit = () => {
+    if (!canWrite || !headers) return
+    setDraft(c.formula ? `=${c.formula}` : displayValue(c.value))
+    setEditing(true)
+  }
+
+  const saveEdit = async () => {
+    if (!headers) return
+    setSaving(true)
+    try {
+      const trimmed = draft.trim()
+      let body: Record<string, unknown>
+      if (trimmed.startsWith('=')) {
+        body = { formula: trimmed.slice(1).trim() }
+      } else {
+        const n = Number(trimmed)
+        body = { value: trimmed !== '' && !isNaN(n) ? n : trimmed }
+      }
+      await apiFetch(`/meta/constants/${encodeURIComponent(c.name_en)}`, {
+        method: 'PATCH', headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      setEditing(false)
+      onRefresh()
+    } catch { /* ignore */ }
+    finally { setSaving(false) }
+  }
+
+  return (
+    <tr key={c.name_en}>
+      <td title={c.name_en}>
+        <code>{showEn ? c.name_en : (c.name_zh || c.name_en)}</code>
+      </td>
+      <td
+        title={canWrite ? '点击编辑' : ''}
+        style={canWrite ? { cursor: 'pointer', textDecoration: 'underline dotted' } : {}}
+        onClick={startEdit}>
+        {editing ? (
+          <>
+            <input value={draft} onChange={e => setDraft(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') setEditing(false) }}
+              style={{ width: 100, fontSize: 12 }} autoFocus disabled={saving} />
+            <button type="button" className="btn tiny" onClick={saveEdit} disabled={saving}>✓</button>
+            <button type="button" className="btn tiny" onClick={() => setEditing(false)}>✕</button>
+          </>
+        ) : displayValue(c.value)}
+      </td>
+    </tr>
+  )
+}
+
 /** 把文本中 $name$ 替换为词汇表中文（或英文）显示，找不到时标红 */
 function renderGlossaryText(
   text: string,
@@ -480,6 +550,8 @@ export default function Workbench() {
     brief?: string
     scope_table?: string | null
   }>>([])
+  const [showConstEn, setShowConstEn] = useState(false)
+  const [kindFilter, setKindFilter] = useState<string>('all')  // all / config / compute
 
   /** 全部常量（用于"📐 常量"专属页） */
   const [allConstants, setAllConstants] = useState<Array<{
@@ -635,6 +707,16 @@ export default function Workbench() {
     } catch (e) {
       console.warn('加载常量失败', e)
     }
+  }, [headers])
+
+  const loadRelatedConstants = useCallback(async (tableName: string) => {
+    if (!headers || !tableName) return
+    try {
+      const desc = (await apiFetch(`/data/tables/${encodeURIComponent(tableName)}`, { headers })) as {
+        related_constants?: Array<{ name_en: string; name_zh: string; value: unknown; brief?: string; scope_table?: string | null }>
+      }
+      setRelatedConstants(Array.isArray(desc.related_constants) ? desc.related_constants : [])
+    } catch { /* ignore */ }
   }, [headers])
 
   const loadProjectConfig = useCallback(async () => {
@@ -1699,6 +1781,17 @@ export default function Workbench() {
             </button>
           </div>
           <ul>
+            <li key="__filter__" style={{ padding: '4px 8px', display: 'flex', gap: 4 }}>
+              {(['all', 'config', 'compute'] as const).map(k => (
+                <button key={k}
+                  type="button"
+                  className={`btn tiny ${kindFilter === k ? 'sel' : ''}`}
+                  style={{ fontSize: 11, padding: '2px 6px' }}
+                  onClick={() => setKindFilter(k)}>
+                  {k === 'all' ? '全部' : k === 'config' ? '配置表' : '计算表'}
+                </button>
+              ))}
+            </li>
             <li key="__constants__">
               <button
                 type="button"
@@ -1711,8 +1804,15 @@ export default function Workbench() {
               </button>
             </li>
             {(() => {
+              const filteredTables = tables.filter(t => {
+                if (kindFilter === 'all') return true
+                const tk = t.table_kind || ''
+                if (kindFilter === 'config') return tk === 'config' || tk === 'mixed'
+                if (kindFilter === 'compute') return tk === 'compute' || tk === 'mixed'
+                return true
+              })
               const groups: Record<string, TableInfo[]> = {}
-              tables.forEach((t) => {
+              filteredTables.forEach((t) => {
                 const dir = t.directory || '（未分组）'
                 ;(groups[dir] ||= []).push(t)
               })
@@ -1769,6 +1869,11 @@ export default function Workbench() {
                                 {t.purpose ? (
                                   <small className="tbl-purpose" title={t.purpose}>
                                     {t.purpose}
+                                  </small>
+                                ) : null}
+                                {t.table_kind ? (
+                                  <small className="tbl-kind" title={t.table_kind === 'mixed' ? '混合表（配置+计算）' : t.table_kind === 'config' ? '配置表' : '计算表'}>
+                                    {t.table_kind === 'mixed' ? '混合' : t.table_kind === 'config' ? '配置' : '计算'}
                                   </small>
                                 ) : null}
                                 <small>{t.validation_status}</small>
@@ -2222,22 +2327,23 @@ export default function Workbench() {
                 <table className="wb-const-table small">
                   <thead>
                     <tr>
-                      <th>name_en</th>
-                      <th>中文</th>
+                      <th style={{cursor:'pointer'}}
+                        onClick={() => setShowConstEn(!showConstEn)}
+                        title="点击切换中/英文">
+                        {showConstEn ? 'name_en' : '中文'}
+                      </th>
                       <th>value</th>
-                      <th>scope</th>
                     </tr>
                   </thead>
                   <tbody>
                     {relatedConstants.map((c) => (
-                      <tr key={c.name_en}>
-                        <td title={c.name_en}><code>{c.name_en}</code></td>
-                        <td title={c.name_zh || ''}>{c.name_zh || '—'}</td>
-                        <td title={typeof c.value === 'object' ? JSON.stringify(c.value) : String(c.value)}>
-                          {typeof c.value === 'object' ? JSON.stringify(c.value) : String(c.value)}
-                        </td>
-                        <td className="muted small" title={c.scope_table || '全局'}>{c.scope_table || '全局'}</td>
-                      </tr>
+                      <InlineConstRow
+                        key={c.name_en}
+                        c={c}
+                        showEn={showConstEn}
+                        canWrite={canWrite}
+                        headers={headers}
+                        onRefresh={() => { if (selected) loadRelatedConstants(selected) }} />
                     ))}
                   </tbody>
                 </table>
