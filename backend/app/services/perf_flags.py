@@ -10,6 +10,7 @@
 - perf.use_dag_recalc          = True   # A5 DAG 批量重算
 - perf.use_duckdb_compute      = False  # B1/B2 DuckDB 计算（默认关闭）
 - perf.use_duckdb_sqlite_scanner = False  # B6 DuckDB 直读 SQLite（实验能力，默认关闭）
+- perf.enable_timing          = True   # A0 计时日志（调试用，生产可关掉省 I/O）
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from typing import Any, Dict, Optional
 
 
 _DEFAULTS: Dict[str, bool] = {
+    "enable_timing": True,
     "use_min_column_load": True,
     "use_batch_writeback": True,
     "use_batch_lookup": True,
@@ -132,6 +134,8 @@ class PerfTimer:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
+        if not perf_flag(self.conn, "enable_timing"):
+            return
         ms = (time.perf_counter() - self._t0) * 1000.0
         extra = dict(self.extra)
         if exc is not None:
