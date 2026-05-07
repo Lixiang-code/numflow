@@ -312,6 +312,7 @@ JOIN player_model_equip_summary ON ...
 | V3 | `50dd4b1` | DuckDB B4 跨表@ref | **1.02s** | **0.21s** | **13/13** | **63x** |
 | V4 | `d00ce64` | DAG级表缓存（全路径） | 1.09s | 0.20s | 13/13 | 59x (⚠ 回归→已修复) |
 | **V5** | `5da1bd9` | **DuckDB 跳过缓存 + 写后失效** | **0.98s** | **0.21s** | **13/13** | **65x** ✓ |
+| V6 | `3106f49` | DuckDB SQLite Scanner | 1.08s (冷14.8s) | 0.21s | 13/13 | 59x (⚠ 回归) |
 
 ### V4→V5 修复说明
 
@@ -321,6 +322,20 @@ V5 修复（`5da1bd9`）：
 - DuckDB 路径传 `table_cache=None`，完全绕过 Python 缓存
 - DuckDB 写入后调用 `_invalidate_table_cache` 而非 `_sync_table_cache`
 - Pandas 路径继续享受缓存加速
+
+### V6 回归分析（commit `3106f49`）
+
+V6 引入 DuckDB `sqlite_scanner` 扩展 ATTACH SQLite 直读，但有两个致命问题：
+
+**1. 冷启动回归（0.98s → 14.8s）**
+
+`open_duckdb_session` 在每个 PATCH 请求都重新创建 DuckDB 内存连接 + `LOAD sqlite` 扩展，发生在 DAG timer 之外。首跑扩展安装/加载耗时 ~13.6s，稳跑仍需 ~100ms/次加载。
+
+**2. 稳跑无收益（0.98s → 1.08s）**
+
+逐节点引擎耗时与 V5 完全一致（player_model 10ms, equip_base 28ms），说明瓶颈本就不在 DataFrame 搬运上 —— V5 的 `load_table_df` → DuckDB register 链路已经足够快。SQLite Scanner 消除的"搬运"开销实际占比很小。
+
+**结论**：建议回退 V6。若未来确实需要 Scanner（例如公式涉及上百行的大表 JOIN），可将 DuckDB 连接做成**进程级单例**（启动时 ATTACH，常驻），而非每个请求重建。
 
 ### 残留开销分析
 
