@@ -408,8 +408,15 @@ def create_matrix_table(
                 axes=axes,
                 value_column="value",
                 brief=(
-                    f"按 ({row_axis_name}, {col_axis_name}) 查询 {display_name} 的投放比例；"
-                    f"scale_mode={scale_mode}。matrix_resource 在 fallback 下：单切片可常量，多切片必须公式。"
+                    (
+                        f"按 ({row_axis_name}, {col_axis_name}) 查询 {display_name} 的属性值；"
+                        f"scale_mode={scale_mode}。"
+                    )
+                    if kind == "matrix_attr"
+                    else (
+                        f"按 ({row_axis_name}, {col_axis_name}) 查询 {display_name} 的资源投放值；"
+                        f"scale_mode={scale_mode}。matrix_resource 在 fallback 下：单切片可常量，多切片必须公式。"
+                    )
                 ),
             )
         except Exception:  # noqa: BLE001

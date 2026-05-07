@@ -76,6 +76,7 @@ def test_tool_whitelists_expose_critical_existing_and_new_tools():
         "write_cells_series",
         "add_column",
         "add_columns",
+        "create_validation_rule",
         "glossary_register",
         "const_register",
         "const_tag_register",

@@ -148,6 +148,7 @@ WRITE_TOOLS = {
     "register_formula",
     "execute_formula",
     "recalculate_downstream",
+    "create_validation_rule",
     "register_calculator",
     "update_table_readme",
     "update_global_readme",
@@ -216,6 +217,7 @@ _TOOL_LABELS: Dict[str, str] = {
     "add_columns": "批量新增列",
     "read_table": "读取表数据",
     "write_cells": "写入单元格",
+    "create_validation_rule": "创建校验规则",
     "delete_table": "删除表",
     "list_tables": "列举所有表",
     "register_formula": "注册公式",
@@ -291,6 +293,7 @@ _TOOL_LABELS: Dict[str, str] = {
     "write_cells_series": "序列写入",
     "add_column": "追加列",
     "add_columns": "批量追加列",
+    "create_validation_rule": "创建校验规则",
 }
 
 

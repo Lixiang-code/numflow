@@ -219,6 +219,7 @@ def create_3d_table(
     purpose: str = "",
     directory: str = "",
     tags: Union[List[str], None] = None,
+    kind: str = "",
 ) -> Dict[str, Any]:
     """创建三维矩阵表（行有两个维度，列是属性，可为每列注册公式）。
 
@@ -348,10 +349,12 @@ def create_3d_table(
     formula_errors: List[str] = []
     from app.services.formula_exec import execute_formula_on_column, register_row_formula  # lazy import
     formula_cols: List[str] = []
+    formula_defined_cols: List[str] = []
     for c in cols:
         formula_str = str(c.get("formula") or "").strip()
         if not formula_str:
             continue
+        formula_defined_cols.append(str(c["key"]))
         try:
             reg_result = register_row_formula(conn, t, c["key"], formula_str)
             if reg_result.get("formula_type") != "row":
@@ -365,6 +368,16 @@ def create_3d_table(
         except Exception as fe:  # noqa: BLE001
             formula_errors.append(f"{col_name}: {fe}")
 
+    inferred_kind = _infer_kind(t, kind)
+    attach_default_rules(
+        conn,
+        t,
+        kind=inferred_kind,
+        schema_columns=schema_cols,
+        formula_columns=formula_defined_cols,
+    )
+    conn.commit()
+
     return {
         "ok": True,
         "table_name": t,
@@ -372,6 +385,7 @@ def create_3d_table(
         "row_count": row_count,
         "formula_errors": formula_errors,
         "directory": directory or "",
+        "kind": inferred_kind,
     }
 
 

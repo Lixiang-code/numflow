@@ -89,6 +89,7 @@ def attach_default_rules(
     kind: str = "unknown",
     schema_columns: Optional[List[Dict[str, Any]]] = None,
     formula_columns: Optional[List[str]] = None,
+    commit: bool = True,
 ) -> Dict[str, Any]:
     """将默认规则集合写入 _table_registry.validation_rules_json（覆盖式 upsert）。"""
     rules = default_rules_for(kind, schema_columns, formula_columns)
@@ -97,8 +98,72 @@ def attach_default_rules(
         "UPDATE _table_registry SET validation_rules_json = ? WHERE table_name = ?",
         (json.dumps(doc, ensure_ascii=False), table_name),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return {"ok": True, "table_name": table_name, "kind": kind, "rules_count": len(rules)}
+
+
+def create_validation_rule(
+    conn: sqlite3.Connection,
+    table_name: str,
+    rules: List[Dict[str, Any]],
+    *,
+    kind: str = "",
+) -> Dict[str, Any]:
+    """为指定表新增或覆盖校验规则。"""
+    cur = conn.execute(
+        "SELECT validation_rules_json FROM _table_registry WHERE table_name = ?",
+        (table_name,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return {"error": f"表 {table_name!r} 不存在于 _table_registry"}
+    if not isinstance(rules, list) or not rules:
+        return {"error": "rules 必填，且至少包含一条规则"}
+
+    raw = row["validation_rules_json"] if isinstance(row, sqlite3.Row) else row[0]
+    try:
+        doc = json.loads(raw or "{}") or {}
+    except (json.JSONDecodeError, TypeError):
+        doc = {}
+
+    existing_rules = list(doc.get("rules") or [])
+    by_id: Dict[str, Dict[str, Any]] = {
+        str(item.get("id", "")): dict(item)
+        for item in existing_rules
+        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    }
+    created_ids: List[str] = []
+    for idx, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            return {"error": f"rules[{idx}] 必须是对象"}
+        rule_id = str(rule.get("id", "")).strip()
+        rule_type = str(rule.get("type", "")).strip()
+        if not rule_id or not rule_type:
+            return {"error": f"rules[{idx}] 缺少 id/type"}
+        normalized = dict(rule)
+        if rule_type == "notnull":
+            normalized["type"] = "not_null"
+        by_id[rule_id] = normalized
+        created_ids.append(rule_id)
+
+    effective_kind = kind or str(doc.get("kind") or "unknown")
+    payload = {
+        "kind": effective_kind,
+        "rules": list(by_id.values()),
+    }
+    conn.execute(
+        "UPDATE _table_registry SET validation_rules_json = ? WHERE table_name = ?",
+        (json.dumps(payload, ensure_ascii=False), table_name),
+    )
+    conn.commit()
+    return {
+        "ok": True,
+        "table_name": table_name,
+        "kind": effective_kind,
+        "created_rule_ids": created_ids,
+        "rules_count": len(payload["rules"]),
+    }
 
 
 def confirm_validation_rule(
@@ -290,6 +355,95 @@ def _evaluate_rules_for_table(conn: sqlite3.Connection, table_name: str) -> Dict
                         "message": "违反 not_null",
                     }
                 )
+            violations.extend(local)
+            summaries.append(
+                {
+                    "rule_id": rid,
+                    "type": rtype,
+                    "column": cq,
+                    "passed": len(local) == 0,
+                    "violation_count": len(local),
+                }
+            )
+            continue
+
+        if rtype in {"gte", "gt", "lte", "lt"} and col:
+            bound = rule.get("value", rule.get("min"))
+            if bound is None:
+                violations.append({"table": t, "rule_id": rid, "message": f"{rtype} 需配置 value"})
+                summaries.append(
+                    {
+                        "rule_id": rid,
+                        "type": rtype,
+                        "column": col,
+                        "passed": False,
+                        "violation_count": 1,
+                    }
+                )
+                continue
+            try:
+                cq = assert_col_or_table(col)
+            except ValueError:
+                violations.append({"table": t, "rule_id": rid, "message": f"非法列 {col}"})
+                summaries.append(
+                    {
+                        "rule_id": rid,
+                        "type": rtype,
+                        "column": col,
+                        "passed": False,
+                        "violation_count": 1,
+                    }
+                )
+                continue
+            try:
+                fbound = float(bound)
+            except (TypeError, ValueError):
+                violations.append({"table": t, "rule_id": rid, "message": f"{rtype} 的 value 非法：{bound!r}"})
+                summaries.append(
+                    {
+                        "rule_id": rid,
+                        "type": rtype,
+                        "column": cq,
+                        "passed": False,
+                        "violation_count": 1,
+                    }
+                )
+                continue
+            cur = conn.execute(f'SELECT row_id, "{cq}" FROM "{t}"')
+            local = []
+            for rr in cur.fetchall():
+                val = rr[cq]
+                if val is None:
+                    continue
+                try:
+                    fv = float(val)
+                except (TypeError, ValueError):
+                    local.append(
+                        {
+                            "table": t,
+                            "rule_id": rid,
+                            "row_id": rr["row_id"],
+                            "column": cq,
+                            "message": f"{rtype}: 非数值 {val!r}",
+                        }
+                    )
+                    continue
+                violated = (
+                    (rtype == "gte" and fv < fbound)
+                    or (rtype == "gt" and fv <= fbound)
+                    or (rtype == "lte" and fv > fbound)
+                    or (rtype == "lt" and fv >= fbound)
+                )
+                if violated:
+                    local.append(
+                        {
+                            "table": t,
+                            "rule_id": rid,
+                            "row_id": rr["row_id"],
+                            "column": cq,
+                            "message": f"{rtype}: {fv} 相对阈值 {fbound} 不满足",
+                        }
+                    )
             violations.extend(local)
             summaries.append(
                 {

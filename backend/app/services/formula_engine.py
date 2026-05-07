@@ -518,6 +518,8 @@ _FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "concat": _concat,
     "text": _text,
     "num": _num,
+    "number": _num,
+    "to_number": _num,
     # 插值
     "interp": _interp,
 }

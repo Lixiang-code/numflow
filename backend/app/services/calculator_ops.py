@@ -38,11 +38,41 @@ def register_calculator(
         raise ValueError(f"calculator 名称非法：{name!r}（要求 a-z/0-9/_）")
     if not brief or not brief.strip():
         raise ValueError("brief 必填，应说明本 calculator 的用途、入参语义、返回值含义")
-    cur = conn.execute("SELECT 1 FROM _table_registry WHERE table_name = ?", (table_name,))
-    if not cur.fetchone():
+    cur = conn.execute(
+        "SELECT matrix_meta_json FROM _table_registry WHERE table_name = ?",
+        (table_name,),
+    )
+    table_row = cur.fetchone()
+    if not table_row:
         raise ValueError(f"目标表 {table_name} 不在 _table_registry")
+    try:
+        mm = json.loads((table_row["matrix_meta_json"] if isinstance(table_row, sqlite3.Row) else table_row[0]) or "{}") or {}
+    except Exception:  # noqa: BLE001
+        mm = {}
+    mm_kind = str(mm.get("kind") or "")
 
-    payload_axes = [dict(a) for a in axes]
+    payload_axes = []
+    normalized_axes = False
+    for axis in axes:
+        axis_item = dict(axis)
+        src = str(axis_item.get("source") or "").strip()
+        if mm_kind in {"matrix_attr", "matrix_resource"}:
+            if src == "row" and mm.get("row_axis"):
+                axis_item["source"] = str(mm.get("row_axis"))
+                normalized_axes = True
+            elif src == "col" and mm.get("col_axis"):
+                axis_item["source"] = str(mm.get("col_axis"))
+                normalized_axes = True
+        elif mm_kind == "3d_matrix":
+            dim1_col = str(((mm.get("dim1") or {}).get("col_name")) or "").strip()
+            dim2_col = str(((mm.get("dim2") or {}).get("col_name")) or "").strip()
+            if src in {"dim1", "@dim1", "dim1_key"} and dim1_col:
+                axis_item["source"] = dim1_col
+                normalized_axes = True
+            elif src in {"dim2", "@dim2", "dim2_key"} and dim2_col:
+                axis_item["source"] = dim2_col
+                normalized_axes = True
+        payload_axes.append(axis_item)
     if grain:
         payload_axes.append({"name": "grain", "source": "_grain", "default": grain})
     now = _now()
@@ -69,7 +99,15 @@ def register_calculator(
         conn.commit()
     except Exception:  # noqa: BLE001
         pass
-    return {"ok": True, "name": name, "axes": payload_axes}
+    result = {"ok": True, "name": name, "axes": payload_axes}
+    warnings: List[str] = []
+    if normalized_axes:
+        warnings.append("已将 axes.source 的简写别名自动展开为目标表的实际列名。")
+    if mm_kind == "3d_matrix" and kind != "lookup":
+        warnings.append("目标表是 3D 表，register_calculator 的 kind 建议使用 lookup。")
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 def list_calculators(conn: sqlite3.Connection) -> List[Dict[str, Any]]:

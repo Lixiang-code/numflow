@@ -16,10 +16,11 @@ from app.routers.agent import _session_tracking_wrapper
 from app.routers.meta import PatchConstantBody, patch_constant
 from app.services.agent_tools import _const_register, _expose_param, _list_exposed_params, dispatch_tool
 from app.services.calculator_ops import call_calculator, register_calculator
+from app.services.matrix_table_ops import create_matrix_table, write_matrix_cells
 from app.services.formula_engine import eval_row_formula, safe_eval_scalar
 from app.services.formula_exec import register_formula, register_row_formula
 from app.services.table_ops import create_3d_table, create_dynamic_table, read_3d_table
-from app.services.validation_report import default_rules_for
+from app.services.validation_report import build_validation_report, default_rules_for
 
 
 def _new_conn() -> sqlite3.Connection:
@@ -41,6 +42,10 @@ def _project_db(conn: sqlite3.Connection) -> ProjectDB:
 def test_formula_engine_supports_coalesce_and_ifnull_for_null_like_values():
     assert safe_eval_scalar("coalesce(None, 5, 7)", {}) == 5
     assert safe_eval_scalar("ifnull(v, 9)", {"v": math.nan}) == 9
+
+
+def test_formula_engine_supports_number_aliases():
+    assert safe_eval_scalar("NUMBER('3') + TO_NUMBER('4')", {}) == 7.0
 
 
 def test_formula_engine_multiplies_arrays_elementwise():
@@ -325,6 +330,69 @@ def test_create_3d_table_supports_call_calculator_formula():
     assert snap["data"]["1"]["def"]["attr_value"] == 20.0
 
 
+def test_register_formula_supports_call_calculator_from_3d_lookup_source():
+    conn = _new_conn()
+    create_3d_table(
+        conn,
+        table_name="monster_model_3d",
+        display_name="怪物模板",
+        dim1={
+            "col_name": "level",
+            "display_name": "等级",
+            "keys": [{"key": "1", "display_name": "1级"}],
+        },
+        dim2={
+            "col_name": "attr",
+            "display_name": "属性",
+            "keys": [{"key": "hp", "display_name": "生命"}, {"key": "atk", "display_name": "攻击"}],
+        },
+        cols=[{"key": "value", "display_name": "数值"}],
+    )
+    conn.execute('UPDATE "monster_model_3d" SET "value" = ? WHERE row_id = ?', (100.0, "1_hp"))
+    conn.execute('UPDATE "monster_model_3d" SET "value" = ? WHERE row_id = ?', (50.0, "1_atk"))
+    register_calculator(
+        conn,
+        name="monster_model_lookup",
+        kind="lookup",
+        table_name="monster_model_3d",
+        axes=[
+            {"name": "level", "source": "level"},
+            {"name": "attr", "source": "attr"},
+        ],
+        value_column="value",
+        brief="按等级和属性查询怪物模板值",
+    )
+    create_3d_table(
+        conn,
+        table_name="stage_attribute_output",
+        display_name="阶段属性产出",
+        dim1={
+            "col_name": "level",
+            "display_name": "等级",
+            "keys": [{"key": "1", "display_name": "1级"}],
+        },
+        dim2={
+            "col_name": "attr_type",
+            "display_name": "属性",
+            "keys": [{"key": "hp", "display_name": "生命"}, {"key": "atk", "display_name": "攻击"}],
+        },
+        cols=[{"key": "result", "display_name": "结果"}],
+    )
+    conn.commit()
+
+    result = register_formula(
+        conn,
+        "stage_attribute_output",
+        "result",
+        "call_calculator('monster_model_lookup', @level, @attr_type)",
+    )
+
+    assert result["ok"] is True
+    snap = read_3d_table(conn, table_name="stage_attribute_output")
+    assert snap["data"]["1"]["hp"]["result"] == 100.0
+    assert snap["data"]["1"]["atk"]["result"] == 50.0
+
+
 def test_register_formula_allows_interp_with_constant_refs():
     conn = _new_conn()
     _const_register(
@@ -363,7 +431,7 @@ def test_register_formula_allows_interp_with_constant_refs():
     assert value == 50.0
 
 
-def test_write_cells_returns_large_payload_warning():
+def test_write_cells_small_payload_does_not_warn():
     conn = _new_conn()
     create_dynamic_table(
         conn,
@@ -379,6 +447,29 @@ def test_write_cells_returns_large_payload_warning():
         dispatch_tool(
             "write_cells",
             {"table_name": "write_warn_target", "updates": updates},
+            _project_db(conn),
+        )
+    )
+    assert result["status"] == "success"
+    assert not any("payload 较长" in warning for warning in result.get("warnings", []))
+
+
+def test_write_cells_large_payload_still_warns():
+    conn = _new_conn()
+    create_dynamic_table(
+        conn,
+        table_name="write_warn_large_target",
+        display_name="大写入预警表",
+        columns=[("note", "TEXT")],
+    )
+    updates = [
+        {"row_id": f"row_{i}", "column": "note", "value": f"备注内容_{i}"}
+        for i in range(220)
+    ]
+    result = json.loads(
+        dispatch_tool(
+            "write_cells",
+            {"table_name": "write_warn_large_target", "updates": updates},
             _project_db(conn),
         )
     )
@@ -686,6 +777,36 @@ def test_register_formula_aligns_3d_refs_by_dimension_metadata_when_column_names
     ]
 
 
+def test_create_3d_table_attaches_default_validation_rules_when_kind_provided():
+    conn = _new_conn()
+    result = create_3d_table(
+        conn,
+        table_name="partner_equip_3d",
+        display_name="伙伴装备",
+        kind="attr",
+        dim1={
+            "col_name": "level",
+            "display_name": "等级",
+            "keys": [{"key": "1", "display_name": "1级"}],
+        },
+        dim2={
+            "col_name": "slot",
+            "display_name": "槽位",
+            "keys": [{"key": "weapon", "display_name": "武器"}],
+        },
+        cols=[{"key": "atk", "display_name": "攻击"}],
+    )
+    assert result["ok"] is True
+    rules_doc = json.loads(
+        conn.execute(
+            "SELECT validation_rules_json FROM _table_registry WHERE table_name = ?",
+            ("partner_equip_3d",),
+        ).fetchone()[0]
+    )
+    assert rules_doc["kind"] == "attr"
+    assert any(rule["type"] == "not_empty_id" for rule in rules_doc["rules"])
+
+
 def test_add_column_tool_updates_physical_table_and_schema():
     conn = _new_conn()
     create_dynamic_table(
@@ -722,6 +843,41 @@ def test_add_column_tool_updates_physical_table_and_schema():
     assert note_meta["number_format"] == "@"
 
 
+def test_add_columns_tool_updates_3d_metadata_and_works_without_manual_commit():
+    conn = _new_conn()
+    create_3d_table(
+        conn,
+        table_name="equip_base_3d",
+        display_name="装备基础",
+        dim1={
+            "col_name": "level",
+            "display_name": "等级",
+            "keys": [{"key": "1", "display_name": "1级"}],
+        },
+        dim2={
+            "col_name": "attr",
+            "display_name": "属性",
+            "keys": [{"key": "atk", "display_name": "攻击"}],
+        },
+        cols=[{"key": "base_value", "display_name": "基础值"}],
+    )
+
+    result = json.loads(
+        dispatch_tool(
+            "add_columns",
+            {
+                "table_name": "equip_base_3d",
+                "items": [{"column_name": "grow_value", "sql_type": "REAL", "display_name": "成长值"}],
+            },
+            _project_db(conn),
+        )
+    )
+
+    assert result["status"] == "success"
+    snap = read_3d_table(conn, table_name="equip_base_3d")
+    assert any(col["key"] == "grow_value" for col in snap["cols"])
+
+
 def test_add_columns_tool_creates_multiple_columns_in_one_call():
     conn = _new_conn()
     create_dynamic_table(
@@ -756,6 +912,95 @@ def test_add_columns_tool_creates_multiple_columns_in_one_call():
     ).fetchone()[0]
     schema = json.loads(schema_json)
     assert {col["name"] for col in schema["columns"]} >= {"level", "note", "ratio"}
+
+
+def test_create_validation_rule_tool_supports_gte_rules():
+    conn = _new_conn()
+    create_dynamic_table(
+        conn,
+        table_name="validation_target",
+        display_name="校验目标",
+        columns=[("level", "INTEGER"), ("value", "REAL")],
+    )
+    conn.execute(
+        'INSERT INTO "validation_target" (row_id, "level", "value") VALUES (?, ?, ?)',
+        ("r1", 1, 0.0),
+    )
+    conn.commit()
+
+    result = json.loads(
+        dispatch_tool(
+            "create_validation_rule",
+            {
+                "table_name": "validation_target",
+                "kind": "attr",
+                "rules": [{"id": "value_gte_1", "type": "gte", "column": "value", "value": 1}],
+            },
+            _project_db(conn),
+        )
+    )
+    assert result["status"] == "success"
+
+    validation = build_validation_report(conn, filter_table="validation_target")
+    assert any(row["rule_id"] == "value_gte_1" for row in validation["rule_summaries"])
+    assert any(row["rule_id"] == "value_gte_1" for row in validation["violations"])
+
+
+def test_register_calculator_row_col_shorthand_works_for_matrix_resource():
+    conn = _new_conn()
+    create_matrix_table(
+        conn,
+        table_name="gameplay_res_alloc",
+        display_name="资源分配",
+        kind="matrix_resource",
+        rows=[{"key": "equip_base", "display_name": "装备基础", "brief": ""}],
+        cols=[{"key": "gold", "display_name": "金币", "brief": ""}],
+        scale_mode="fallback",
+        register_calc=False,
+    )
+    write_matrix_cells(
+        conn,
+        table_name="gameplay_res_alloc",
+        cells=[{"row": "equip_base", "col": "gold", "value": 100.0}],
+    )
+    register_calculator(
+        conn,
+        name="gameplay_res_alloc_lookup",
+        kind="lookup",
+        table_name="gameplay_res_alloc",
+        axes=[
+            {"name": "gameplay", "source": "row"},
+            {"name": "res_id", "source": "col"},
+            {"name": "level", "source": "level"},
+        ],
+        value_column="value",
+        brief="按玩法/资源查询投放值",
+    )
+
+    result = call_calculator(
+        conn,
+        name="gameplay_res_alloc_lookup",
+        kwargs={"gameplay": "equip_base", "res_id": "gold", "level": 5},
+    )
+    assert result["found"] is True
+    assert result["value"] == 100.0
+
+
+def test_const_register_does_not_warn_for_brief_percent_phrase():
+    conn = _new_conn()
+    result = _const_register(
+        conn,
+        {
+            "name_en": "growth_ratio",
+            "name_zh": "成长率",
+            "value": 0.05,
+            "brief": "经验产出增长率5%/级",
+            "tags": ["combat"],
+        },
+        True,
+    )
+    assert result["ok"] is True
+    assert "warning" not in result
 
 
 def test_write_cells_series_supports_text_columns():

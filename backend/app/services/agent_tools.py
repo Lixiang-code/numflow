@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import sqlite3
 from itertools import product
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
@@ -38,6 +39,7 @@ from app.services.validation_report import (
     attach_default_rules,
     build_validation_report,
     confirm_validation_rule as _confirm_validation_rule,
+    create_validation_rule as _create_validation_rule,
     list_validation_history,
 )
 
@@ -643,6 +645,45 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "create_validation_rule",
+            "description": (
+                "为指定表新增或覆盖校验规则。适用于 run_validation 提示“未配置校验规则”时补齐规则。"
+                "支持 not_null/notnull、gte/gt/lte/lt、min_max、percent_bounds、formula_has_value 等类型。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {"type": "string", "description": "规则所在的表"},
+                    "kind": {"type": "string", "enum": ["base", "alloc", "attr", "quant", "landing", "resource", "unknown"]},
+                    "rules": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "type": {"type": "string"},
+                                "column": {"type": "string"},
+                                "value": {"type": "number"},
+                                "min": {"type": "number"},
+                                "max": {"type": "number"},
+                                "pattern": {"type": "string"},
+                                "order_by": {"type": "string"},
+                                "confirmed": {"type": "boolean"},
+                                "confirmed_reason": {"type": "string"},
+                            },
+                            "required": ["id", "type"],
+                            "additionalProperties": True,
+                        },
+                    },
+                },
+                "required": ["table_name", "rules"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "confirm_validation_rule",
             "description": (
                 "将指定校验规则标记为「已确认通过」，后续 run_validation 将跳过该规则报警。\n"
@@ -754,7 +795,8 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "  比较：< <= > >= == !=（支持 @@col 与标量/@@col2 逐元素广播，返回 bool 列表）\n"
                 "  查找：VLOOKUP(val,@@lkup,@@ret,[exact]) / XLOOKUP(val,@@lkup,@@ret,[ifna]) / "
                 "INDEX(@@col,row) / MATCH(val,@@col) / LOOKUP(val,@@lkup,@@ret)\n"
-                "  插值：interp(x, x1,y1, x2,y2, ...) 分段线性插值。★ y 值禁止裸数字，须用 ${name} 常量引用。"
+                "  类型转换：NUM/NUMBER/TO_NUMBER(x) 转数值；TEXT(x) 转文本\n"
+                "  插值：interp(x, x1,y1, x2,y2, ...) 分段线性插值；y 值可直接写裸数字，也可用 ${name} 常量引用。"
                 "x 超出范围时夹持到最近端点。\n"
                 "  聚合：SUM(@@col) / AVERAGE(@@col) / COUNT(@@col)\n"
                 "  条件聚合：SUM(IF(@@col < @表[col], @@val, 0))（典型：累计经验 / 前缀和）\n"
@@ -1234,8 +1276,9 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
         "function": {
             "name": "register_calculator",
             "description": (
-                "把一张 matrix 表（或普通表）注册为可被查询的 calculator。"
-                "axes 描述形参 → 数据库列的映射。brief 必填，应说明用途与入参语义。"
+                "把一张 matrix / 3D / 普通表注册为可被查询的 calculator。"
+                "axes 描述形参 → 数据库列的映射；matrix 表支持 source=row/col 简写，3D 表建议使用 kind=lookup。"
+                "brief 必填，应说明用途与入参语义。"
             ),
             "parameters": {
                 "type": "object",
@@ -1431,6 +1474,7 @@ TOOLS_OPENAI: List[Dict[str, Any]] = [
                 "properties": {
                     "table_name": {"type": "string", "description": "英文 snake_case 表名"},
                     "display_name": {"type": "string", "description": "中文显示名，必填"},
+                    "kind": {"type": "string", "enum": ["base", "alloc", "attr", "quant", "landing", "resource"]},
                     "dim1": {
                         "type": "object",
                         "description": (
@@ -1737,6 +1781,7 @@ _TOOL_TITLE_ZH: Dict[str, str] = {
     "get_algorithm_api_list": "列出算法接口",
     "call_algorithm_api": "调用算法接口",
     "run_validation": "运行校验",
+    "create_validation_rule": "创建校验规则",
     "confirm_validation_rule": "确认校验规则",
     "delete_table": "删除业务表",
     "create_snapshot": "创建快照",
@@ -1805,6 +1850,7 @@ _TOOL_GROUP_BY_NAME: Dict[str, str] = {
     "bulk_register_and_compute": "compute_formula",
     "setup_level_table": "compute_formula",
     "run_validation": "validation_snapshot",
+    "create_validation_rule": "validation_snapshot",
     "confirm_validation_rule": "validation_snapshot",
     "create_snapshot": "validation_snapshot",
     "list_snapshots": "validation_snapshot",
@@ -1872,6 +1918,7 @@ _TOOL_SUMMARY_ZH: Dict[str, str] = {
     "get_algorithm_api_list": "列出当前项目可调用的外部算法接口清单。",
     "call_algorithm_api": "调用指定算法接口并获取计算结果。",
     "run_validation": "对指定表运行数值校验规则并返回违规结果。",
+    "create_validation_rule": "为指定表新增或覆盖校验规则，补齐 run_validation 所依赖的规则集。",
     "confirm_validation_rule": "确认并保存一条数值校验规则。",
     "delete_table": "删除指定的业务数据表（不可恢复）。",
     "create_snapshot": "为当前项目创建一个数据快照版本以便回溯。",
@@ -3512,7 +3559,7 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                         source_tag=tag,
                     )
                     updates_json = json.dumps(updates, ensure_ascii=False)
-                    if len(updates_json) > 800:
+                    if len(updates) > 200 or len(updates_json) > 16000:
                         out.setdefault("warnings", []).append(
                             "本次 write_cells payload 较长；若后续出现 JSON 解析错误或参数被截断，请拆成更小批次提交。"
                         )
@@ -3587,6 +3634,13 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
         tn = args.get("table_name")
         ft = str(tn) if tn else None
         out = build_validation_report(conn, filter_table=ft)
+    elif name == "create_validation_rule":
+        out = _create_validation_rule(
+            conn,
+            str(args.get("table_name", "")),
+            args.get("rules") or [],
+            kind=str(args.get("kind", "")),
+        )
     elif name == "confirm_validation_rule":
         out = _confirm_validation_rule(
             conn,
@@ -3869,6 +3923,7 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                     purpose=str(args.get("purpose", "")),
                     directory=str(args.get("directory", "")),
                     tags=args.get("tags") or [],
+                    kind=str(args.get("kind", "")),
                 )
             except Exception as e:  # noqa: BLE001
                 out = {
@@ -4289,18 +4344,22 @@ def _check_value_formula_suspicion(value, brief: str) -> Optional[str]:
     eff = _count_effective_digits(v)
     if eff >= 3:
         formula_reasons.append(f"有效数字={eff}位")
-    formula_syms = '+−*/=×÷^'
+    formula_syms = '+*=×÷^'
     if any(c in brief for c in formula_syms):
         hits = [c for c in formula_syms if c in brief]
         formula_reasons.append(f"brief含运算符{'/'.join(hits)}")
     if formula_reasons:
         warnings_list.append(f"疑是 formula 常量被填写为 value 常量，请考虑改为 formula（{'；'.join(formula_reasons)}）")
 
-    # 检查 3：brief 中固化了 value 的数字
-    brief_digits = set(c for c in brief if c.isdigit())
-    val_digits = set(c for c in str(value) if c.isdigit())
-    if brief_digits & val_digits:
-        warnings_list.append("疑是brief中固化了value，请注意规范：brief应该是概念描述")
+    # 检查 3：brief 中是否直接出现与 value 相同的字面量
+    literal_forms = set()
+    if float(v).is_integer():
+        literal_forms.add(str(int(v)))
+    literal_forms.add(str(v).rstrip("0").rstrip("."))
+    for literal in [s for s in literal_forms if s]:
+        if re.search(rf"(?<![\d.%]){re.escape(literal)}(?![\d.%])", brief):
+            warnings_list.append("疑是brief中固化了value，请注意规范：brief应该是概念描述")
+            break
 
     if warnings_list:
         return '\n'.join(warnings_list)
@@ -4938,7 +4997,7 @@ def _add_column_impl(
         return {"error": f"sql_type 非法：{sql_type or '<empty>'}"}
 
     row = conn.execute(
-        "SELECT schema_json, validation_rules_json FROM _table_registry WHERE table_name = ?",
+        "SELECT schema_json, validation_rules_json, matrix_meta_json FROM _table_registry WHERE table_name = ?",
         (table_name,),
     ).fetchone()
     if not row:
@@ -4970,9 +5029,27 @@ def _add_column_impl(
         }
     )
     schema["columns"] = schema_cols
+    matrix_meta_json = row["matrix_meta_json"] if isinstance(row, sqlite3.Row) else row[2]
+    try:
+        matrix_meta = json.loads(matrix_meta_json or "{}") or {}
+    except Exception:
+        matrix_meta = {}
+    if matrix_meta.get("kind") == "3d_matrix":
+        metric_cols = list(matrix_meta.get("cols") or [])
+        if not any(str(item.get("key") or "").strip() == column_name for item in metric_cols if isinstance(item, dict)):
+            metric_cols.append(
+                {
+                    "key": column_name,
+                    "display_name": display_name or column_name,
+                    "dtype": dtype_map[sql_type],
+                    "number_format": number_format,
+                    "formula": "",
+                }
+            )
+            matrix_meta["cols"] = metric_cols
     conn.execute(
-        "UPDATE _table_registry SET schema_json = ? WHERE table_name = ?",
-        (json.dumps(schema, ensure_ascii=False), table_name),
+        "UPDATE _table_registry SET schema_json = ?, matrix_meta_json = ? WHERE table_name = ?",
+        (json.dumps(schema, ensure_ascii=False), json.dumps(matrix_meta, ensure_ascii=False), table_name),
     )
 
     validation_rules_json = row["validation_rules_json"] if isinstance(row, sqlite3.Row) else row[1]
@@ -4996,6 +5073,7 @@ def _add_column_impl(
             kind=rule_kind,
             schema_columns=schema_cols,
             formula_columns=formula_cols,
+            commit=commit,
         )
     except sqlite3.OperationalError:
         pass
@@ -5046,7 +5124,7 @@ def _add_columns(
         return {"error": "items 必填，且至少包含一个列定义"}
 
     try:
-        conn.execute("BEGIN")
+        conn.execute("SAVEPOINT add_columns_batch")
         created: List[Dict[str, Any]] = []
         for idx, item in enumerate(items):
             try:
@@ -5071,9 +5149,11 @@ def _add_columns(
                     "sql_type": result["sql_type"],
                 }
             )
+        conn.execute("RELEASE SAVEPOINT add_columns_batch")
         conn.commit()
     except Exception as e:
-        conn.rollback()
+        conn.execute("ROLLBACK TO SAVEPOINT add_columns_batch")
+        conn.execute("RELEASE SAVEPOINT add_columns_batch")
         return {"error": str(e)}
     return {"ok": True, "table_name": table_name, "created": created, "count": len(created)}
 
