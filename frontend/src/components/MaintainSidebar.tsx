@@ -160,10 +160,31 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
         credentials: 'include',
         headers,
       })
+      // 立即从 state 移除，无需等待服务端重新拉取
+      setSessions((prev) => prev.filter((s) => s.id !== sid))
       if (activeSessionId === sid) handleNewSession()
-      loadSessions()
     } catch { /* ignore */ }
   }
+
+  /** 调用后端为指定会话生成 AI 标题，成功后更新列表显示 */
+  const generateSessionTitle = useCallback(async (sid: number) => {
+    if (!projectId) return
+    try {
+      const res = await fetch(`/api/agent/maintain/sessions/${sid}/generate_title`, {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+      })
+      if (res.ok) {
+        const data = await res.json() as { session_id: number; session_name: string }
+        if (data.session_name) {
+          setSessions((prev) =>
+            prev.map((s) => (s.id === data.session_id ? { ...s, session_name: data.session_name } : s))
+          )
+        }
+      }
+    } catch { /* ignore */ }
+  }, [projectId, headers])
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -183,6 +204,7 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
 
     let assistantContent = ''
     const toolDetails: ToolDetail[] = []
+    let freshSessionId: number | null = null   // 由 session_init 填入
     setMessages((prev) => [...prev, { role: 'assistant', content: '', tool_details: [] }])
 
     try {
@@ -224,16 +246,9 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
             if (etype === 'session_init') {
               // 后端返回 session_id，更新本地状态以保证多轮对话连续
               const sid = ev.session_id as number
-              if (sid) setActiveSessionId(sid)
-
-            } else if (etype === 'session_renamed') {
-              // 后端生成标题后实时更新会话列表
-              const sid = ev.session_id as number
-              const newName = (ev.session_name as string) || ''
-              if (sid && newName) {
-                setSessions((prev) =>
-                  prev.map((s) => (s.id === sid ? { ...s, session_name: newName } : s))
-                )
+              if (sid) {
+                freshSessionId = sid
+                setActiveSessionId(sid)
               }
 
             } else if (etype === 'token') {
@@ -279,8 +294,13 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
               })
               setStreamingText('')
               setLiveEvents([])
-              // 新会话首轮结束后刷新列表（此时标题可能已被 session_renamed 更新）
-              if (wasNewSession) { loadSessions() }
+              if (wasNewSession) {
+                // 先刷新列表（加入新会话），再异步生成 AI 标题并更新
+                const sidForTitle = freshSessionId
+                loadSessions().then(() => {
+                  if (sidForTitle) generateSessionTitle(sidForTitle)
+                })
+              }
             }
           } catch { /* ignore */ }
         }

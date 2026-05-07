@@ -517,9 +517,6 @@ def maintain_chat(
         model=_project_model,
     )
 
-    # SSE 流式响应 + 会话持久化（同步生成器，避免 async 导致缓冲）
-    _was_new_session = body.session_id is None  # 本次是否新建了会话
-
     def _tracked_gen():
         # 第一个事件：把 session_id 发回客户端，保证同一窗口多轮对话连续
         if session_id is not None:
@@ -562,42 +559,64 @@ def maintain_chat(
                                 append_maintain_session_messages(p.conn, session_id, chat_history)
                         except Exception:  # noqa: BLE001
                             pass
-
-                        # 首轮新会话：用 AI 生成简短标题并回传客户端
-                        if _was_new_session and session_id:
-                            try:
-                                title_msgs = [
-                                    {
-                                        "role": "system",
-                                        "content": (
-                                            "根据用户的消息，用4到10个字给本次对话起一个简洁标题。"
-                                            "如果用户在消息中明确要求了一个标题（如'标题设为xxx'、"
-                                            "'把标题设置为：xxx'、'标题:xxx'），请直接使用该标题，"
-                                            "不要改写。只输出标题文字，不要引号、序号或任何其他内容。"
-                                        ),
-                                    },
-                                    {"role": "user", "content": body.message},
-                                ]
-                                title, _ = qwen_client.chat_once(
-                                    title_msgs,
-                                    temperature=0,
-                                    max_tokens=24,
-                                    model=_project_model,
-                                )
-                                title = title.strip().strip('"').strip("'").strip("《》").strip()[:60]
-                                if title:
-                                    rename_maintain_session(p.conn, session_id, title)
-                                    yield sse_event({
-                                        "type": "session_renamed",
-                                        "session_id": session_id,
-                                        "session_name": title,
-                                    })
-                            except Exception:  # noqa: BLE001
-                                pass
             except Exception:  # noqa: BLE001
                 pass
 
     return StreamingResponse(_tracked_gen(), media_type="text/event-stream")
+
+
+@router.post("/maintain/sessions/{maint_session_id}/generate_title")
+def maintain_session_generate_title(
+    maint_session_id: int,
+    p: ProjectDB = Depends(get_project_write),
+) -> Dict[str, Any]:
+    """为维护会话生成简短 AI 标题并更新 DB，返回生成的标题。"""
+    # 读取首条用户消息
+    try:
+        msgs = get_maintain_session_messages(p.conn, maint_session_id)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail="session not found")
+
+    first_user = next((m.get("content", "") for m in msgs if m.get("role") == "user"), "")
+    if not first_user:
+        raise HTTPException(status_code=400, detail="no user message found")
+
+    # 读取项目绑定模型
+    _project_model: Optional[str] = None
+    try:
+        row = p.conn.execute(
+            "SELECT value_json FROM project_settings WHERE key = 'agent_model'"
+        ).fetchone()
+        if row:
+            _project_model = json.loads(row[0]) if row[0] else None
+    except Exception:  # noqa: BLE001
+        pass
+
+    title_msgs = [
+        {
+            "role": "system",
+            "content": (
+                "根据用户的消息，用4到10个字给本次对话起一个简洁标题。"
+                "只输出标题文字，不要引号、序号或任何其他内容。"
+            ),
+        },
+        {"role": "user", "content": first_user[:500]},
+    ]
+    try:
+        title, _ = qwen_client.chat_once(
+            title_msgs,
+            temperature=0,
+            max_tokens=24,
+            model=_project_model,
+        )
+        title = title.strip().strip('"\'《》').strip()[:60]
+        if not title:
+            raise ValueError("empty title")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"title generation failed: {exc}") from exc
+
+    rename_maintain_session(p.conn, maint_session_id, title)
+    return {"session_id": maint_session_id, "session_name": title}
 
 
 @router.get("/maintain/sessions")
