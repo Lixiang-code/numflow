@@ -169,14 +169,17 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
   /** 调用后端为指定会话生成 AI 标题，成功后更新列表显示 */
   const generateSessionTitle = useCallback(async (sid: number) => {
     if (!projectId) return
+    console.log('[标题生成] 调用 API, sid:', sid)
     try {
       const res = await fetch(`/api/agent/maintain/sessions/${sid}/generate_title`, {
         method: 'POST',
         credentials: 'include',
         headers,
       })
+      console.log('[标题生成] API 响应:', res.status)
       if (res.ok) {
         const data = await res.json() as { session_id: number; session_name: string }
+        console.log('[标题生成] 返回标题:', data.session_name)
         if (data.session_name) {
           setSessions((prev) =>
             prev.map((s) => (s.id === data.session_id ? { ...s, session_name: data.session_name } : s))
@@ -297,12 +300,14 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
               if (wasNewSession) {
                 // 先刷新列表（加入新会话），再异步生成 AI 标题并更新
                 const sidForTitle = freshSessionId
+                console.log('[标题生成] done触发, wasNewSession=true, freshSessionId:', sidForTitle)
                 loadSessions().then(() => {
+                  console.log('[标题生成] loadSessions完成, 调用generateSessionTitle, sid:', sidForTitle)
                   if (sidForTitle) generateSessionTitle(sidForTitle)
                 })
               }
             }
-          } catch { /* ignore */ }
+          } catch { /* ignore SSE parse errors */ }
         }
       }
     } catch (err) {

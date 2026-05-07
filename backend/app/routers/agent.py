@@ -606,16 +606,19 @@ def maintain_session_generate_title(
         title, _ = qwen_client.chat_once(
             title_msgs,
             temperature=0,
-            max_tokens=24,
+            max_tokens=128,
             model=_project_model,
         )
         title = title.strip().strip('"\'《》').strip()[:60]
         if not title:
-            raise ValueError("empty title")
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"title generation failed: {exc}") from exc
+            title = first_user[:20].strip()
+        if not title:
+            title = "新会话"
+    except Exception:  # noqa: BLE001
+        title = first_user[:20].strip() or "新会话"
 
     rename_maintain_session(p.conn, maint_session_id, title)
+    print(f"[标题生成API] 已保存标题: [{title}]", flush=True)
     return {"session_id": maint_session_id, "session_name": title}
 
 
