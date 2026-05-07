@@ -104,13 +104,18 @@ function parseFormulaRefs(text: string): { colRefs: string[]; constRefs: string[
 function renderColoredFormula(formula: string, colorMap: Map<string, string>, colDisplay: Map<string, string> = new Map(), constDisplay: Map<string, string> = new Map(), tableDisplay: Map<string, string> = new Map()): React.ReactNode[] {
   const parts = formula.split(/(@@?\w+\[\w+\]|@\w+|\$\{\w+\})/g)
   return parts.map((part, i) => {
-    // @@table[col] / @table[col]
-    const crossRefMatch = part.match(/^(@{1,2})(\w+)\[(\w+)\]$/)
+    // @@table[col] / @table[col] / @T[col] / @this[col]
+    const crossRefMatch = part.match(/^(@{1,2})(T|this|[\w]+)\[(\w+)\]$/)
     if (crossRefMatch) {
       const at = crossRefMatch[1]
       const tname = crossRefMatch[2]
       const cname = crossRefMatch[3]
-      const td = tableDisplay.get(tname) || tname
+      let td: string
+      if (tname === 'T' || tname === 'this') {
+        td = tableDisplay.get(tableName) || tableName  // 本表显示名
+      } else {
+        td = tableDisplay.get(tname) || tname
+      }
       const cd = colDisplay.get(cname) || cname
       const label = `${at}${td}[${cd}]`
       const color = colorMap.get(cname)

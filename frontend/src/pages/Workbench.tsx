@@ -1594,8 +1594,13 @@ export default function Workbench() {
     if (!text) return text
     let out = text
     // 替换 @table[col] / @@table[col] → @表显示名[列显示名]
-    out = out.replace(/(@{1,2})(\w+)\[(\w+)\]/g, (_, at, tname, cname) => {
-      const td = tableDispMap.get(tname) || tname
+    // 同时处理 @T[col] / @this[col] 等本表引用缩写
+    const curTable = selected || ''
+    const curTableDisp = tableDispMap.get(curTable) || curTable
+    out = out.replace(/(@{1,2})(T|this|[\w]+)\[(\w+)\]/g, (_, at, tname, cname) => {
+      let td: string
+      if (tname === 'T' || tname === 'this') td = curTableDisp
+      else td = tableDispMap.get(tname) || tname
       const cm = colMetaArr.find((m) => m.name === cname)
       const cd = cm?.display_name || cname
       return `${at}${td}[${cd}]`
@@ -1796,16 +1801,12 @@ export default function Workbench() {
           </select>
           {modelSwitching && <span style={{ marginLeft: 4, fontSize: '0.7rem' }}>切换中…</span>}
         </span>
+        <label style={{ fontSize: '0.78rem', cursor: 'pointer', userSelect: 'none', marginLeft: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <input type="checkbox" checked={showEnNames} onChange={e => setShowEnNames(e.target.checked)} />
+          英文名
+        </label>
       </header>
       {err && <p className="err banner">{err}</p>}
-      {validateReport && !validateReport.passed && (
-        <p className="banner warn" style={{ margin: '0.5rem 1rem' }}>
-          校验：{(validateReport.warnings ?? []).join('；')}
-          {(validateReport.violations?.length ?? 0) > 0
-            ? `（规则违反 ${validateReport.violations!.length} 条）`
-            : ''}
-        </p>
-      )}
       {validateReport && (validateReport.rule_summaries?.length ?? 0) > 0 && (() => {
         const allSummaries = validateReport.rule_summaries ?? []
         const failed = allSummaries.filter(
@@ -2054,12 +2055,6 @@ export default function Workbench() {
             </div>
           )}
           <h3>{selected || '未选择表'}</h3>
-          <div className="wb-toolbar" style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
-            <label style={{ fontSize: 12, cursor: 'pointer', userSelect: 'none' }}>
-              <input type="checkbox" checked={showEnNames} onChange={e => setShowEnNames(e.target.checked)} />
-              {' '}显示英文名
-            </label>
-          </div>
           <div className="wb-formula-bar">
             <span className="wb-formula-bar-label">
               {formulaBarCol ? (
@@ -2087,7 +2082,7 @@ export default function Workbench() {
                   const constMap = new Map(allConstants.map((c: any) => [c.name_en, c]))
                   const translated = translateFormulaDisplay(formulaBarText, meta, constMap, tableDispMap)
                   return translated !== formulaBarText ? (
-                    <span className="wb-formula-translated muted" style={{ fontSize: 11, fontFamily: 'monospace', marginBottom: 2, display: 'block' }}>
+                    <span className="wb-formula-translated muted" style={{ fontSize: 12, fontFamily: 'monospace', marginBottom: 2, display: 'block', fontWeight: 500 }}>
                       {translated}
                     </span>
                   ) : null
