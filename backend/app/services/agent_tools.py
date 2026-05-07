@@ -3619,6 +3619,8 @@ def dispatch_tool(name: str, arguments: Union[str, Dict[str, Any], None], p: Pro
                         )
                     rids = [str(u.get("row_id", "")) for u in updates]
                     dim_warn = _detect_dim_encoded_rows(rids)
+                    if not dim_warn:
+                        dim_warn = _detect_row_id_cross_product(rids)
                     if dim_warn and isinstance(out, dict) and out.get("applied"):
                         out["_notice"] = dim_warn
                 except ValueError as e:
@@ -4363,6 +4365,112 @@ def _detect_dim_encoded_rows(row_ids: List[str]) -> Optional[str]:
     )
 
 
+def _detect_row_id_cross_product(row_ids: List[str]) -> Optional[str]:
+    """检测 row_id 是否编码了 dim1_dim2 笛卡尔积结构（应建模为三维表的反模式）。
+
+    分别从左侧和右侧按 _ 拆分 row_id，对每个拆分深度检查是否存在 ≥2 个左部 × ≥2 个右部，
+    且实际行数覆盖了笛卡尔积的大部分，判定为二维表内编码了行列双维度。
+
+    支持变长片段：main_hand_white（3段）和 armor_white（2段）并存时，
+    从右侧取 1 段 → left={main_hand, armor}  right={white} → 类聚正确。
+    例：main_hand_white, armor_green → 6个槽位 × 5个品质 = 30行 → 触发。
+    """
+    if not row_ids or len(row_ids) < 4:
+        return None
+
+    unique_ids = [rid for rid in dict.fromkeys(row_ids)]
+    if len(unique_ids) < 4:
+        return None
+
+    # 剥离所有行共有的前缀段（如所有 ID 都以 sys_equip_ 开头），
+    # 避免公共前缀污染左侧维度，导致漏检
+    all_parts = [rid.split("_") for rid in unique_ids]
+    min_seg = min(len(p) for p in all_parts)
+    common_prefix_len = 0
+    for i in range(min_seg):
+        seg = all_parts[0][i]
+        if all(p[i] == seg for p in all_parts):
+            common_prefix_len = i + 1
+        else:
+            break
+    if common_prefix_len > 0:
+        unique_ids = [
+            "_".join(p[common_prefix_len:]) for p in all_parts
+        ]
+        unique_ids = [rid for rid in dict.fromkeys(unique_ids) if rid]
+        if len(unique_ids) < 4:
+            return None
+
+    max_parts = max(len(rid.split("_")) for rid in unique_ids)
+
+    def _check_split(fixed_count: int, from_right: bool) -> Optional[str]:
+        left_list: List[str] = []
+        right_list: List[str] = []
+        seen_pairs: set = set()
+        skipped = 0
+
+        for rid in unique_ids:
+            parts = rid.split("_")
+            if len(parts) <= fixed_count:
+                skipped += 1
+                continue
+            if from_right:
+                left = "_".join(parts[:-fixed_count])
+                right = "_".join(parts[-fixed_count:])
+            else:
+                left = "_".join(parts[:fixed_count])
+                right = "_".join(parts[fixed_count:])
+            if not left or not right:
+                skipped += 1
+                continue
+            if left not in left_list:
+                left_list.append(left)
+            if right not in right_list:
+                right_list.append(right)
+            seen_pairs.add((left, right))
+
+        if skipped > len(unique_ids) * 0.3:
+            return None
+        if len(left_list) < 2 or len(right_list) < 2:
+            return None
+        if min(len(left_list), len(right_list)) < 2:
+            return None
+
+        product = len(left_list) * len(right_list)
+        coverage = len(seen_pairs) / product if product > 0 else 0
+
+        if coverage >= 0.5 and len(seen_pairs) >= 4:
+            left_sample = ", ".join(left_list[:4])
+            if len(left_list) > 4:
+                left_sample += f" 等{len(left_list)}项"
+            right_sample = ", ".join(right_list[:4])
+            if len(right_list) > 4:
+                right_sample += f" 等{len(right_list)}项"
+            return (
+                f"疑是row_id编码了笛卡尔积结构——{len(left_list)} 个前缀（{left_sample}）"
+                f"× {len(right_list)} 个后缀（{right_sample}），"
+                f"覆盖率 {coverage:.0%}（{len(seen_pairs)}/{product}）。"
+                f"你必须将本表改为三维表（create_3d_table）："
+                f"dim1 取左部 {len(left_list)} 个值，dim2 取右部 {len(right_list)} 个值，"
+                f"禁止把行列双维度塞进 row_id 当二维表。"
+            )
+        return None
+
+    # 从右侧拆分（最常见：type_subtype_value → type_subtype × value）
+    for right_count in range(1, max_parts):
+        result = _check_split(right_count, from_right=True)
+        if result:
+            return result
+
+    # 从左侧拆分（覆盖：type_value_subtype → type × value_subtype 模式）
+    for left_count in range(1, max_parts):
+        result = _check_split(left_count, from_right=False)
+        if result:
+            return result
+
+    return None
+
+
 def _count_effective_digits(value: float) -> int:
     """计算有效数字位数。
     若 |value| < 1（纯小数），移除紧挨着小数点的连续 0 后计数字符；
@@ -4659,7 +4767,13 @@ def _const_register(conn: sqlite3.Connection, args: Dict[str, Any], can_write: b
         # 立即求值（要求所有引用常量已注册）
         value, err_msg = _eval_const_formula(conn, formula_str)
         if err_msg:
-            return {"error": err_msg}
+            return {
+                "error": (
+                    f"{err_msg}。"
+                    "禁止将公式常量降级为手填 value 常量，你必须修正公式使其可求值"
+                    "（如先注册被公式引用的常量、修正拼写错误或表达式语法后重试）"
+                )
+            }
         value_json = json.dumps(float(value) if isinstance(value, (int, float)) else value)
         formula_to_store: Optional[str] = formula_str
     else:

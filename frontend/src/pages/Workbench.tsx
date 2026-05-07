@@ -12,6 +12,7 @@ import '@univerjs/preset-sheets-core/lib/index.css'
 import MatrixEditor from './MatrixEditor'
 import ThreeDimTableEditor from './ThreeDimTableEditor'
 import AutoTextarea from '../components/AutoTextarea'
+import MaintainSidebar from '../components/MaintainSidebar'
 
 type TableInfo = {
   table_name: string
@@ -550,6 +551,8 @@ export default function Workbench() {
 
   const [tables, setTables] = useState<TableInfo[]>([])
   const [selected, setSelected] = useState<string | null>(null)
+  /** 用户在 Univer 中当前选中的单元格/区域上下文（传给维护 Agent） */
+  const [cellSelection, setCellSelection] = useState<string | null>(null)
   // 当前活动表的行数据（仅用于缓存反向写入；展示由 Univer 接管）
   const [, setRows] = useState<Record<string, unknown>[]>([])
   const [tableReadmeDraft, setTableReadmeDraft] = useState('')
@@ -939,27 +942,57 @@ export default function Workbench() {
       void writeCellManualRef.current(tname, String(rid), colName, newVal)
     })
 
-    // 列点击检测：mouseup 时读取 Univer 当前选区的列索引并更新公式栏
+    // 列点击检测：mouseup 时读取 Univer 当前选区的列索引并更新公式栏 & 单元格上下文
     const onUniverMouseUp = () => {
       try {
         const sh = workbookRef.current?.getActiveSheet()
         if (!sh) return
-        const range = (sh as unknown as { getActiveRange?: () => { getColumn?: () => number } | null }).getActiveRange?.()
-        if (!range) return
+        const range = (sh as unknown as { getActiveRange?: () => { getColumn?: () => number; getRow?: () => number } | null }).getActiveRange?.()
+        if (!range) { setCellSelection(null); return }
         const col = range.getColumn?.()
-        if (col == null || col < 0) return
+        const row = range.getRow?.()
         const tname = activeTableRef.current
-        if (!tname) return
-        const cols = tableColsCacheRef.current.get(tname) || []
-        if (col >= cols.length) return
-        const colName = cols[col]
-        if (!colName) return
-        setFormulaBarCol(colName)
-        const formulas = tableFormulasCacheRef.current.get(tname) || {}
-        const fi = formulas[colName]
-        setFormulaBarText(fi?.formula || '')
-        setFormulaBarDirty(false)
-      } catch { /* ignore */ }
+        if (!tname) { setCellSelection(null); return }
+
+        // 始终更新公式栏（不依赖是否有行信息）
+        if (col != null && col >= 0) {
+          const cols = tableColsCacheRef.current.get(tname) || []
+          if (col < cols.length) {
+            const colName = cols[col]
+            if (colName) {
+              setFormulaBarCol(colName)
+              const formulas = tableFormulasCacheRef.current.get(tname) || {}
+              const fi = formulas[colName]
+              setFormulaBarText(fi?.formula || '')
+              setFormulaBarDirty(false)
+            }
+          }
+        }
+
+        // 更新 cellSelection 上下文
+        if (col != null && col >= 0 && row != null && row >= 0) {
+          const cols = tableColsCacheRef.current.get(tname) || []
+          const rowsArr = tableRowsCacheRef.current.get(tname) || []
+          const dataRowOffset = 3
+          const dataRowIdx = row - dataRowOffset
+          if (col < cols.length && dataRowIdx >= 0 && dataRowIdx < rowsArr.length) {
+            const colName = cols[col]
+            const rowObj = rowsArr[dataRowIdx]
+            const rid = rowObj?.row_id
+            const val = rowObj?.[colName]
+            if (rid && colName) {
+              const valStr = val !== undefined && val !== null ? `，值: ${val}` : ''
+              setCellSelection(`表 ${tname} 的 ${rid} 行, ${colName} 列${valStr}`)
+            } else {
+              setCellSelection(null)
+            }
+          } else {
+            setCellSelection(`表 ${tname} 的 ${String.fromCharCode(65 + col)}${row + 1} 单元格`)
+          }
+        } else {
+          setCellSelection(null)
+        }
+      } catch { setCellSelection(null) }
     }
     host.addEventListener('mouseup', onUniverMouseUp)
     const loadedSheets = loadedSheetsRef.current
@@ -995,6 +1028,7 @@ export default function Workbench() {
     setErr(null)
     setTables([])
     setSelected(null)
+    setCellSelection(null)
     setRows([])
     setActiveCols([])
     setTableReadmeDraft('')
@@ -2549,6 +2583,7 @@ export default function Workbench() {
           ))}
         </div>
       </footer>
+      <MaintainSidebar projectId={pid} currentTable={selected} cellSelection={cellSelection} />
     </div>
   )
 }

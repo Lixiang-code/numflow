@@ -592,6 +592,54 @@ def _agent_system_prompt_defaults() -> Dict[str, Dict[str, Any]]:
             "modules": [{"module_key": "body", "title": "结束审核指令", "content": _ENDING_REVIEW_PROMPT, "required": True, "enabled": True, "sort_order": 1}],
             **_agent_sys_meta("sys_agent_end", "结束审核提示词", "execute 阶段完成后注入一次，要求 AI 验证产出完整性并给出最终总结。"),
         },
+        "agent_maintain_system": {
+            "category": "system",
+            "prompt_key": "agent_maintain_system",
+            "title": "维护 Agent 系统提示词（自由工具循环）",
+            "summary": "维护 Agent 自由工具调用模式的主 system prompt，包含角色定义、工作方式、行为约束和命名纪律。",
+            "description": (
+                "用于维护 Agent 侧边栏的主 system prompt。修改后影响维护 Agent 的推理风格、工具使用倾向"
+                "和完成标准。动态上下文（项目概况、目录结构、当前表、单元格选区）会自动拼接在后。"
+            ),
+            "reference_note": "在 maintain_agent.run_maintain_agent_sse 中作为主 system prompt 注入。可通过前端提示词库 UI 编辑覆盖。",
+            "enabled": True,
+            "modules": [
+                {
+                    "module_key": "body",
+                    "title": "完整提示词",
+                    "content": (
+                        "你是 Numflow 维护 Agent，帮助用户修改和管理已创建的游戏数值项目。\n"
+                        "\n"
+                        "【工作方式】\n"
+                        "1. 理解用户意图——若信息不足，主动调用只读工具（get_table_schema / read_table / "
+                        "sparse_sample / const_list 等）收集现状。\n"
+                        "2. 逐步解决问题——每次调用一个或多个工具，根据返回结果决定下一步；"
+                        "工具调用可以并行（如同时查多个表的 schema）。\n"
+                        "3. 执行修改——需要时使用写工具；写入后抽查验证（如 write_cells 后用 read_table 确认写入值）。\n"
+                        "4. 完成复查——任务完成后，用只读工具抽查关键产出数据、验证一致性。\n"
+                        "5. 最终输出简洁的完成报告：改了什么、关键数值、如有遗留问题请说明。\n"
+                        "\n"
+                        "【重要约束】\n"
+                        "· 每次修改前先 get_table_schema 确认当前列名/类型。\n"
+                        "· 需要创建新表时先考虑：是否应该注册到 gameplay_table 体系。\n"
+                        "· 修改已有数据后更新对应 README（update_table_readme）。\n"
+                        "· 公式中用 ${const} 引用常量，禁止硬编码魔法数。\n"
+                        "· 不要随意删除用户未明确要求删除的表。\n"
+                        "\n"
+                        "【命名纪律】\n"
+                        "· table_name / columns[].name 必须是英文 snake_case（a-z/0-9/_），首字小写；"
+                        "中文一律写到 display_name / columns[].display_name。\n"
+                        "· 建表前先 glossary_lookup 确认术语，未注册的英文-中文对必须先 glossary_register。\n"
+                        "· 公式中的字面量浮点数请先 const_register 再以 ${xxx} 引用，禁止硬编码。\n"
+                        "· 等级行数：从 get_project_config 读 max_level / system_level_caps，禁止硬编码。"
+                    ),
+                    "required": True,
+                    "enabled": True,
+                    "sort_order": 1,
+                }
+            ],
+            **_agent_sys_meta("sys_agent_core", "维护 Agent 提示词", "自由工具循环模式下维护 Agent 的主 system prompt，可编辑覆盖。"),
+        },
     }
 
 
@@ -821,6 +869,11 @@ _ENDING_REVIEW_PROMPT = (
     "**4. 最终总结**\n"
     "输出简洁完成报告：本步产出了哪些表/数据、关键数值范围、遗留事项（若有）。"
 )
+
+
+def _ending_review_prompt_text() -> str:
+    """返回结束审核提示词文本（供维护 Agent 等复用）。"""
+    return _ENDING_REVIEW_PROMPT
 
 
 # ---------- phase helpers ----------

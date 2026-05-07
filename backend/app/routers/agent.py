@@ -22,6 +22,15 @@ from app.db.project_schema import (
 )
 from app.services import qwen_client
 from app.services.agent_runner import run_agent_sse
+from app.services.maintain_agent import (
+    append_maintain_session_messages,
+    create_maintain_session,
+    delete_maintain_session,
+    get_maintain_session_messages,
+    init_maintain_sessions_table,
+    list_maintain_sessions,
+    run_maintain_agent_sse,
+)
 
 router = APIRouter()
 
@@ -427,6 +436,172 @@ def agent_session_detail(
     if not session:
         raise HTTPException(status_code=404, detail="session not found")
     return session
+
+
+# ─── 维护 Agent API ─────────────────────────────────────────────────────────
+
+
+class MaintainChatBody(BaseModel):
+    message: str = Field(min_length=1, max_length=8000)
+    project_id: str = Field(default="", description="项目 slug / ID")
+    session_id: Optional[int] = Field(
+        default=None,
+        description="None 表示新建会话；传入已有 session_id 则继续对话",
+    )
+    current_table: Optional[str] = Field(
+        default=None,
+        description="用户当前查看的表名，注入到 Agent 上下文",
+    )
+    cell_selection: Optional[str] = Field(
+        default=None,
+        description="用户当前选中的单元格/区域描述（如 '表 equip_base 的 main_hand_purple 行, atk 列，值: 150'）",
+    )
+
+
+@router.post("/maintain/chat")
+def maintain_chat(
+    body: MaintainChatBody,
+    p: ProjectDB = Depends(get_project_write),
+):
+    """维护 Agent 主聊天接口（SSE 流式）。"""
+    if not DASHSCOPE_API_KEY and not DEEPSEEK_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="未配置任何 AI API Key",
+        )
+
+    # 确保维护会话表存在
+    try:
+        init_maintain_sessions_table(p.conn)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 读取项目绑定的 AI 模型
+    _project_model: Optional[str] = None
+    try:
+        row = p.conn.execute(
+            "SELECT value_json FROM project_settings WHERE key = 'agent_model'"
+        ).fetchone()
+        if row:
+            _project_model = json.loads(row[0]) if row[0] else None
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 会话管理
+    session_id = body.session_id
+    session_messages: List[Dict[str, Any]] = []
+
+    if session_id is not None:
+        # 继续已有会话
+        try:
+            session_messages = get_maintain_session_messages(p.conn, session_id)
+        except Exception:  # noqa: BLE001
+            session_messages = []
+    else:
+        # 新建会话
+        try:
+            session_id = create_maintain_session(p.conn, body.message)
+        except Exception:  # noqa: BLE001
+            session_id = None
+
+    # 运行维护 Agent
+    gen = run_maintain_agent_sse(
+        body.message,
+        p.conn,
+        project_db=p,
+        server_conn=p.server_conn,
+        current_table=body.current_table,
+        cell_selection=body.cell_selection,
+        session_messages=session_messages,
+        model=_project_model,
+    )
+
+    # SSE 流式响应 + 会话持久化（同步生成器，避免 async 导致缓冲）
+    def _tracked_gen():
+        chat_history: List[Dict[str, Any]] = [
+            {"role": "user", "content": body.message},
+        ]
+        assistant_content = ""
+        tool_call_results: List[Dict[str, Any]] = []
+
+        for chunk in gen:
+            yield chunk
+            try:
+                line = chunk.decode("utf-8").strip()
+                if line.startswith("data: "):
+                    data = json.loads(line[6:])
+                    etype = data.get("type", "")
+                    if etype == "token":
+                        assistant_content += data.get("text", "")
+                    elif etype == "tool_call":
+                        tool_call_results.append({
+                            "type": "tool_call",
+                            "name": data.get("name", ""),
+                            "arguments": data.get("arguments", ""),
+                        })
+                    elif etype == "tool_result":
+                        tool_call_results.append({
+                            "type": "tool_result",
+                            "name": data.get("name", ""),
+                            "result": data.get("result", ""),
+                        })
+                    elif etype == "done":
+                        msg = {"role": "assistant", "content": assistant_content}
+                        if tool_call_results:
+                            msg["tool_details"] = tool_call_results
+                        chat_history.append(msg)
+                        try:
+                            if session_id:
+                                append_maintain_session_messages(p.conn, session_id, chat_history)
+                        except Exception:  # noqa: BLE001
+                            pass
+            except Exception:  # noqa: BLE001
+                pass
+
+    return StreamingResponse(_tracked_gen(), media_type="text/event-stream")
+
+
+@router.get("/maintain/sessions")
+def maintain_sessions(
+    limit: int = 30,
+    p: ProjectDB = Depends(get_project_read),
+) -> Dict[str, Any]:
+    """列出项目的维护会话列表。"""
+    try:
+        init_maintain_sessions_table(p.conn)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        sessions = list_maintain_sessions(p.conn, limit=max(1, min(int(limit), 100)))
+    except Exception:  # noqa: BLE001
+        sessions = []
+    return {"sessions": sessions}
+
+
+@router.get("/maintain/sessions/{maint_session_id}")
+def maintain_session_detail(
+    maint_session_id: int,
+    p: ProjectDB = Depends(get_project_read),
+) -> Dict[str, Any]:
+    """获取单个维护会话的完整消息历史。"""
+    try:
+        messages = get_maintain_session_messages(p.conn, maint_session_id)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail="session not found")
+    return {"session_id": maint_session_id, "messages": messages}
+
+
+@router.delete("/maintain/sessions/{maint_session_id}")
+def maintain_session_delete(
+    maint_session_id: int,
+    p: ProjectDB = Depends(get_project_write),
+) -> Dict[str, Any]:
+    """删除维护会话。"""
+    try:
+        delete_maintain_session(p.conn, maint_session_id)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail="session not found")
+    return {"ok": True}
 
 
 class DiagnosticsRunBody(BaseModel):

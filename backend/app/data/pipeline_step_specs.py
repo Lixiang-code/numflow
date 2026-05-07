@@ -203,6 +203,7 @@ PIPELINE_STEP_SPECS: List[StepSpec] = [
         goal=(
             "基于已建立的 atk / def 曲线与战斗节奏假设，通过公式反推推导出 hp 列，"
             "确保每一等级的 HP 都有战斗设计依据，而非拍脑袋填数。\n"
+            "★ 乘法防御公式时必须先校验 K 值：K = base_K + K_step(L)，通过调 K 使 HP/ATK 比值在全等级合理。\n"
             "核心公式：hp(L) = atk_attacker(L) × (1 - def_ratio(L)) × expected_survive_seconds(L) × attacks_per_second\n"
             "其中 expected_survive_seconds 必须注册为 const_register（可按等级分档，如低中高区段）。"
         ),
@@ -211,12 +212,14 @@ PIPELINE_STEP_SPECS: List[StepSpec] = [
             "战斗节奏：期望生存秒数（同级 PvE 默认 8s，可按低中高等级区段设不同值）",
             "攻击频率（attacks_per_second，默认 1.0，可注册为 const）",
             "伤害减免模型（减法/乘法，来自全局 README）",
+            "K 值常量（def_K）：乘法公式时从 _constants 读取，本步需校验并可能追加 K_step 等级步进",
         ],
         outputs=[
             "num_base_framework 的 hp 列：全等级反推值（update_rows 更新已有表）",
             "在 _formula_registry 登记 hp_formula（update_formula）",
             "在 _constants 中注册 expected_survive_seconds（const_register，标签 combat_rhythm）",
-            "本步 README：写出反推公式、战斗节奏假设、各等级区间 HP 合理性校验结论",
+            "K 值结构确认：保留 base_K，必要时追加 K_step 等级步进常量",
+            "本步 README：写出反推公式、战斗节奏假设、K 值决策、全等级 HP/ATK 比值校验结论",
         ],
         required_tables=["num_base_framework"],
         required_columns={
@@ -226,15 +229,20 @@ PIPELINE_STEP_SPECS: List[StepSpec] = [
             "hp 列严格单调递增，禁止出现平台段或负值",
             "expected_survive_seconds 已通过 const_register 注册到 _constants（标签 combat_rhythm）",
             "hp_formula 已通过 update_formula 登记到 _formula_registry",
-            "README 写出了公式推导过程、每个参数取值依据，及 1/中/max 等级的 HP 数值合理性校验",
+            "乘法防御公式时：K = base_K + K_step(L) 结构已确定并 const_register",
+            "HP/ATK 比值校验通过：全等级 ratio ∈ [5, 100]，且随等级单调递增（或至少不递减）",
+            "README 写出了公式推导过程、每个参数取值依据、K 值决策，及 1/中/max 等级的 HP/ATK 比值校验",
             "design 阶段明确说明了攻击方 atk 参考值（同级 PvE 对手等同于自身 atk）",
         ],
         agent_hint=_AGENT_THREE_PHASE_HINT + "\n" + _NAMING_RULE_HINT + (
             " design 阶段：\n"
-            "  1. 明确战斗节奏参数（expected_survive_seconds 按等级区段），\n"
-            "  2. 写出推导公式 hp = atk_ref × net_dmg_ratio × survive_sec × aps，\n"
-            "  3. 给出 level 1 / level_max/2 / level_max 三个校验样本；\n"
-            " review 阶段：对照 def 与 hp 的比值趋势，确保高等级 HP 膨胀合理（不超过 atk×10）；\n"
+            "  1. 若为乘法防御公式，先校验 K 值：读取 base_K，判断是否需加 K_step 等级步进，\n"
+            "     确保 K = base_K + K_step(L)；\n"
+            "  2. 明确战斗节奏参数（expected_survive_seconds 按等级区段），\n"
+            "  3. 写出推导公式 hp = atk_ref × net_dmg_ratio × survive_sec × aps，\n"
+            "  4. 校验 HP/ATK 比值：全等级 ratio ∈ [5, 100] 且单调递增，\n"
+            "     若不满足则优先调 K 值（改 base_K 或 K_step），次选微调 expected_survive_seconds；\n"
+            " review 阶段：对照全等级 hp/atk 比值趋势，确认 K 值结构合理；\n"
             " execute 阶段：用 update_rows 把 hp 列写入 num_base_framework（不重建表）。"
         ),
         common_pitfalls=[
@@ -242,6 +250,9 @@ PIPELINE_STEP_SPECS: List[StepSpec] = [
             "expected_survive_seconds 全等级统一用一个值（应允许按区段分档）",
             "忘记 update_formula 登记公式到 _formula_registry",
             "攻击方参考 atk 使用错误值（应使用同等级自身 atk，不是 level 1 的 atk）",
+            "乘法公式时跳过 K 值校验直接反推 HP（K 值错误导致 HP/ATK 比值失控）",
+            "HP/ATK 比值超出 [5, 100] 或随等级递减但未迭代修正",
+            "高膨胀速率项目 K 只用常数而未加等级步进 K_step(L)",
         ],
         upstream_steps=["base_attribute_framework"],
     ),
@@ -413,6 +424,8 @@ PIPELINE_STEP_SPECS: List[StepSpec] = [
             "gameplay=本子系统, attr=A) 取，不要硬编码",
             "资源消耗通过 call_calculator(gameplay_res_alloc_*, level, gameplay, res, "
             "grain='per_level' 或 'cumulative') 取",
+            "本任务涉及的所有资源和属性必须已存在于 num_resource_framework / num_base_framework "
+            "和 gameplay_res_alloc / gameplay_attr_alloc 中；若缺失必须先到总表和分配表中补全后引用",
             "如需累计差值（例如 L 升 L+1 的实际消耗），自行创建辅助列并登记公式",
             "概率/权重列必须单调或在 README 显式说明非单调原因",
             "若本子系统需要向其他子系统暴露设计参数，调用 expose_param_to_subsystems "
@@ -432,6 +445,7 @@ PIPELINE_STEP_SPECS: List[StepSpec] = [
             "硬编码属性数值，没有 call_calculator",
             "需要的辅助列不创建，直接写常数",
             "应当向兄弟子系统暴露的参数没有 expose_param_to_subsystems 声明",
+            "使用了总表/分配表中不存在的资源或属性，未先补全再引用",
         ],
         upstream_steps=[
             "gameplay_allocation",

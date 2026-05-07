@@ -123,6 +123,14 @@ def init_project_db(conn: sqlite3.Connection, *, seed_readme: bool = True) -> No
             error_text TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS _maintain_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_name TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            messages_json TEXT NOT NULL DEFAULT '[]'
+        );
+
         CREATE TABLE IF NOT EXISTS _const_tags (
             name TEXT PRIMARY KEY,
             parent TEXT,

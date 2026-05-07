@@ -1,0 +1,338 @@
+/* ── 右侧覆盖式维护 Agent 侧边栏 ── */
+
+/* 收起态窄条 */
+.ms-toggle-bar {
+  position: fixed;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 1000;
+  width: 32px;
+  padding: 10px 4px;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  border-radius: 6px 0 0 6px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1.3;
+  transition: background 0.15s;
+  user-select: none;
+}
+.ms-toggle-bar:hover {
+  background: #2a2a4e;
+}
+.ms-toggle-icon {
+  font-size: 10px;
+  color: #7eb8ff;
+}
+.ms-toggle-label {
+  writing-mode: vertical-rl;
+  letter-spacing: 2px;
+}
+
+/* 展开态侧边栏 */
+.ms-sidebar {
+  position: fixed;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 1001;
+  width: 440px;
+  background: #1e1e32;
+  border-left: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  box-shadow: -4px 0 20px rgba(0, 0, 0, 0.4);
+  animation: ms-slide-in 0.2s ease-out;
+}
+@keyframes ms-slide-in {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}
+
+/* 头部 */
+.ms-header {
+  padding: 12px 14px;
+  border-bottom: 1px solid #333;
+  background: #252540;
+  flex-shrink: 0;
+}
+.ms-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.ms-title {
+  margin: 0;
+  font-size: 15px;
+  color: #f0f0f0;
+}
+.ms-header-actions {
+  display: flex;
+  gap: 6px;
+}
+.ms-session-select {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 12px;
+  background: #2a2a45;
+  color: #ccc;
+  border: 1px solid #444;
+  border-radius: 4px;
+}
+.ms-loading-hint {
+  font-size: 11px;
+  color: #888;
+  padding: 4px 0;
+}
+
+/* 按钮 */
+.ms-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: #2a2a45;
+  color: #ccc;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ms-btn:hover {
+  background: #3a3a55;
+}
+.ms-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ms-btn-new {
+  background: #1a4a2e;
+  border-color: #2a6a3e;
+  color: #7ecf90;
+}
+.ms-btn-new:hover {
+  background: #2a5a3e;
+}
+.ms-btn-close {
+  border: none;
+  background: transparent;
+  font-size: 16px;
+  padding: 2px 6px;
+}
+.ms-btn-collapse {
+  border: 1px solid #555;
+  background: #2a2a45;
+  color: #ccc;
+  font-size: 13px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ms-btn-collapse:hover {
+  background: #3a3a55;
+  color: #fff;
+}
+.ms-btn-delete {
+  background: #4a1a1a;
+  border-color: #6a2a2a;
+  color: #e08080;
+  font-size: 11px;
+  padding: 3px 8px;
+}
+.ms-btn-delete:hover {
+  background: #5a2a2a;
+}
+.ms-btn-send {
+  background: #1a3a5e;
+  border-color: #2a5a8e;
+  color: #7eb8ff;
+  font-size: 12px;
+  padding: 5px 16px;
+}
+.ms-btn-send:hover {
+  background: #2a4a6e;
+}
+
+.ms-session-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 6px;
+}
+
+/* 聊天正文 */
+.ms-chat-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 14px;
+}
+.ms-chat-body::-webkit-scrollbar {
+  width: 5px;
+}
+.ms-chat-body::-webkit-scrollbar-thumb {
+  background: #444;
+  border-radius: 3px;
+}
+
+/* 空状态 */
+.ms-empty {
+  color: #888;
+  font-size: 13px;
+  padding: 20px 0;
+  line-height: 1.6;
+}
+.ms-empty ul {
+  margin: 8px 0;
+  padding-left: 18px;
+}
+.ms-empty li {
+  margin: 4px 0;
+  color: #aaa;
+}
+
+/* 消息 */
+.ms-msg {
+  margin-bottom: 12px;
+  animation: ms-fade-in 0.15s ease-out;
+}
+@keyframes ms-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.ms-msg-role {
+  font-size: 11px;
+  color: #777;
+  margin-bottom: 3px;
+}
+.ms-msg-user .ms-msg-content {
+  background: #1a3a5e;
+  color: #ddeeff;
+  border-radius: 8px 8px 2px 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ms-msg-assistant .ms-msg-content {
+  background: #2a2a42;
+  color: #ddd;
+  border-radius: 8px 8px 8px 2px;
+  padding: 8px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 工具调用详情 */
+.ms-tool-details {
+  margin-top: 8px;
+  border-top: 1px solid #444;
+  padding-top: 6px;
+}
+.ms-tool-item {
+  margin: 4px 0;
+}
+.ms-tool-summary {
+  font-size: 11px;
+  cursor: pointer;
+  color: #999;
+  padding: 2px 0;
+  list-style: none;
+}
+.ms-tool-summary::-webkit-details-marker {
+  display: none;
+}
+.ms-tool-summary::before {
+  content: '▸ ';
+  font-size: 10px;
+}
+.ms-tool-item[open] .ms-tool-summary::before {
+  content: '▾ ';
+}
+.ms-tool-call .ms-tool-summary {
+  color: #7eb8ff;
+}
+.ms-tool-result .ms-tool-summary {
+  color: #7ecf90;
+}
+.ms-tool-body {
+  font-size: 11px;
+  background: #1a1a2a;
+  color: #aaa;
+  padding: 6px 8px;
+  border-radius: 4px;
+  margin: 4px 0;
+  max-height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* 思考中 */
+.ms-thinking {
+  color: #666;
+  font-size: 12px;
+  font-style: italic;
+  padding: 6px 0;
+  animation: ms-pulse 1s infinite;
+}
+@keyframes ms-pulse {
+  0%, 100% { opacity: 0.4; }
+  50%      { opacity: 1; }
+}
+
+/* 底部输入 */
+.ms-footer {
+  padding: 10px 14px;
+  border-top: 1px solid #333;
+  background: #252540;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.ms-footer-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ms-table-tag {
+  font-size: 11px;
+  background: #1a3a2e;
+  color: #7ecf90;
+  padding: 3px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ms-input {
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 13px;
+  background: #2a2a45;
+  color: #eee;
+  border: 1px solid #444;
+  border-radius: 4px;
+  outline: none;
+  resize: none;
+  font-family: inherit;
+  line-height: 1.5;
+  min-height: 36px;
+  max-height: 114px;
+  overflow-y: auto;
+}
+.ms-input:focus {
+  border-color: #5a8abe;
+}
+.ms-input:disabled {
+  opacity: 0.5;
+}
