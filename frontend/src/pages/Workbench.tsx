@@ -1094,16 +1094,15 @@ export default function Workbench() {
             for (let ci = 0; ci < numCols; ci++) {
               const colName = cols[ci] || ''
               const kind = columnKinds[colName] || ''
-              let bg = ''
-              if (kind === 'compute') bg = '#f0f0f0'
-              else if (kind === 'config') bg = '#faf0e6'
-              if (bg) {
+              if (kind !== 'config' && kind !== 'compute') continue
+              const bg = kind === 'compute' ? '#f0f0f0' : '#faf0e6'
+              for (let ri = dataStartRow; ri <= dataEndRow; ri++) {
                 try {
-                  const colRange = sheet.getRange(dataStartRow, ci, Math.max(1, dataEndRow - dataStartRow + 1), 1)
-                  const cs = colRange as unknown as { setBackgroundColor?: (c: string) => unknown; setBackground?: (c: string) => unknown }
+                  const cell = sheet.getRange(ri, ci, 1, 1)
+                  const cs = cell as unknown as { setBackgroundColor?: (c: string) => unknown; setBackground?: (c: string) => unknown }
                   cs.setBackgroundColor?.(bg)
                   cs.setBackground?.(bg)
-                } catch { /* per-column style fail */ }
+                } catch { /* cell fail */ }
               }
             }
           }
