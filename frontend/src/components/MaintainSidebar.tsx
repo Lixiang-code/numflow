@@ -175,6 +175,9 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
     setLiveEvents([])
     liveEventIdRef.current = 0
 
+    // 记录发送时是否为新会话（用于 done 后重载列表）
+    const wasNewSession = !activeSessionId
+
     const userChat: ChatMessage = { role: 'user', content: userMsg }
     setMessages((prev) => [...prev, userChat])
 
@@ -218,7 +221,22 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
             const ev = JSON.parse(line) as Record<string, unknown>
             const etype = ev.type as string
 
-            if (etype === 'token') {
+            if (etype === 'session_init') {
+              // 后端返回 session_id，更新本地状态以保证多轮对话连续
+              const sid = ev.session_id as number
+              if (sid) setActiveSessionId(sid)
+
+            } else if (etype === 'session_renamed') {
+              // 后端生成标题后实时更新会话列表
+              const sid = ev.session_id as number
+              const newName = (ev.session_name as string) || ''
+              if (sid && newName) {
+                setSessions((prev) =>
+                  prev.map((s) => (s.id === sid ? { ...s, session_name: newName } : s))
+                )
+              }
+
+            } else if (etype === 'token') {
               assistantContent += (ev.text as string) || ''
               setStreamingText(assistantContent)
 
@@ -261,7 +279,8 @@ const MaintainSidebar: React.FC<Props> = ({ projectId, currentTable, cellSelecti
               })
               setStreamingText('')
               setLiveEvents([])
-              if (!activeSessionId) { loadSessions() }
+              // 新会话首轮结束后刷新列表（此时标题可能已被 session_renamed 更新）
+              if (wasNewSession) { loadSessions() }
             }
           } catch { /* ignore */ }
         }

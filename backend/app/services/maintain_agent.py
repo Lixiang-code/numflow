@@ -490,6 +490,15 @@ def append_maintain_session_messages(
     conn.commit()
 
 
+def rename_maintain_session(conn: sqlite3.Connection, session_id: int, name: str) -> None:
+    """重命名维护会话（用于 AI 生成标题后更新）。"""
+    conn.execute(
+        "UPDATE _maintain_sessions SET session_name = ? WHERE id = ?",
+        (name[:80], session_id),
+    )
+    conn.commit()
+
+
 def list_maintain_sessions(conn: sqlite3.Connection, limit: int = 30) -> List[Dict[str, Any]]:
     """列出维护会话列表。"""
     rows = conn.execute(

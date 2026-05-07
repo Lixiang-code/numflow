@@ -21,7 +21,7 @@ from app.db.project_schema import (
     update_agent_session,
 )
 from app.services import qwen_client
-from app.services.agent_runner import run_agent_sse
+from app.services.agent_runner import run_agent_sse, sse_event
 from app.services.maintain_agent import (
     append_maintain_session_messages,
     create_maintain_session,
@@ -29,6 +29,7 @@ from app.services.maintain_agent import (
     get_maintain_session_messages,
     init_maintain_sessions_table,
     list_maintain_sessions,
+    rename_maintain_session,
     run_maintain_agent_sse,
 )
 
@@ -517,7 +518,13 @@ def maintain_chat(
     )
 
     # SSE 流式响应 + 会话持久化（同步生成器，避免 async 导致缓冲）
+    _was_new_session = body.session_id is None  # 本次是否新建了会话
+
     def _tracked_gen():
+        # 第一个事件：把 session_id 发回客户端，保证同一窗口多轮对话连续
+        if session_id is not None:
+            yield sse_event({"type": "session_init", "session_id": session_id})
+
         chat_history: List[Dict[str, Any]] = [
             {"role": "user", "content": body.message},
         ]
@@ -555,6 +562,36 @@ def maintain_chat(
                                 append_maintain_session_messages(p.conn, session_id, chat_history)
                         except Exception:  # noqa: BLE001
                             pass
+
+                        # 首轮新会话：用 AI 生成简短标题并回传客户端
+                        if _was_new_session and session_id:
+                            try:
+                                title_msgs = [
+                                    {
+                                        "role": "system",
+                                        "content": (
+                                            "根据用户的问题，用4到10个字给本次对话起一个简洁标题。"
+                                            "只输出标题文字，不要引号、序号或任何其他内容。"
+                                        ),
+                                    },
+                                    {"role": "user", "content": body.message},
+                                ]
+                                title, _ = qwen_client.chat_once(
+                                    title_msgs,
+                                    temperature=0,
+                                    max_tokens=24,
+                                    model=_project_model,
+                                )
+                                title = title.strip().strip('"').strip("'").strip("《》").strip()[:60]
+                                if title:
+                                    rename_maintain_session(p.conn, session_id, title)
+                                    yield sse_event({
+                                        "type": "session_renamed",
+                                        "session_id": session_id,
+                                        "session_name": title,
+                                    })
+                            except Exception:  # noqa: BLE001
+                                pass
             except Exception:  # noqa: BLE001
                 pass
 
