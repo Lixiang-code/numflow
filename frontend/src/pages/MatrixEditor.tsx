@@ -68,6 +68,7 @@ export default function MatrixEditor({
   canWrite = false,
   columnKinds = {},
   tableKind = '',
+  showEnNames = false,
 }: {
   tableName: string
   matrixMeta: Record<string, unknown>
@@ -76,6 +77,7 @@ export default function MatrixEditor({
   canWrite?: boolean
   columnKinds?: Record<string, string>
   tableKind?: string
+  showEnNames?: boolean
 }) {
   const [snapshot, setSnapshot] = useState<MatrixSnapshot | null>(null)
   const [loadedRequestKey, setLoadedRequestKey] = useState('')
@@ -260,6 +262,9 @@ export default function MatrixEditor({
         <span className="matrix-meta-chip" style={{ background: '#e3f2fd', borderColor: '#bbdefb', color: '#1565c0' }}>
           {rows.length} 行 × {cols.length} 列
         </span>
+        <span className="matrix-meta-chip muted" style={{ cursor: 'default' }}>
+          {showEnNames ? '🔤 英文名' : '🀄 中文名'}
+        </span>
         <div style={{ flex: 1 }} />
         <button
           type="button"
@@ -334,7 +339,7 @@ export default function MatrixEditor({
                   className="matrix-col-head"
                 >
                   <span className="matrix-head-zh">{colDisplayMap.get(c) || termDisplay(c)}</span>
-                  <span className="matrix-head-en muted">{c}</span>
+                  {showEnNames && <span className="matrix-head-en muted">{c}</span>}
                 </th>
               ))}
             </tr>
@@ -347,7 +352,7 @@ export default function MatrixEditor({
                   title={rowBriefMap.get(r) || r}
                 >
                   <span className="matrix-head-zh">{rowDisplayMap.get(r) || termDisplay(r)}</span>
-                  <span className="matrix-head-en muted">{r}</span>
+                  {showEnNames && <span className="matrix-head-en muted">{r}</span>}
                 </td>
                 {cols.map((c) => {
                   const cell = getCellVal(r, c)

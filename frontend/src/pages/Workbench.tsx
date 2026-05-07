@@ -554,6 +554,7 @@ export default function Workbench() {
   const [kindFilter, setKindFilter] = useState<string>('all')  // all / config / compute
   const [columnKinds, setColumnKinds] = useState<Record<string, string>>({})
   const [activeTableKind, setActiveTableKind] = useState('')
+  const [showEnNames, setShowEnNames] = useState(false)  // false=显示中文，true=显示英文
 
   /** 全部常量（用于"📐 常量"专属页） */
   const [allConstants, setAllConstants] = useState<Array<{
@@ -1973,6 +1974,7 @@ export default function Workbench() {
                 canWrite={!readOnly}
                 columnKinds={columnKinds}
                 tableKind={activeTableKind}
+                showEnNames={showEnNames}
               />
             </>
           ) : selected && selectedIs3DMatrix ? (
@@ -2000,6 +2002,7 @@ export default function Workbench() {
                 onConstantsChanged={() => void loadAllConstants()}
                 columnKinds={columnKinds}
                 tableKind={activeTableKind}
+                showEnNames={showEnNames}
               />
             </>
           ) : selected !== '__constants__' && !selectedIsMatrix ? (
@@ -2017,6 +2020,12 @@ export default function Workbench() {
             </div>
           )}
           <h3>{selected || '未选择表'}</h3>
+          <div className="wb-toolbar" style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+            <label style={{ fontSize: 12, cursor: 'pointer', userSelect: 'none' }}>
+              <input type="checkbox" checked={showEnNames} onChange={e => setShowEnNames(e.target.checked)} />
+              {' '}显示英文名
+            </label>
+          </div>
           <div className="wb-formula-bar">
             <span className="wb-formula-bar-label">
               {formulaBarCol ? (
@@ -2091,7 +2100,12 @@ export default function Workbench() {
               <>
                 {refs.colRefs.size > 0 && (
                   <div className="wb-formula-ref-info">
-                    本表引用列已高亮：{[...refs.colRefs].map((c) => <code key={c} style={{margin:'0 3px'}}>{c}</code>)} （Univer 当前版本暂不支持自动列边框染色，请在表格中确认对应列）
+                    本表引用列：{[...refs.colRefs].map((c) => {
+                      const meta = tableColMetaCacheRef.current.get(selected ?? '') || []
+                      const colMeta = meta.find((m: ColumnMeta) => m.name === c)
+                      const label = showEnNames ? c : (colMeta?.display_name || c)
+                      return <code key={c} style={{margin:'0 3px'}} title={c}>{label}</code>
+                    })}
                   </div>
                 )}
                 {refs.constRefs.length > 0 && (
@@ -2104,7 +2118,7 @@ export default function Workbench() {
                         <span key={name} style={{ display: 'inline-flex' }}>
                           {isEditing ? (
                             <span style={{ display: 'inline-flex', alignItems: 'center', gap: '.2rem', background: '#fff', border: '1px solid #1976d2', borderRadius: 6, padding: '.15rem .4rem' }}>
-                              <code style={{ fontSize: '.72rem', fontWeight: 600, color: '#1565c0' }}>{name}</code>
+                               <code style={{ fontSize: '.72rem', fontWeight: 600, color: '#1565c0' }}>{showEnNames ? name : (c?.name_zh || name)}</code>
                               <input
                                 style={{ fontSize: '.75rem', fontFamily: 'monospace', padding: '.1rem .3rem', border: '1px solid #90caf9', borderRadius: 3, width: 80, outline: 'none' }}
                                 value={fabConstEditVal}
@@ -2122,7 +2136,7 @@ export default function Workbench() {
                               onClick={() => { setFabConstEditName(name); setFabConstEditVal(c?.value != null ? String(c.value) : c?.formula || '') }}
                               title={c ? `当前值: ${c.value ?? c.formula ?? '未设置'}${c.brief ? ' — ' + c.brief : ''}` : '未找到常量'}
                             >
-                              <code style={{ fontWeight: 600 }}>{name}</code>
+                               <code style={{ fontWeight: 600 }}>{showEnNames ? name : (c?.name_zh || name)}</code>
                               <span style={{ fontWeight: 600, color: '#004d40' }}>{c?.value != null ? String(c.value) : c?.formula || '?'}</span>
                             </button>
                           )}

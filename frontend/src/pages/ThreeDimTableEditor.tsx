@@ -125,6 +125,7 @@ export default function ThreeDimTableEditor({
   onConstantsChanged,
   columnKinds = {},
   tableKind = '',
+  showEnNames = false,
 }: {
   tableName: string
   headers: Record<string, string>
@@ -135,6 +136,7 @@ export default function ThreeDimTableEditor({
   onConstantsChanged?: () => void
   columnKinds?: Record<string, string>
   tableKind?: string
+  showEnNames?: boolean
 }) {
   const [snapshot, setSnapshot] = useState<ThreeDimSnapshot | null>(null)
   const [loadedRequestKey, setLoadedRequestKey] = useState('')
@@ -670,6 +672,9 @@ export default function ThreeDimTableEditor({
       </div>
 
       <div className="matrix-axis-bar">
+          <label style={{ fontSize: 12, cursor: 'pointer', userSelect: 'none', display: 'inline-flex', alignItems: 'center', gap: 4, marginBottom: 6 }}>
+            <span style={{ color: '#666' }}>{showEnNames ? '🔤 英文名' : '🀄 中文名'}</span>
+          </label>
           <div className="matrix-axis-row">
             <span className="matrix-axis-label">行轴</span>
             <div className="matrix-axis-btns">
@@ -739,7 +744,7 @@ export default function ThreeDimTableEditor({
                       {axisOptions[colAxis].title(colKey)}
                       {formula && <span className="sl-preview-tag" style={{ marginLeft: 6 }}>公式</span>}
                     </span>
-                    <span className="matrix-head-en muted">{axisOptions[colAxis].subTitle(colKey)}</span>
+                    {showEnNames && <span className="matrix-head-en muted">{axisOptions[colAxis].subTitle(colKey)}</span>}
                   </th>
                 )
               })}
