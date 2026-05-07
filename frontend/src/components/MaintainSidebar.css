@@ -6,7 +6,7 @@
   right: 0;
   top: 50%;
   transform: translateY(-50%);
-  z-index: 1000;
+  z-index: 2100;
   width: 32px;
   padding: 10px 4px;
   background: #4a90d9;
@@ -40,7 +40,7 @@
   right: 0;
   top: 0;
   bottom: 0;
-  z-index: 1001;
+  z-index: 2101;
   width: 440px;
   background: #f5f6f8;
   border-left: 1px solid #d0d5db;
