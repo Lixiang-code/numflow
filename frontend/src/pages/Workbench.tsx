@@ -1003,8 +1003,8 @@ export default function Workbench() {
   }, [pid, loadTables, loadProjectConfig, loadPipeline, loadValidation, loadSnapshots, loadAiModel, loadAiModels, loadCalculators, loadGlossary, loadDesignHistory, loadAllConstants])
 
   /** 把一张表的数据写入对应 Univer sheet（首次或刷新调用） */
-  const populateSheet = useCallback(
-    (tableName: string, rowsArr: Record<string, unknown>[], cols: string[], formulas: FormulaMap, colMeta: ColumnMeta[] = [], displayName = '') => {
+   const populateSheet = useCallback(
+    (tableName: string, rowsArr: Record<string, unknown>[], cols: string[], formulas: FormulaMap, colMeta: ColumnMeta[] = [], displayName = '', columnKinds: Record<string, string> = {}) => {
       const wb = workbookRef.current
       if (!wb) return
       const sheetTitle = displayName ? `${displayName}（${tableName}）` : tableName
@@ -1083,6 +1083,28 @@ export default function Workbench() {
           styleSetters.setBackground?.('#e8f5e9')
           styleSetters.setFontWeight?.('bold')
         } catch { /* ignore styling errors */ }
+        // ── 列分类着色：计算列浅灰(#f0f0f0)、配置列浅棕(#faf0e6) ──
+        try {
+          const dataStartRow = 3  // skip header rows
+          const dataEndRow = matrix.length - 1
+          if (dataEndRow >= dataStartRow) {
+            for (let ci = 0; ci < numCols; ci++) {
+              const colName = cols[ci] || ''
+              const kind = columnKinds[colName] || ''
+              let bg = ''
+              if (kind === 'compute') bg = '#f0f0f0'
+              else if (kind === 'config') bg = '#faf0e6'
+              if (bg) {
+                try {
+                  const colRange = sheet.getRange(dataStartRow, ci, Math.max(1, dataEndRow - dataStartRow + 1), 1)
+                  const cs = colRange as unknown as { setBackgroundColor?: (c: string) => unknown; setBackground?: (c: string) => unknown }
+                  cs.setBackgroundColor?.(bg)
+                  cs.setBackground?.(bg)
+                } catch { /* per-column style fail */ }
+              }
+            }
+          }
+        } catch { /* ignore */ }
         try {
           const freezer = sheet as unknown as { setFrozenRows?: (n: number) => unknown; setFrozen?: (o: { ySplit?: number; xSplit?: number }) => unknown }
           freezer.setFrozenRows?.(3)
@@ -1197,6 +1219,8 @@ export default function Workbench() {
           display_name?: string
           related_constants?: Array<{ name_en: string; name_zh: string; value: unknown; brief?: string; scope_table?: string | null }>
           matrix_meta_json?: string | null
+          table_kind?: string
+          column_kinds?: Record<string, string>
         }
         if (cancelled) return
 
@@ -1263,7 +1287,7 @@ export default function Workbench() {
 
         // 写入 Univer 并切换到该 sheet（2D/3D matrix 专用视图不需要写入 Univer）
         if (!isMatrix && !is3DMatrix && !is3DMatrixFromMeta) {
-          populateSheet(selected, normalized, cols, cf, colMeta, displayName)
+          populateSheet(selected, normalized, cols, cf, colMeta, displayName, desc.column_kinds || {})
           activeTableRef.current = selected
           const wb = workbookRef.current
           if (wb) {

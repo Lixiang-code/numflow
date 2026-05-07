@@ -86,7 +86,8 @@ def describe_table(table_name: str, p: ProjectDB = Depends(get_project_read)):
     conn = p.conn
     cur = conn.execute(
         """
-        SELECT readme, schema_json, validation_status, validation_rules_json, matrix_meta_json
+        SELECT readme, schema_json, validation_status, validation_rules_json, matrix_meta_json,
+               table_kind, column_kinds_json
         FROM _table_registry WHERE table_name = ?
         """,
         (t,),
@@ -185,6 +186,8 @@ def describe_table(table_name: str, p: ProjectDB = Depends(get_project_read)):
         "display_name": (json.loads(meta["schema_json"] or "{}") or {}).get("display_name", ""),
         "related_constants": related_constants,
         "matrix_meta_json": matrix_meta_parsed,
+        "table_kind": md.get("table_kind") or "",
+        "column_kinds": json.loads(md.get("column_kinds_json") or "{}"),
     }
 
 
