@@ -417,7 +417,7 @@ function renderGlossaryText(
       const c = constMap.get(key)
       if (c) {
         const label = lang === 'en' ? key : (c.name_zh || key)
-        return <span key={i} title={`${key}=${c.value ?? '?'}`} style={{ color: '#81c784', fontWeight: 500 }}>{label}</span>
+        return <span key={i} title={`${key}=${c.value ?? '?'}`} style={{ color: '#2e7d32', fontWeight: 500 }}>{label}</span>
       }
       return <span key={i} title={`未找到常量：${key}`} style={{ color: '#ef9a9a', textDecoration: 'underline dotted' }}>{part}</span>
     }
@@ -426,13 +426,13 @@ function renderGlossaryText(
     if (!m) return part
     const key = m[1]
     const g = glossaryMap.get(key)
-    if (g) return <span key={i} title={key} style={{ color: '#4fc3f7', fontWeight: 500 }}>{lang === 'en' ? g.term_en : g.term_zh}</span>
+    if (g) return <span key={i} title={key} style={{ color: '#0277bd', fontWeight: 500 }}>{lang === 'en' ? g.term_en : g.term_zh}</span>
     // 降级：也尝试从常量中查找
     if (constMap) {
       const c = constMap.get(key)
       if (c) {
         const label = lang === 'en' ? key : (c.name_zh || key)
-        return <span key={i} title={`常量 ${key}=${c.value ?? '?'}`} style={{ color: '#81c784', fontWeight: 500 }}>{label}</span>
+        return <span key={i} title={`常量 ${key}=${c.value ?? '?'}`} style={{ color: '#2e7d32', fontWeight: 500 }}>{label}</span>
       }
     }
     return <span key={i} title={`未找到术语：${key}`} style={{ color: '#ef9a9a', textDecoration: 'underline dotted' }}>{part}</span>
