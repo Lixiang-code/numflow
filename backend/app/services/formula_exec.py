@@ -192,6 +192,112 @@ def _expand_cached_projection(
     return merged
 
 
+def _topo_layers(
+    *,
+    nodes: Set[Node],
+    indeg: Dict[Node, int],
+    forward: Dict[Node, List[Node]],
+) -> List[List[Node]]:
+    ready: List[Node] = sorted([n for n in nodes if indeg[n] == 0])
+    indeg_local = dict(indeg)
+    layers: List[List[Node]] = []
+    while ready:
+        current_layer = list(ready)
+        layers.append(current_layer)
+        next_ready: List[Node] = []
+        for n in current_layer:
+            for m in forward.get(n, []):
+                indeg_local[m] -= 1
+                if indeg_local[m] == 0:
+                    next_ready.append(m)
+        ready = sorted(next_ready)
+    return layers
+
+
+def _node_projection_requirements(
+    conn: sqlite3.Connection,
+    *,
+    table_name: str,
+    column_name: str,
+    use_duckdb: bool,
+) -> Dict[str, Set[str]]:
+    if not perf_flag(conn, "use_min_column_load"):
+        return {}
+    row = conn.execute(
+        "SELECT formula, formula_type FROM _formula_registry WHERE table_name = ? AND column_name = ?",
+        (table_name, column_name),
+    ).fetchone()
+    if not row:
+        return {}
+    raw_formula = row["formula"] if isinstance(row, sqlite3.Row) else row[0]
+    formula_type = (row["formula_type"] if isinstance(row, sqlite3.Row) else row[1]) or "sql"
+    raw_formula = _rewrite_3d_dim_aliases(conn, table_name, raw_formula)
+    if formula_type == "sql":
+        formula = normalize_self_table_refs(raw_formula, table_name)
+        refs = parse_formula_refs(formula)
+        if use_duckdb:
+            try:
+                from app.services import duckdb_compute as _dd
+
+                return _dd.collect_projection_requirements(
+                    conn,
+                    table_name=table_name,
+                    formula=formula,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        out: Dict[str, Set[str]] = {
+            table_name: _columns_for_table(
+                refs,
+                table_name,
+                target_column=column_name,
+                extra=sorted(_join_hint_columns(conn, table_name)),
+            )
+        }
+        for rt, _rc in refs:
+            out.setdefault(rt, set()).update(
+                _columns_for_table(refs, rt, extra=sorted(_join_hint_columns(conn, rt)))
+            )
+        return out
+
+    formula = normalize_self_row_refs(raw_formula, table_name)
+    try:
+        existing_cols = {row[1] for row in conn.execute(f'PRAGMA table_info("{table_name}")')}
+        existing_cols.discard("row_id")
+    except Exception:  # noqa: BLE001
+        existing_cols = set()
+    refs = parse_row_refs(formula)
+    return {table_name: (refs & existing_cols) | {column_name}}
+
+
+def _prewarm_layer_tables(
+    conn: sqlite3.Connection,
+    *,
+    layer_nodes: Sequence[Node],
+    table_cache: TableFrameCache,
+    use_duckdb: bool,
+) -> None:
+    if not layer_nodes:
+        return
+    wanted_by_table: Dict[str, Set[str]] = defaultdict(set)
+    for table_name, column_name in layer_nodes:
+        for ref_table, cols in _node_projection_requirements(
+            conn,
+            table_name=table_name,
+            column_name=column_name,
+            use_duckdb=use_duckdb,
+        ).items():
+            wanted_by_table[ref_table].update(cols)
+    for table_name in sorted(wanted_by_table):
+        load_table_df(
+            conn,
+            table_name,
+            sorted(wanted_by_table[table_name]),
+            table_cache=table_cache,
+            copy_result=False,
+        )
+
+
 def _sync_table_cache(
     table_cache: Optional[TableFrameCache],
     *,
@@ -1142,22 +1248,13 @@ def recalculate_downstream_dag(
                 # 边方向：dep → n （n 依赖 dep，所以先算 dep）
                 indeg[n] += 1
 
-    # Step 3: Kahn 拓扑
-    ready: deque = deque(sorted([n for n in nodes if indeg[n] == 0]))
-    order: List[Node] = []
-    indeg_local = dict(indeg)
-    while ready:
-        n = ready.popleft()
-        order.append(n)
-        for m in forward.get(n, []):
-            indeg_local[m] -= 1
-            if indeg_local[m] == 0:
-                ready.append(m)
-
-    cycle_nodes = [f"{t}.{c}" for (t, c), d in indeg_local.items() if d > 0]
+    # Step 3: Kahn 拓扑分层
+    layers = _topo_layers(nodes=nodes, indeg=indeg, forward=forward)
+    order = [node for layer in layers for node in layer]
+    order_set = set(order)
+    cycle_nodes = [f"{t}.{c}" for (t, c) in nodes if (t, c) not in order_set]
     if cycle_nodes:
         # 兜底：注册时已拒环，理论上不会出现；若出现，把环内节点跳过
-        order_set = set(order)
         skipped_cycle = [n for n in nodes if n not in order_set]
     else:
         skipped_cycle = []
@@ -1192,64 +1289,86 @@ def recalculate_downstream_dag(
     try:
         with timer:
             timer.set_rows(len(order))
-            for t, c in order:
-                node = (t, c)
-                blocked_by = sorted(
-                    f"{dt}.{dc}"
-                    for dt, dc in deps.get(node, set())
-                    if (dt, dc) in failed_nodes or (dt, dc) in blocked_nodes
+            use_duckdb = duckdb_session is not None
+            for layer in layers:
+                runnable: List[Node] = []
+                blocked_info: Dict[Node, List[str]] = {}
+                triggered_info: Dict[Node, List[str]] = {}
+                for node in layer:
+                    blocked_by = sorted(
+                        f"{dt}.{dc}"
+                        for dt, dc in deps.get(node, set())
+                        if (dt, dc) in failed_nodes or (dt, dc) in blocked_nodes
+                    )
+                    if blocked_by:
+                        blocked_info[node] = blocked_by
+                        continue
+                    triggered_by = sorted(
+                        f"{dt}.{dc}"
+                        for dt, dc in deps.get(node, set())
+                        if (dt, dc) in changed_nodes
+                    )
+                    triggered_info[node] = triggered_by
+                    if node in seed_set or triggered_by:
+                        runnable.append(node)
+
+                _prewarm_layer_tables(
+                    conn,
+                    layer_nodes=runnable,
+                    table_cache=table_cache,
+                    use_duckdb=use_duckdb,
                 )
-                if blocked_by:
-                    blocked_nodes.add(node)
-                    skipped.append(
-                        {
-                            "table": t,
-                            "column": c,
-                            "reason": "blocked_by_failed_dependency",
-                            "blocked_by": blocked_by,
-                        }
-                    )
-                    continue
-                triggered_by = sorted(
-                    f"{dt}.{dc}"
-                    for dt, dc in deps.get(node, set())
-                    if (dt, dc) in changed_nodes
-                )
-                is_seed_node = node in seed_set
-                if not is_seed_node and not triggered_by:
-                    skipped_unchanged += 1
-                    skipped.append(
-                        {
-                            "table": t,
-                            "column": c,
-                            "reason": "upstream_unchanged",
-                        }
-                    )
-                    continue
-                try:
-                    result = _execute_node(
-                        conn,
-                        t,
-                        c,
-                        table_cache=table_cache,
-                        duckdb_session=duckdb_session,
-                        auto_commit=False,
-                    )
-                    rows_changed = int(result.get("rows_changed", result.get("rows_updated", 0)) or 0)
-                    if rows_changed > 0:
-                        changed_nodes.add(node)
-                        total_rows_changed += rows_changed
-                    executed.append(
-                        {
-                            "table": t,
-                            "column": c,
-                            "rows_changed": rows_changed,
-                            "engine": str(result.get("engine") or ""),
-                        }
-                    )
-                except Exception as e:  # noqa: BLE001
-                    failed_nodes.add(node)
-                    errors.append(f"{t}.{c}: {e}")
+
+                for t, c in layer:
+                    node = (t, c)
+                    blocked_by = blocked_info.get(node)
+                    if blocked_by:
+                        blocked_nodes.add(node)
+                        skipped.append(
+                            {
+                                "table": t,
+                                "column": c,
+                                "reason": "blocked_by_failed_dependency",
+                                "blocked_by": blocked_by,
+                            }
+                        )
+                        continue
+                    triggered_by = triggered_info.get(node, [])
+                    is_seed_node = node in seed_set
+                    if not is_seed_node and not triggered_by:
+                        skipped_unchanged += 1
+                        skipped.append(
+                            {
+                                "table": t,
+                                "column": c,
+                                "reason": "upstream_unchanged",
+                            }
+                        )
+                        continue
+                    try:
+                        result = _execute_node(
+                            conn,
+                            t,
+                            c,
+                            table_cache=table_cache,
+                            duckdb_session=duckdb_session,
+                            auto_commit=False,
+                        )
+                        rows_changed = int(result.get("rows_changed", result.get("rows_updated", 0)) or 0)
+                        if rows_changed > 0:
+                            changed_nodes.add(node)
+                            total_rows_changed += rows_changed
+                        executed.append(
+                            {
+                                "table": t,
+                                "column": c,
+                                "rows_changed": rows_changed,
+                                "engine": str(result.get("engine") or ""),
+                            }
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        failed_nodes.add(node)
+                        errors.append(f"{t}.{c}: {e}")
             timer.add_extra(
                 errors=len(errors),
                 blocked=len(

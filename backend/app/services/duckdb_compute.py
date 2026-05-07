@@ -513,6 +513,47 @@ def _alignment_projection_columns(
     return target_cols, ref_cols
 
 
+def collect_projection_requirements(
+    conn: sqlite3.Connection,
+    *,
+    table_name: str,
+    formula: str,
+    level_column: Optional[str] = None,
+    level_min: Optional[float] = None,
+    level_max: Optional[float] = None,
+) -> Dict[str, Set[str]]:
+    try:
+        existing_cols = {row[1] for row in conn.execute(f'PRAGMA table_info("{table_name}")')}
+    except Exception as exc:
+        raise NotSupported(f"读取表结构失败：{exc}") from exc
+    used_cols, _sql_expr, _aref_map = _check_whitelist(formula, table_name, existing_cols)
+    cross_ref_map = _cross_ref_aliases(formula, table_name)
+
+    from app.services.formula_exec import _join_hint_columns
+
+    extra_level = (level_column or ("level" if (level_min is not None) else None))
+    ref_projection_cols: Dict[str, Set[str]] = {}
+    main_projection_cols: Set[str] = set(used_cols)
+    if cross_ref_map:
+        for (src_tbl, src_col), _alias in cross_ref_map.items():
+            target_cols, ref_cols = _alignment_projection_columns(
+                conn,
+                target_table=table_name,
+                ref_table=src_tbl,
+                ref_col=src_col,
+            )
+            main_projection_cols.update(target_cols)
+            ref_projection_cols.setdefault(src_tbl, set()).update(ref_cols)
+    else:
+        main_projection_cols.update(_join_hint_columns(conn, table_name))
+    if extra_level and extra_level in existing_cols:
+        main_projection_cols.add(extra_level)
+    out: Dict[str, Set[str]] = {table_name: main_projection_cols}
+    for ref_table, ref_cols in ref_projection_cols.items():
+        out.setdefault(ref_table, set()).update(ref_cols)
+    return out
+
+
 def _row_order_sql(*, row_id_expr: str, row_num_expr: str) -> str:
     rid = f"COALESCE(CAST({row_id_expr} AS VARCHAR), '')"
     numeric = f"regexp_full_match({rid}, '^-?[0-9]+$')"

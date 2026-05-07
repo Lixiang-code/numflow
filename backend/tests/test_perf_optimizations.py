@@ -920,6 +920,62 @@ def test_b6_dag_reuses_projection_cache_for_duckdb_nodes(monkeypatch):
     }
 
 
+def test_b6_dag_prewarms_layer_union_projection_for_duckdb_nodes(monkeypatch):
+    conn = _new_conn()
+    _make_table(conn, "base", "k", "x")
+    _make_table(conn, "ref", "k", "v", "w")
+    _make_table(conn, "mid", "k", "y")
+    _make_table(conn, "peer", "k", "z")
+    _insert_rows(
+        conn,
+        "base",
+        [{"row_id": f"r{i}", "k": float(i), "x": float(i)} for i in range(1, 4)],
+    )
+    _insert_rows(
+        conn,
+        "ref",
+        [{"row_id": f"r{i}", "k": float(i), "v": float(i * 10), "w": float(i * 100)} for i in range(1, 4)],
+    )
+    _insert_rows(
+        conn,
+        "mid",
+        [{"row_id": f"r{i}", "k": float(i), "y": 0.0} for i in range(1, 4)],
+    )
+    _insert_rows(
+        conn,
+        "peer",
+        [{"row_id": f"r{i}", "k": float(i), "z": 0.0} for i in range(1, 4)],
+    )
+    register_formula(conn, "mid", "y", "@base[x] + @ref[v]", defer=True)
+    register_formula(conn, "peer", "z", "@base[x] + @ref[w]", defer=True)
+    _set_perf(conn, use_duckdb_compute=True)
+
+    ref_sqls = []
+    original_read_sql_query = formula_exec.pd.read_sql_query
+
+    def _counting_read_sql_query(sql, *args, **kwargs):
+        if 'FROM "ref"' in sql:
+            ref_sqls.append(sql)
+        return original_read_sql_query(sql, *args, **kwargs)
+
+    monkeypatch.setattr(formula_exec.pd, "read_sql_query", _counting_read_sql_query)
+
+    out = recalculate_downstream_dag(conn, [("base", "x")])
+
+    assert out["errors"] == []
+    assert ref_sqls == ['SELECT "row_id", "k", "v", "w" FROM "ref"']
+    assert dict(conn.execute('SELECT row_id, y FROM mid ORDER BY row_id').fetchall()) == {
+        "r1": 11.0,
+        "r2": 22.0,
+        "r3": 33.0,
+    }
+    assert dict(conn.execute('SELECT row_id, z FROM peer ORDER BY row_id').fetchall()) == {
+        "r1": 101.0,
+        "r2": 202.0,
+        "r3": 303.0,
+    }
+
+
 def test_a5_dag_reuses_shared_table_cache_for_pandas_nodes(monkeypatch):
     conn = _new_conn()
     _make_table(conn, "base", "k", "x")
